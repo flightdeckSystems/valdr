@@ -10,6 +10,7 @@
 //! Phases 2-3 of the pilot land here.
 
 pub mod blocked;
+pub mod call_reply;
 pub mod client;
 pub mod command_context;
 pub mod commandlog;
