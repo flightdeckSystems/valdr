@@ -9,6 +9,7 @@
 //!
 //! Phases 2-3 of the pilot land here.
 
+pub mod blocked;
 pub mod client;
 pub mod command_context;
 pub mod commandlog;
@@ -18,6 +19,7 @@ pub mod latency;
 pub mod lazyfree;
 pub mod object;
 pub mod server;
+pub mod timeout;
 pub mod unix;
 
 pub use client::{Client, ClientId};
