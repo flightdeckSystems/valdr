@@ -10,6 +10,7 @@
 //! Pilot commands: PING, ECHO, HELLO, COMMAND (Phase 2); SET, GET, DEL,
 //! EXISTS, INCR (Phase 3).
 
+pub mod bitops;
 pub mod generated;
 pub mod pubsub;
 
