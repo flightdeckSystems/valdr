@@ -10,14 +10,15 @@
 # This is the cross-cutting vocabulary whose duplication fragments the
 # architecture. Per REDIS_PORT_HARNESS_SPEC.md §"Type Vocabulary".
 
-RedisServer       struct  crates/redis-core/src/server.rs           audit  TODO: define in pilot Phase 2
-Client            struct  crates/redis-core/src/client.rs           audit  TODO: define in pilot Phase 2
-RedisDb           struct  crates/redis-core/src/db.rs               audit  TODO: define in pilot Phase 3
-RedisObject       enum    crates/redis-core/src/object.rs           audit  TODO: define in pilot Phase 3
-RedisString       struct  crates/redis-types/src/string.rs          audit  TODO: byte string newtype, define in pilot Phase 2
-RespFrame         enum    crates/redis-protocol/src/frame.rs        audit  TODO: define in pilot Phase 2 (canonical RESP value)
-CommandSpec       struct  crates/redis-commands/src/spec.rs         audit  TODO: define in pilot Phase 2 (from command JSON)
-CommandContext    struct  crates/redis-core/src/command_context.rs  audit  TODO: define in pilot Phase 2 — every command takes this
+RedisServer       struct  crates/redis-core/src/server.rs           audit    TODO: define in pilot Phase 2-3
+Client            struct  crates/redis-core/src/client.rs           enforce  defined 2026-05-16 architect packet
+RedisDb           struct  crates/redis-core/src/db.rs               audit    TODO: define in pilot Phase 3
+RedisObject       enum    crates/redis-core/src/object.rs           audit    TODO: define in pilot Phase 3
+RedisString       struct  crates/redis-types/src/string.rs          enforce  defined 2026-05-16 architect packet
+RedisError        enum    crates/redis-types/src/error.rs           enforce  defined 2026-05-16 architect packet
+RespFrame         enum    crates/redis-protocol/src/frame.rs        enforce  defined 2026-05-16 architect packet
+CommandSpec       struct  crates/redis-commands/src/spec.rs         audit    TODO: define in pilot Phase 2 (from command JSON)
+CommandContext    struct  crates/redis-core/src/command_context.rs  enforce  defined 2026-05-16 architect packet
 StreamId          struct  crates/redis-ds/src/stream.rs             audit  Phase 5: streams (crate not in pilot)
 ListPack          struct  crates/redis-ds/src/listpack.rs           audit  Phase 4: data-structure encodings
 QuickList         struct  crates/redis-ds/src/quicklist.rs          audit  Phase 4: data-structure encodings

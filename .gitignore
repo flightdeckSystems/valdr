@@ -11,3 +11,4 @@ harness/oracle/test-results.json
 *.actual.bytes
 *.actual.frames
 *.diff
+__pycache__/

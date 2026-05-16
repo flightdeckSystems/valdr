@@ -62,54 +62,44 @@ PORT_AGENT_ALLOWED_TOOLS="Read,Write,Edit,Glob,Grep,Bash(cargo check*),Bash(rust
 # Required functions
 # ────────────────────────────────────────────────────────────────────────
 
-# Print one C-file path (relative to reference/valkey/) per line.
+# Print one C-file path (relative to reference/valkey/src/) per line.
+# Sources phase membership from harness/file-deps.tsv (phase column).
+# Only emits .c files (not headers); the chassis fanout translates .c
+# and headers merge into the consuming .rs.
 port_files_for_phase() {
     local phase="$1"
     case "$phase" in
-        pilot)
-            # Pilot scope per REDIS_PORT_HARNESS_SPEC.md §First Pilot:
-            # RESP parser + minimal TCP + a handful of commands.
-            # File set will expand as we learn what's actually needed.
-            printf '%s\n' \
-                networking.c \
-                resp_parser.c \
-                t_string.c
+        pilot|later|defer|skip)
+            awk -F'\t' -v p="$phase" '
+                !/^#/ && $4==p && $2!="SKIP" && $1 ~ /\.c$/ {print $1}
+            ' "$PORT_FILE_DEPS_TSV"
             ;;
+        # Subset shortcuts (TSV-derived, then filtered by name pattern)
         protocol)
-            printf '%s\n' resp_parser.c networking.c
+            awk -F'\t' '!/^#/ && ($1=="resp_parser.c" || $1=="networking.c") {print $1}' "$PORT_FILE_DEPS_TSV"
             ;;
         strings)
-            printf '%s\n' t_string.c
+            awk -F'\t' '!/^#/ && $1=="t_string.c" {print $1}' "$PORT_FILE_DEPS_TSV"
             ;;
         *)
-            echo "unknown phase: $phase" >&2
+            echo "unknown phase: $phase (try pilot, later, defer, skip, protocol, strings)" >&2
             return 1
             ;;
     esac
 }
 
 # Print one line: "<crate>\t<rust-rel-path>" (tab-separated).
-# When file-deps.tsv exists, look up there. Until it does, hardcoded.
+# Sourced from harness/file-deps.tsv (regenerate with gen-file-deps.py).
+# Skips SKIP-assigned files and emits no output for unknown files (caller treats as "no mapping").
 port_target_for_file() {
     local cfile="$1"
-    if [ -f "$PORT_FILE_DEPS_TSV" ]; then
-        awk -F'\t' -v c="$cfile" '$1==c {print $2"\t"$3; exit}' "$PORT_FILE_DEPS_TSV"
-        return 0
-    fi
-    # Fallback (until file-deps.tsv exists)
-    case "$cfile" in
-        resp_parser.c) printf 'redis-protocol\tsrc/parser.rs\n' ;;
-        networking.c)  printf 'redis-core\tsrc/networking.rs\n' ;;
-        t_string.c)    printf 'redis-commands\tsrc/string.rs\n' ;;
-        t_list.c)      printf 'redis-commands\tsrc/list.rs\n' ;;
-        t_hash.c)      printf 'redis-commands\tsrc/hash.rs\n' ;;
-        t_set.c)       printf 'redis-commands\tsrc/set.rs\n' ;;
-        t_zset.c)      printf 'redis-commands\tsrc/zset.rs\n' ;;
-        db.c)          printf 'redis-core\tsrc/db.rs\n' ;;
-        object.c)      printf 'redis-core\tsrc/object.rs\n' ;;
-        server.c)      printf 'redis-server\tsrc/server.rs\n' ;;
-        *)             return 1 ;;
-    esac
+    awk -F'\t' -v c="$cfile" '
+        !/^#/ && $1==c {
+            if ($2 == "SKIP") exit 0
+            print $2"\t"$3
+            exit 0
+        }
+    ' "$PORT_FILE_DEPS_TSV"
 }
 
 # Exit 0 if rust file is already a real port; nonzero otherwise.

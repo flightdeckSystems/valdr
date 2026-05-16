@@ -1,11 +1,18 @@
 //! Cross-cutting type vocabulary owned by `redis-types`.
 //!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `RedisString` (TODO: byte-string newtype)
+//!   - `RedisString` — `src/string.rs`
+//!   - `RedisError`  — `src/error.rs`
 //!
-//! Other types in the vocabulary live in other crates by design; see the
+//! Other vocabulary types live in other crates by design; see the
 //! registry. This crate is the foundation: no dependencies on other
 //! port crates.
+
+pub mod string;
+pub mod error;
+
+pub use error::{RedisError, RedisResult};
+pub use string::RedisString;
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

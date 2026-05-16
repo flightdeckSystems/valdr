@@ -1,9 +1,13 @@
 //! RESP2/RESP3 parser and serializer.
 //!
 //! Owners (per `harness/type-vocabulary.tsv`):
-//!   - `RespFrame` (TODO: enum covering RESP2 + RESP3 frame kinds)
+//!   - `RespFrame` — `src/frame.rs`
 //!
 //! Phase 2 of the pilot lives here.
+
+pub mod frame;
+
+pub use frame::{RespFrame, encode_resp2};
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
