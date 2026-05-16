@@ -113,14 +113,29 @@ run_one() {
     local cfile="$1"
     local before_cost="$TOTAL_COST"
 
-    # Ensure clean tree before each iteration (so we can detect this iter's diff).
-    # Stash WITHOUT -u: untracked harness/loop/ state dir must persist.
+    # Ensure clean tree before each iteration.
+    # 1. Stash uncommitted TRACKED state (loop's own state dir is gitignored).
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
         emit "  WARN: uncommitted tracked state going into iter; stashing"
         git stash push -m "translate_loop: pre-iter stash $(date -u +%FT%T)" >/dev/null 2>&1 || true
     fi
+    # 2. Quarantine any untracked .rs files left by a previous failed iter
+    #    (hook-failure leaves the agent's output in the worktree but
+    #    uncommitted; without this, fanout's preflight refuses dirty tree).
+    local quarantine="harness/loop/quarantine"
+    mkdir -p "$quarantine"
+    local orphan_files; orphan_files=$(git ls-files --others --exclude-standard 'crates/**/*.rs' 2>/dev/null)
+    if [ -n "$orphan_files" ]; then
+        emit "  quarantining untracked .rs from previous iter:"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            local dest="$quarantine/$(basename "$f").$(date -u +%s)"
+            mv "$f" "$dest"
+            emit "    $f → $dest"
+        done <<< "$orphan_files"
+    fi
 
-    "$CHASSIS/fanout.sh" --files "$cfile" >>"$LOG" 2>&1
+    "$CHASSIS/fanout.sh" --files "$cfile" --allow-dirty >>"$LOG" 2>&1
     local rc=$?
 
     # Extract this iter's row from pilot.jsonl (last matching line)
