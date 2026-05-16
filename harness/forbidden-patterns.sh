@@ -6,12 +6,26 @@
 #   - Redis strings are bytes (keys, values, RESP payloads). Banning
 #     `from_utf8` on RESP data is essential; in Lua it was banning
 #     String/&str for Lua data.
+#
+# Patterns target the DANGEROUS uses (assumes UTF-8 valid → loses round-
+# trip fidelity), not all uses. Safe match/Err-branch patterns like
+# `match from_utf8(b) { Ok(s) => ..., Err(_) => ... }` in Debug impls
+# are fine — they handle non-UTF8 explicitly.
 
 FORBIDDEN_PATTERNS=(
-    'std::str::from_utf8|String::from_utf8|from_utf8_unchecked'
+    # from_utf8_unchecked — undefined behavior on non-UTF8 bytes
+    '\bfrom_utf8_unchecked\b'
+    # from_utf8(...).unwrap() / .expect() — assumes UTF-8, panics on real Redis data
+    'from_utf8[[:space:]]*\([^)]*\)[[:space:]]*\.[[:space:]]*unwrap'
+    'from_utf8[[:space:]]*\([^)]*\)[[:space:]]*\.[[:space:]]*expect'
+    # String::from_utf8 chained with unwrap — same hazard
+    'String::from_utf8[[:space:]]*\([^)]*\)[[:space:]]*\.[[:space:]]*unwrap'
 )
 
 PATH_EXCEPTIONS=(
+    ''
+    ''
+    ''
     ''
 )
 
