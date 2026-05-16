@@ -15,6 +15,7 @@ pub mod connection;
 pub mod db;
 pub mod object;
 pub mod server;
+pub mod unix;
 
 pub use client::{Client, ClientId};
 pub use command_context::CommandContext;
