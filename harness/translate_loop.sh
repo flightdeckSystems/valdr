@@ -113,10 +113,11 @@ run_one() {
     local cfile="$1"
     local before_cost="$TOTAL_COST"
 
-    # Ensure clean tree before each iteration (so we can detect this iter's diff)
-    if [ -n "$(git status --porcelain)" ]; then
-        emit "  WARN: uncommitted state going into iter; stashing"
-        git stash push -u -m "translate_loop: pre-iter stash $(date -u +%FT%T)" >/dev/null 2>&1 || true
+    # Ensure clean tree before each iteration (so we can detect this iter's diff).
+    # Stash WITHOUT -u: untracked harness/loop/ state dir must persist.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        emit "  WARN: uncommitted tracked state going into iter; stashing"
+        git stash push -m "translate_loop: pre-iter stash $(date -u +%FT%T)" >/dev/null 2>&1 || true
     fi
 
     "$CHASSIS/fanout.sh" --files "$cfile" >>"$LOG" 2>&1
