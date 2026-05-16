@@ -1,0 +1,15 @@
+# Per-crate unsafe-block ceilings. Enforced by the chassis unsafe-budget hook.
+#
+# Default ceiling for unlisted crates: 0. Raising a ceiling requires
+# editing this file in a commit that explains why.
+#
+# Pilot crates: all start at 0 (no unsafe expected for byte-string parsing,
+# command dispatch, in-memory data). Later crates that wrap OS / modules
+# ABI will get raised ceilings.
+
+[crates]
+"redis-types"     = 0
+"redis-protocol"  = 0
+"redis-core"      = 0
+"redis-commands"  = 0
+"redis-server"    = 0

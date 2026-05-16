@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/redis-types",
+    "crates/redis-protocol",
+    "crates/redis-core",
+    "crates/redis-commands",
+    "crates/redis-server",
+]
+
+[workspace.package]
+edition = "2021"
+license = "BSD-3-Clause"
+repository = "https://github.com/valkey-io/valkey"
+
+[workspace.dependencies]
+redis-types = { path = "crates/redis-types" }
+redis-protocol = { path = "crates/redis-protocol" }
+redis-core = { path = "crates/redis-core" }
+redis-commands = { path = "crates/redis-commands" }

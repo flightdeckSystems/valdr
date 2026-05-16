@@ -1,0 +1,13 @@
+target/
+**/*.rs.bk
+Cargo.lock
+
+reference/valkey/
+
+.DS_Store
+
+harness/oracle/results/
+harness/oracle/test-results.json
+*.actual.bytes
+*.actual.frames
+*.diff
