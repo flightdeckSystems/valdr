@@ -193,6 +193,24 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"SUNIONSTORE", handler: crate::set::sunionstore_command },
     DispatchEntry { name: b"SDIFF", handler: crate::set::sdiff_command },
     DispatchEntry { name: b"SDIFFSTORE", handler: crate::set::sdiffstore_command },
+    // ── ZSET (Round 5) ─────────────────────────────────────────────────────
+    DispatchEntry { name: b"ZADD", handler: crate::zset::zadd_command },
+    DispatchEntry { name: b"ZSCORE", handler: crate::zset::zscore_command },
+    DispatchEntry { name: b"ZMSCORE", handler: crate::zset::zmscore_command },
+    DispatchEntry { name: b"ZCARD", handler: crate::zset::zcard_command },
+    DispatchEntry { name: b"ZINCRBY", handler: crate::zset::zincrby_command },
+    DispatchEntry { name: b"ZRANGE", handler: crate::zset::zrange_command },
+    DispatchEntry { name: b"ZRANGEBYSCORE", handler: crate::zset::zrangebyscore_command },
+    DispatchEntry { name: b"ZREVRANGE", handler: crate::zset::zrevrange_command },
+    DispatchEntry { name: b"ZREVRANGEBYSCORE", handler: crate::zset::zrevrangebyscore_command },
+    DispatchEntry { name: b"ZRANK", handler: crate::zset::zrank_command },
+    DispatchEntry { name: b"ZREVRANK", handler: crate::zset::zrevrank_command },
+    DispatchEntry { name: b"ZREM", handler: crate::zset::zrem_command },
+    DispatchEntry { name: b"ZCOUNT", handler: crate::zset::zcount_command },
+    DispatchEntry { name: b"ZPOPMIN", handler: crate::zset::zpopmin_command },
+    DispatchEntry { name: b"ZPOPMAX", handler: crate::zset::zpopmax_command },
+    DispatchEntry { name: b"ZREMRANGEBYRANK", handler: crate::zset::zremrangebyrank_command },
+    DispatchEntry { name: b"ZREMRANGEBYSCORE", handler: crate::zset::zremrangebyscore_command },
 ];
 
 #[cfg(test)]

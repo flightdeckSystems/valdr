@@ -1,0 +1,47 @@
+[class: byte_exact]
+[description: ZSET family — ZADD ZSCORE ZMSCORE ZCARD ZINCRBY ZRANGE ZRANGEBYSCORE ZREVRANGE ZREVRANGEBYSCORE ZRANK ZREVRANK ZREM ZCOUNT ZPOPMIN ZPOPMAX with deterministic integer scores]
+[suite: smoke,zset]
+
+FLUSHDB
+ZADD z 1 a 2 b 3 c
+ZADD z 1 a 10 d
+ZCARD z
+ZSCORE z a
+ZSCORE z missing
+ZMSCORE z a b missing
+ZRANK z a
+ZRANK z c
+ZRANK z missing
+ZREVRANK z d
+ZRANGE z 0 -1
+ZRANGE z 0 -1 WITHSCORES
+ZRANGE z 1 2
+ZREVRANGE z 0 1
+ZRANGEBYSCORE z 2 3
+ZRANGEBYSCORE z (1 3
+ZRANGEBYSCORE z -inf +inf
+ZCOUNT z 1 2
+ZCOUNT z (1 (3
+ZINCRBY z 5 a
+ZSCORE z a
+ZREM z a c
+ZCARD z
+ZPOPMIN z
+ZPOPMAX z
+EXISTS z
+ZADD nx NX 1 a
+ZADD nx NX 5 a
+ZSCORE nx a
+ZADD nx XX 10 a
+ZSCORE nx a
+ZADD nx GT 5 a
+ZSCORE nx a
+ZADD nx INCR 3 a
+ZADD t 1 b 1 a 1 c
+ZRANGE t 0 -1
+ZADD ch CH 1 a 5 b 3 c
+SET str hi
+ZADD str 1 a
+TYPE str
+FLUSHDB
+DBSIZE

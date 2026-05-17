@@ -20,7 +20,7 @@
 // C: object.c:31-41 (includes)
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use redis_types::{RedisError, RedisString};
 
@@ -146,9 +146,129 @@ pub enum SetEncoding {
     HashTable(HashSet<RedisString>),
 }
 
+/// Total-ordering wrapper around `f64` for use in `BTreeSet` keys.
+///
+/// Redis rejects NaN scores at the parsing boundary so the wrapped value
+/// is always non-NaN by construction. Equality and ordering use
+/// `f64::total_cmp`, which provides a total order across `+/-0`, `inf`,
+/// and finite values matching the deterministic ordering Redis presents
+/// to clients.
+#[derive(Debug, Clone, Copy)]
+pub struct F64Ord(pub f64);
+
+impl F64Ord {
+    /// Returns the wrapped score as an `f64`.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl PartialEq for F64Ord {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0).is_eq()
+    }
+}
+
+impl Eq for F64Ord {}
+
+impl PartialOrd for F64Ord {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for F64Ord {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// Pragmatic Phase-B sorted-set storage mirroring real Redis's dict + skiplist.
+///
+/// The `by_member` map provides O(1) score lookup by member; the
+/// `by_order` set provides O(log N) ordered traversal in
+/// `(score, member)` lex order. All mutations must update both maps in
+/// lockstep so the two views stay coherent.
+#[derive(Debug, Clone, Default)]
+pub struct InlineZSet {
+    /// Score keyed by member.
+    pub by_member: HashMap<RedisString, F64Ord>,
+    /// Lex-sorted `(score, member)` pairs for ordered range scans.
+    pub by_order: BTreeSet<(F64Ord, RedisString)>,
+}
+
+impl InlineZSet {
+    /// Construct an empty sorted set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the number of members in the sorted set.
+    pub fn len(&self) -> usize {
+        self.by_member.len()
+    }
+
+    /// Returns `true` when the sorted set has no members.
+    pub fn is_empty(&self) -> bool {
+        self.by_member.is_empty()
+    }
+
+    /// Returns the score associated with `member`, if present.
+    pub fn score(&self, member: &RedisString) -> Option<f64> {
+        self.by_member.get(member).map(|s| s.get())
+    }
+
+    /// Returns `true` when `member` is present in the sorted set.
+    pub fn contains(&self, member: &RedisString) -> bool {
+        self.by_member.contains_key(member)
+    }
+
+    /// Insert or update `(member, score)`.
+    ///
+    /// Returns `(was_new, prev_score)` so callers can implement the
+    /// `ZADD CH` and `XX/NX/GT/LT` semantics by inspecting whether the
+    /// member existed and what its score was before the update.
+    pub fn upsert(&mut self, member: RedisString, score: f64) -> (bool, Option<f64>) {
+        let new = F64Ord(score);
+        if let Some(prev) = self.by_member.get(&member).copied() {
+            if prev.get().to_bits() == score.to_bits() {
+                return (false, Some(prev.get()));
+            }
+            self.by_order.remove(&(prev, member.clone()));
+            self.by_order.insert((new, member.clone()));
+            self.by_member.insert(member, new);
+            (false, Some(prev.get()))
+        } else {
+            self.by_order.insert((new, member.clone()));
+            self.by_member.insert(member, new);
+            (true, None)
+        }
+    }
+
+    /// Remove `member`, returning its score if it was present.
+    pub fn remove(&mut self, member: &RedisString) -> Option<f64> {
+        let prev = self.by_member.remove(member)?;
+        self.by_order.remove(&(prev, member.clone()));
+        Some(prev.get())
+    }
+
+    /// Iterate `(score, member)` pairs in ascending order.
+    pub fn iter_ascending(&self) -> impl DoubleEndedIterator<Item = (f64, &RedisString)> {
+        self.by_order.iter().map(|(s, m)| (s.get(), m))
+    }
+}
+
 /// Encoding sub-variants for `RedisObject::ZSet`.
 #[derive(Debug, Clone)]
 pub enum ZSetEncoding {
+    /// Pragmatic interim encoding used by the in-tree zset commands.
+    ///
+    /// Mirrors real Redis's dict + zskiplist pair via `HashMap` for O(1)
+    /// member-keyed score lookup and `BTreeSet` for O(log N) ordered
+    /// traversal. Phase 4 swaps this for the real `redis_ds::ZSet`
+    /// (skiplist + hashtable) once that crate ships the underlying
+    /// datastructures.
+    Inline(InlineZSet),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     ListPack(Vec<u8>),
     /// Skip-list + hash-table pair (OBJ_ENCODING_SKIPLIST).
@@ -474,6 +594,35 @@ impl RedisObject {
         Self::bare(ObjectKind::ZSet(ZSetEncoding::ListPack(Vec::new())))
     }
 
+    /// Create an empty sorted-set object with the pragmatic Inline encoding.
+    ///
+    /// Phase 4 will replace this with the real `redis-ds` encodings
+    /// (ListPack for small zsets, SkipList for larger ones). For now the
+    /// `Inline` `InlineZSet` is the single working encoding used by every
+    /// zset command in the redis-commands crate.
+    pub fn new_zset() -> Self {
+        Self::bare(ObjectKind::ZSet(ZSetEncoding::Inline(InlineZSet::new())))
+    }
+
+    /// Borrow the inner `InlineZSet` for a zset-encoded object.
+    ///
+    /// Returns `None` for non-zset objects and for the stub `ListPack` /
+    /// `SkipList` encodings that this round does not populate.
+    pub fn zset(&self) -> Option<&InlineZSet> {
+        match &self.kind {
+            ObjectKind::ZSet(ZSetEncoding::Inline(z)) => Some(z),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner `InlineZSet` for a zset-encoded object.
+    pub fn zset_mut(&mut self) -> Option<&mut InlineZSet> {
+        match &mut self.kind {
+            ObjectKind::ZSet(ZSetEncoding::Inline(z)) => Some(z),
+            _ => None,
+        }
+    }
+
     /// Create a stream object.
     /// C: createStreamObject() → object.c:541
     pub fn new_stream() -> Self {
@@ -540,6 +689,7 @@ impl RedisObject {
             ObjectKind::Set(SetEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Set(SetEncoding::IntSet(_)) => "intset",
             ObjectKind::Set(SetEncoding::ListPack(_)) => "listpack",
+            ObjectKind::ZSet(ZSetEncoding::Inline(_)) => "skiplist",
             ObjectKind::ZSet(ZSetEncoding::SkipList(_)) => "skiplist",
             ObjectKind::ZSet(ZSetEncoding::ListPack(_)) => "listpack",
             ObjectKind::Hash(HashEncoding::HashTable(_)) => "hashtable",
@@ -1285,6 +1435,13 @@ pub fn object_compute_size(
             std::mem::size_of::<RedisObject>()
                 + ht.iter().map(|s| s.len() + std::mem::size_of::<usize>()).sum::<usize>()
         }
+        ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
+            std::mem::size_of::<RedisObject>()
+                + z.by_member
+                    .iter()
+                    .map(|(m, _)| m.len() + std::mem::size_of::<f64>())
+                    .sum::<usize>()
+        }
         ObjectKind::ZSet(ZSetEncoding::ListPack(lp)) => {
             std::mem::size_of::<RedisObject>() + lp.len()
         }
@@ -1545,6 +1702,7 @@ impl RedisObject {
             ObjectKind::Set(SetEncoding::HashTable(h))   => h.len(),
             ObjectKind::Set(SetEncoding::IntSet(v))      => v.len(),
             ObjectKind::Set(SetEncoding::ListPack(_))    => 0,
+            ObjectKind::ZSet(ZSetEncoding::Inline(z))    => z.len(),
             ObjectKind::ZSet(ZSetEncoding::SkipList(v))  => v.len(),
             ObjectKind::ZSet(ZSetEncoding::ListPack(_))  => 0,
             ObjectKind::Hash(HashEncoding::HashTable(h)) => h.len(),
@@ -1581,6 +1739,9 @@ impl RedisObject {
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_zset(&self) -> Box<dyn Iterator<Item = (&RedisString, f64)> + '_> {
         match &self.kind {
+            ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
+                Box::new(z.by_order.iter().map(|(s, m)| (m, s.get())))
+            }
             ObjectKind::ZSet(ZSetEncoding::SkipList(v)) => {
                 Box::new(v.iter().map(|(m, s)| (m, *s)))
             }

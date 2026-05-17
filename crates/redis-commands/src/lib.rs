@@ -21,6 +21,7 @@ pub mod pubsub;
 pub mod set;
 pub mod stream;
 pub mod string;
+pub mod zset;
 
 pub use dispatch::{dispatch, lookup_command, DispatchEntry, Handler};
 
