@@ -9,9 +9,13 @@
 //!
 //! Phases 2-3 of the pilot land here.
 
+pub mod evict;
+pub mod monotonic;
 pub mod blocked;
+pub mod memory_prefetch;
 pub mod localtime;
 pub mod defrag;
+pub mod logreqres;
 pub mod client;
 pub mod expire;
 pub mod command_context;

@@ -6,6 +6,7 @@
 
 use crate::db::RedisDb;
 use crate::client::ClientId;
+use crate::evict::EvictionPool;
 
 #[derive(Debug)]
 pub struct RedisServer {
@@ -17,6 +18,10 @@ pub struct RedisServer {
     pub port: u16,
     /// Single-source-of-truth config flags (more land later).
     pub config: ServerConfig,
+    /// LRU/LFU eviction candidate pool.
+    /// C: static struct evictionPoolEntry *EvictionPoolLRU — evict.c:64
+    /// TODO(port): initialise via eviction_pool_alloc() in server startup path.
+    pub eviction_pool: EvictionPool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -35,11 +40,13 @@ impl Default for RedisServer {
 
 impl RedisServer {
     pub fn new(port: u16) -> Self {
+        use crate::evict::eviction_pool_alloc;
         Self {
             next_client_id: 0,
             dbs: vec![RedisDb::new(0)],
             port,
             config: ServerConfig::default(),
+            eviction_pool: eviction_pool_alloc(),
         }
     }
 
