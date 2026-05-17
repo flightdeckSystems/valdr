@@ -10,6 +10,7 @@
 //! Phases 2-3 of the pilot land here.
 
 pub mod blocked;
+pub mod localtime;
 pub mod defrag;
 pub mod client;
 pub mod expire;
