@@ -24,6 +24,7 @@ pub mod hashtable;
 pub mod intset;
 pub mod kvstore;
 pub mod listpack;
+pub mod pqsort;
 pub mod quicklist;
 pub mod rax;
 pub mod stream;
