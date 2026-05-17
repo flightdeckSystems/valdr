@@ -79,7 +79,9 @@ fn ascii_lower(b: u8) -> u8 {
 /// Wave A placeholder handler that returns `Err(RedisError::runtime(b"ERR …"))`.
 ///
 /// Handler bodies in Waves B/C/D will replace these one by one. Routing to
-/// the stub proves the table is wired correctly.
+/// the stub proves the table is wired correctly. Retained for new commands
+/// scaffolded but not yet implemented.
+#[allow(dead_code)]
 fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let name = ctx.client_ref().arg(0).map(|s| s.as_bytes().to_vec()).unwrap_or_default();
     let mut msg = Vec::with_capacity(b"ERR command not implemented yet: ".len() + name.len());
@@ -102,9 +104,14 @@ fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"PING", handler: crate::connection::ping_command },
     DispatchEntry { name: b"ECHO", handler: crate::connection::echo_command },
-    DispatchEntry { name: b"HELLO", handler: unimplemented_handler },
-    DispatchEntry { name: b"COMMAND", handler: unimplemented_handler },
-    DispatchEntry { name: b"QUIT", handler: unimplemented_handler },
+    DispatchEntry { name: b"HELLO", handler: crate::connection::hello_command },
+    DispatchEntry { name: b"COMMAND", handler: crate::connection::command_command },
+    DispatchEntry { name: b"QUIT", handler: crate::connection::quit_command },
+    DispatchEntry { name: b"SELECT", handler: crate::connection::select_command },
+    DispatchEntry { name: b"CLIENT", handler: crate::connection::client_command },
+    DispatchEntry { name: b"DEBUG", handler: crate::connection::debug_command },
+    DispatchEntry { name: b"TIME", handler: crate::connection::time_command },
+    DispatchEntry { name: b"RESET", handler: crate::connection::reset_command },
     DispatchEntry { name: b"SET", handler: crate::string::set_command },
     DispatchEntry { name: b"GET", handler: crate::string::get_command },
     DispatchEntry { name: b"DEL", handler: redis_core::db::del_command },
@@ -113,6 +120,30 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"DECR", handler: crate::string::decr_command },
     DispatchEntry { name: b"INCRBY", handler: crate::string::incrby_command },
     DispatchEntry { name: b"DECRBY", handler: crate::string::decrby_command },
+    // ── GENERIC-KEY-OPS (Round 1, agent E2) ────────────────────────────────
+    DispatchEntry { name: b"TYPE", handler: redis_core::db::type_command },
+    DispatchEntry { name: b"RENAME", handler: redis_core::db::rename_command },
+    DispatchEntry { name: b"RENAMENX", handler: redis_core::db::renamenx_command },
+    DispatchEntry { name: b"RANDOMKEY", handler: redis_core::db::randomkey_command },
+    DispatchEntry { name: b"DBSIZE", handler: redis_core::db::dbsize_command },
+    DispatchEntry { name: b"FLUSHDB", handler: redis_core::db::flushdb_command },
+    DispatchEntry { name: b"FLUSHALL", handler: redis_core::db::flushall_command },
+    DispatchEntry { name: b"TOUCH", handler: redis_core::db::touch_command },
+    DispatchEntry { name: b"UNLINK", handler: redis_core::db::unlink_command },
+    DispatchEntry { name: b"KEYS", handler: redis_core::db::keys_command },
+    DispatchEntry { name: b"COPY", handler: redis_core::db::copy_command },
+    // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
+    DispatchEntry { name: b"APPEND", handler: crate::string::append_command },
+    DispatchEntry { name: b"STRLEN", handler: crate::string::strlen_command },
+    DispatchEntry { name: b"MGET", handler: crate::string::mget_command },
+    DispatchEntry { name: b"MSET", handler: crate::string::mset_command },
+    DispatchEntry { name: b"MSETNX", handler: crate::string::msetnx_command },
+    DispatchEntry { name: b"SETNX", handler: crate::string::setnx_command },
+    DispatchEntry { name: b"GETSET", handler: crate::string::getset_command },
+    DispatchEntry { name: b"GETDEL", handler: crate::string::getdel_command },
+    DispatchEntry { name: b"GETRANGE", handler: crate::string::getrange_command },
+    DispatchEntry { name: b"SETRANGE", handler: crate::string::setrange_command },
+    DispatchEntry { name: b"SUBSTR", handler: crate::string::getrange_command },
 ];
 
 #[cfg(test)]
@@ -152,13 +183,10 @@ mod tests {
         let mut c = Client::new(1);
         c.set_args(vec![RedisString::from_bytes(b"HELLO")]);
         let mut ctx = CommandContext::new(&mut c);
-        let err = dispatch(&mut ctx).unwrap_err();
-        match err {
-            RedisError::Runtime(s) => {
-                assert!(s.as_bytes().starts_with(b"ERR command not implemented yet"));
-            }
-            _ => panic!("expected Runtime error"),
-        }
+        dispatch(&mut ctx).unwrap();
+        let reply = c.drain_reply();
+        assert!(reply.starts_with(b"*"));
+        assert!(reply.windows(b"server".len()).any(|w| w == b"server"));
     }
 
     #[test]

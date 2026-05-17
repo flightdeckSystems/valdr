@@ -13,7 +13,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 
 use redis_commands::dispatch;
@@ -111,7 +111,8 @@ fn main() {
     eprintln!("redis-server: listening on {}", addr);
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
-    serve(listener, shutdown, db);
+    let next_client_id = Arc::new(AtomicU64::new(1));
+    serve(listener, shutdown, db, next_client_id);
 }
 
 /// Best-effort SIGINT/SIGTERM handler. Without any signal-handling deps we
@@ -125,7 +126,12 @@ fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {
 }
 
 /// Accept loop. One std::thread per accepted connection.
-fn serve(listener: TcpListener, shutdown: Arc<AtomicBool>, db: Arc<Mutex<RedisDb>>) {
+fn serve(
+    listener: TcpListener,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    next_client_id: Arc<AtomicU64>,
+) {
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("redis-server: shutdown requested, exiting accept loop");
@@ -142,9 +148,10 @@ fn serve(listener: TcpListener, shutdown: Arc<AtomicBool>, db: Arc<Mutex<RedisDb
                     .unwrap_or_else(|_| "<unknown>".to_string());
                 let shutdown = Arc::clone(&shutdown);
                 let db = Arc::clone(&db);
+                let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("client-{}", peer))
-                    .spawn(move || handle_connection(stream, shutdown, db));
+                    .spawn(move || handle_connection(stream, shutdown, db, id, peer));
             }
             Err(e) => {
                 eprintln!("redis-server: accept failed: {}", e);
@@ -158,8 +165,16 @@ fn serve(listener: TcpListener, shutdown: Arc<AtomicBool>, db: Arc<Mutex<RedisDb
 
 /// Per-connection event loop. Reads from the socket, feeds the incremental
 /// parser, dispatches each completed command, writes the reply.
-fn handle_connection(stream: TcpStream, shutdown: Arc<AtomicBool>, db: Arc<Mutex<RedisDb>>) {
+fn handle_connection(
+    stream: TcpStream,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    id: u64,
+    peer_addr: String,
+) {
     let mut client = Client::with_connection(Connection::Tcp(stream));
+    client.id = id;
+    client.addr = Some(peer_addr);
     let mut read_buf = [0u8; 16 * 1024];
 
     loop {
@@ -198,9 +213,17 @@ fn handle_connection(stream: TcpStream, shutdown: Arc<AtomicBool>, db: Arc<Mutex
             if !flush_reply(&mut client) {
                 return;
             }
+
+            if client.should_close {
+                return;
+            }
         }
 
         if !flush_reply(&mut client) {
+            return;
+        }
+
+        if client.should_close {
             return;
         }
     }

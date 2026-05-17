@@ -285,9 +285,22 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// SETNX key value
 ///
+/// Sets `key` to `value` only if `key` is not yet present. Replies `:1`
+/// when applied, `:0` when the key already existed.
+///
 /// C: `setnxCommand` (t_string.c:267).
 pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:267, setnxCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"setnx"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let value = ctx.arg_owned(2usize)?;
+    if ctx.db_mut().lookup_key_write(&key).is_some() {
+        return ctx.reply_integer(0);
+    }
+    let obj = RedisObject::new_raw_string(value.as_bytes());
+    ctx.db_mut().set_key(key, obj, 0);
+    ctx.reply_integer(1)
 }
 
 /// SETEX key seconds value
@@ -342,53 +355,246 @@ pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     todo!("C: t_string.c:340, getexCommand")
 }
 
-/// GETDEL key — get value then delete.
+/// GETDEL key — atomic get-then-delete.
+///
+/// Replies with the bulk-string value held by `key` and deletes the key.
+/// A missing key returns a null bulk; a non-string key yields WRONGTYPE.
 ///
 /// C: `getdelCommand` (t_string.c:395).
 pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:395, getdelCommand")
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"getdel"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
+        None => None,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    match bytes {
+        None => ctx.reply_null_bulk(),
+        Some(b) => {
+            ctx.db_mut().sync_delete(&key);
+            ctx.reply_bulk_string(RedisString::from_bytes(&b))
+        }
+    }
 }
 
 /// GETSET key value — atomic get-and-set (deprecated; use SET … GET instead).
 ///
+/// Returns the previous bulk-string value at `key` and stores `value`. A
+/// missing key returns a null bulk and is created. A non-string previous
+/// value yields WRONGTYPE without modifying the keyspace.
+///
 /// C: `getsetCommand` (t_string.c:408).
 pub fn getset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:408, getsetCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"getset"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let value = ctx.arg_owned(2usize)?;
+    let prev: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
+        None => None,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    let obj = RedisObject::new_raw_string(value.as_bytes());
+    ctx.db_mut().set_key(key, obj, 0);
+    match prev {
+        None => ctx.reply_null_bulk(),
+        Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
+    }
 }
 
 /// SETRANGE key offset value
 ///
+/// Overwrites the string at `key` starting at `offset`, zero-padding when
+/// the offset extends past the current length. Replies with the resulting
+/// string length. If the key is missing and `value` is empty, the key is
+/// not created and `:0` is returned. A non-string `key` yields WRONGTYPE.
+///
 /// C: `setrangeCommand` (t_string.c:432).
 pub fn setrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:432, setrangeCommand")
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"setrange"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let offset_raw = ctx.arg_owned(2usize)?;
+    let value = ctx.arg_owned(3usize)?;
+    let offset = parse_strict_i64(offset_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    if offset < 0 {
+        return Err(RedisError::runtime(b"ERR offset is out of range"));
+    }
+    let offset = offset as usize;
+    let value_bytes = value.as_bytes();
+    let existing: Option<Vec<u8>> = match ctx.db_mut().lookup_key_write(&key) {
+        None => None,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    match existing {
+        None => {
+            if value_bytes.is_empty() {
+                return ctx.reply_integer(0);
+            }
+            let total = offset + value_bytes.len();
+            let mut buf = vec![0u8; total];
+            buf[offset..offset + value_bytes.len()].copy_from_slice(value_bytes);
+            let obj = RedisObject::new_raw_string(&buf);
+            ctx.db_mut().set_key(key, obj, 0);
+            ctx.reply_integer(total as i64)
+        }
+        Some(mut buf) => {
+            if value_bytes.is_empty() {
+                return ctx.reply_integer(buf.len() as i64);
+            }
+            let needed = offset + value_bytes.len();
+            if buf.len() < needed {
+                buf.resize(needed, 0);
+            }
+            buf[offset..offset + value_bytes.len()].copy_from_slice(value_bytes);
+            let new_len = buf.len() as i64;
+            let stored = RedisObject::new_raw_string(&buf);
+            ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+            ctx.reply_integer(new_len)
+        }
+    }
 }
 
 /// GETRANGE key start end  (also aliased as SUBSTR)
 ///
+/// Returns the substring of the string value at `key` bounded by the
+/// inclusive byte indices `start` and `end`. Negative indices count from
+/// the end of the string. Missing keys reply with an empty bulk string;
+/// non-string values yield WRONGTYPE.
+///
 /// C: `getrangeCommand` (t_string.c:489).
 pub fn getrange_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:489, getrangeCommand")
+    if ctx.arg_count() != 4 {
+        return Err(RedisError::wrong_number_of_args(b"getrange"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let start_raw = ctx.arg_owned(2usize)?;
+    let end_raw = ctx.arg_owned(3usize)?;
+    let start = parse_strict_i64(start_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    let end = parse_strict_i64(end_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    let bytes: Vec<u8> = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
+        None => return ctx.reply_bulk_string(RedisString::from_bytes(b"")),
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => obj.as_bytes().to_vec(),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    let len = bytes.len() as i64;
+    if len == 0 {
+        return ctx.reply_bulk_string(RedisString::from_bytes(b""));
+    }
+    let mut s = if start < 0 { start + len } else { start };
+    let mut e = if end < 0 { end + len } else { end };
+    if s < 0 { s = 0; }
+    if e < 0 { e = 0; }
+    if e >= len { e = len - 1; }
+    if s > e || s >= len {
+        return ctx.reply_bulk_string(RedisString::from_bytes(b""));
+    }
+    let slice = &bytes[s as usize..=e as usize];
+    ctx.reply_bulk_string(RedisString::from_bytes(slice))
 }
 
 /// MGET key [key …]
 ///
+/// Replies with an array whose elements are each either the string value
+/// at the corresponding key or null when the key is missing or holds a
+/// non-string value.
+///
 /// C: `mgetCommand` (t_string.c:530).
 pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:530, mgetCommand")
+    let argc = ctx.arg_count();
+    if argc < 2 {
+        return Err(RedisError::wrong_number_of_args(b"mget"));
+    }
+    let mut keys: Vec<RedisString> = Vec::with_capacity(argc - 1);
+    for j in 1..argc {
+        keys.push(ctx.arg_owned(j)?);
+    }
+    let mut values: Vec<Option<Vec<u8>>> = Vec::with_capacity(keys.len());
+    for key in &keys {
+        let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(key, LOOKUP_NONE) {
+            None => None,
+            Some(obj) => match &obj.kind {
+                ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+                _ => None,
+            },
+        };
+        values.push(bytes);
+    }
+    ctx.reply_array_header(values.len())?;
+    for v in values {
+        match v {
+            None => ctx.reply_null_bulk()?,
+            Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b))?,
+        }
+    }
+    Ok(())
 }
 
 /// MSET key value [key value …]
 ///
+/// Atomically sets every key-value pair. Always replies `+OK`. An odd
+/// number of key/value tokens yields a syntax error.
+///
 /// C: `msetCommand` (t_string.c:592).
 pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:592, msetCommand")
+    let argc = ctx.arg_count();
+    if argc < 3 || argc % 2 == 0 {
+        return Err(RedisError::wrong_number_of_args(b"mset"));
+    }
+    let mut j = 1;
+    while j < argc {
+        let key = ctx.arg_owned(j)?;
+        let value = ctx.arg_owned(j + 1)?;
+        let obj = RedisObject::new_raw_string(value.as_bytes());
+        ctx.db_mut().set_key(key, obj, 0);
+        j += 2;
+    }
+    ctx.reply_simple_string(b"OK")
 }
 
 /// MSETNX key value [key value …]
 ///
+/// Sets every supplied pair only when none of the named keys already
+/// exists. Replies `:1` if applied, `:0` if any key existed.
+///
 /// C: `msetnxCommand` (t_string.c:597).
 pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:597, msetnxCommand")
+    let argc = ctx.arg_count();
+    if argc < 3 || argc % 2 == 0 {
+        return Err(RedisError::wrong_number_of_args(b"msetnx"));
+    }
+    let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 1) / 2);
+    let mut j = 1;
+    while j < argc {
+        let key = ctx.arg_owned(j)?;
+        let value = ctx.arg_owned(j + 1)?;
+        pairs.push((key, value));
+        j += 2;
+    }
+    for (key, _) in &pairs {
+        if ctx.db_mut().lookup_key_write(key).is_some() {
+            return ctx.reply_integer(0);
+        }
+    }
+    for (key, value) in pairs {
+        let obj = RedisObject::new_raw_string(value.as_bytes());
+        ctx.db_mut().set_key(key, obj, 0);
+    }
+    ctx.reply_integer(1)
 }
 
 /// MSETEX numkeys key value [key value …] [NX|XX] [EX s|PX ms|EXAT ts|PXAT ms-ts|KEEPTTL]
@@ -511,16 +717,58 @@ pub fn incrbyfloat_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// APPEND key value
 ///
+/// If `key` does not exist the command behaves like SET. If `key` exists
+/// and is a string, `value` is concatenated and the new length is returned.
+/// A non-string `key` yields `WRONGTYPE`.
+///
 /// C: `appendCommand` (t_string.c:791).
 pub fn append_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:791, appendCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"append"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let value = ctx.arg_owned(2usize)?;
+    let new_len: i64 = match ctx.db_mut().lookup_key_write(&key) {
+        None => {
+            let obj = RedisObject::new_raw_string(value.as_bytes());
+            let len = value.as_bytes().len() as i64;
+            ctx.db_mut().set_key(key, obj, 0);
+            len
+        }
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => {
+                let mut combined = obj.as_bytes().to_vec();
+                combined.extend_from_slice(value.as_bytes());
+                let len = combined.len() as i64;
+                let stored = RedisObject::new_raw_string(&combined);
+                ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+                len
+            }
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    ctx.reply_integer(new_len)
 }
 
 /// STRLEN key
 ///
+/// Returns the byte length of the string value at `key`, or `0` when the
+/// key is missing. WRONGTYPE if the existing value is not a string.
+///
 /// C: `strlenCommand` (t_string.c:834).
 pub fn strlen_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:834, strlenCommand")
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"strlen"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let len: i64 = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
+        None => 0,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => obj.as_bytes().len() as i64,
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    ctx.reply_integer(len)
 }
 
 /// LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN]

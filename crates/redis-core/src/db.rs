@@ -833,10 +833,92 @@ pub fn move_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
 }
 
 /// C: db.c:1611 copyCommand — COPY source destination [DB n] [REPLACE]
-pub fn copy_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
-    // TODO(port): multi-db support; type-specific duplication
-    //             (dupStringObject, listTypeDup, setTypeDup, zsetDup, hashTypeDup, streamDup)
-    Err(RedisError::runtime(b"COPY: TODO(port): type-specific dup not implemented in Phase A"))
+///
+/// Phase-A semantics: a single logical DB is supported. The optional `DB n`
+/// modifier is parsed and validated (must equal the current db id) but the
+/// destination always lands in the active keyspace. The optional `REPLACE`
+/// modifier overrides the "destination must not exist" check. Source TTL is
+/// preserved on the duplicated value. Returns `:1` on success, `:0` if the
+/// destination already exists and `REPLACE` was not supplied.
+pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    let argc = ctx.arg_count();
+    let src_key = ctx.arg(1)?.clone();
+    let dst_key = ctx.arg(2)?.clone();
+
+    let mut replace = false;
+    let mut target_db: Option<i64> = None;
+    let mut j: usize = 3;
+    while j < argc {
+        let opt = ctx.arg(j)?.clone();
+        let bytes = opt.as_bytes();
+        if eq_ignore_ascii_case(bytes, b"REPLACE") {
+            replace = true;
+            j += 1;
+        } else if eq_ignore_ascii_case(bytes, b"DB") {
+            if j + 1 >= argc {
+                return Err(RedisError::runtime(b"ERR syntax error"));
+            }
+            let val_bytes = ctx.arg(j + 1)?.clone();
+            let parsed = parse_i64_from_bytes(val_bytes.as_bytes())
+                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            target_db = Some(parsed);
+            j += 2;
+        } else {
+            return Err(RedisError::runtime(b"ERR syntax error"));
+        }
+    }
+
+    let current_db_id = ctx.db().id() as i64;
+    if let Some(target) = target_db {
+        if target != current_db_id {
+            return Err(RedisError::runtime(b"ERR DB index is out of range"));
+        }
+    }
+
+    if src_key == dst_key {
+        return ctx.reply_integer(0);
+    }
+
+    let src_clone = match ctx.db_mut().lookup_key_read_with_flags(&src_key, LOOKUP_NOTOUCH) {
+        None => return ctx.reply_integer(0),
+        Some(obj) => obj.clone(),
+    };
+
+    if ctx.db_mut().exists_raw(&dst_key) && !replace {
+        return ctx.reply_integer(0);
+    }
+
+    let expire = ctx.db().get_expire(&src_key);
+    let mut new_obj = src_clone;
+    new_obj.expire = expire;
+    ctx.db_mut().insert(dst_key.clone(), new_obj);
+
+    ctx.reply_integer(1)
+}
+
+/// C: db.c:1408 touchCommand — TOUCH key [key ...]
+///
+/// Returns the number of supplied keys that currently exist. Matches the
+/// semantics of EXISTS for Phase A; the C implementation also bumps LRU/LFU
+/// access info, which is deferred.
+pub fn touch_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    let argc = ctx.arg_count();
+    let mut count: i64 = 0;
+    for j in 1..argc {
+        let key = ctx.arg(j)?.clone();
+        if ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some() {
+            count += 1;
+        }
+    }
+    ctx.reply_integer(count)
+}
+
+/// Case-insensitive ASCII equality for command option keywords.
+fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
 }
 
 /// C: db.c:1861 swapdbCommand — SWAPDB index index

@@ -121,6 +121,27 @@ pub struct Client {
     /// later phases will move it onto Client for compatibility with the C
     /// `c->querybuf` field.
     pub query_buf: Vec<u8>,
+    /// Optional client name set via `CLIENT SETNAME`.
+    ///
+    /// `None` until the client invokes `CLIENT SETNAME`; cleared by `RESET`.
+    /// Real Redis stores this as a byte string; arbitrary bytes are allowed
+    /// except whitespace and special characters (validated at the setter).
+    pub name: Option<RedisString>,
+    /// Connection-tear-down request flag (set by `QUIT`).
+    ///
+    /// The accept loop checks this after each dispatched command, flushes the
+    /// pending reply, and closes the socket when `true`.
+    pub should_close: bool,
+    /// Peer address recorded at accept time (e.g. `"127.0.0.1:54231"`).
+    ///
+    /// Used by `CLIENT LIST` to fill the `addr=` field. `None` for clients
+    /// that have no live transport (unit tests, pseudo-clients).
+    pub addr: Option<String>,
+    /// RESP protocol version negotiated by `HELLO` (2 or 3).
+    ///
+    /// Defaults to 2 (the version implied by every legacy RESP2 client).
+    /// RESP3 upgrade path is a TODO.
+    pub resp_proto: i32,
 }
 
 /// Per-client transient flags.
@@ -149,6 +170,10 @@ impl Client {
             flags: ClientFlags::default(),
             conn: None,
             query_buf: Vec::new(),
+            name: None,
+            should_close: false,
+            addr: None,
+            resp_proto: 2,
         }
     }
 
@@ -176,6 +201,20 @@ impl Client {
 
     pub fn set_args(&mut self, args: Vec<RedisString>) {
         self.argv = args;
+    }
+
+    /// Reset transient connection state, mirroring real Redis `RESET`.
+    ///
+    /// Clears the client name, MULTI transaction state, queued reply bytes,
+    /// the selected database (back to 0), and per-client flags. The client
+    /// id and live transport are preserved — the connection remains open.
+    pub fn reset_state(&mut self) {
+        self.name = None;
+        self.mstate = None;
+        self.reply_buf.clear();
+        self.db_index = 0;
+        self.flags = ClientFlags::default();
+        self.resp_proto = 2;
     }
 
     /// Append an encoded RESP frame to the pending-reply buffer.
