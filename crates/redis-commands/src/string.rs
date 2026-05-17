@@ -177,10 +177,7 @@ fn parse_float_from_object(obj: &RedisObject) -> Result<f64, RedisError> {
 ///
 /// C: `objectGetVal(o)` when encoding is raw/embstr.
 fn object_as_bytes(obj: &RedisObject) -> Option<&[u8]> {
-    match obj {
-        RedisObject::String(s) => Some(s.as_bytes()),
-        _ => None,
-    }
+    obj.as_string_bytes()
 }
 
 /// Return the length of a string object's value.

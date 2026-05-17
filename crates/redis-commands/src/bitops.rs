@@ -431,8 +431,10 @@ fn get_bitfield_type_from_arg(arg: &[u8]) -> Result<(bool, u32), RedisError> {
 fn get_object_readonly_bytes(obj: Option<&RedisObject>) -> Result<Option<Vec<u8>>, RedisError> {
     match obj {
         None => Ok(None),
-        Some(RedisObject::String(s)) => Ok(Some(s.as_bytes().to_vec())),
-        Some(_) => Err(RedisError::wrong_type()),
+        Some(o) => match o.as_string_bytes() {
+            Some(b) => Ok(Some(b.to_vec())),
+            None => Err(RedisError::wrong_type()),
+        },
     }
 }
 
@@ -460,21 +462,19 @@ fn lookup_string_for_bit_command(
             // TODO(port): ctx.db_mut().add(key, RedisObject::String(RedisString::from_bytes(&bytes)));
             Ok((bytes, true))
         }
-        Some(obj) => {
-            match obj {
-                RedisObject::String(s) => {
-                    let mut bytes = s.as_bytes().to_vec();
-                    let old_len = bytes.len();
-                    if bytes.len() < min_len {
-                        bytes.resize(min_len, 0u8);
-                    }
-                    let dirty = bytes.len() != old_len;
-                    // TODO(port): write back grown bytes to ctx.db_mut().
-                    Ok((bytes, dirty))
+        Some(obj) => match obj.as_string_bytes() {
+            Some(s) => {
+                let mut bytes = s.to_vec();
+                let old_len = bytes.len();
+                if bytes.len() < min_len {
+                    bytes.resize(min_len, 0u8);
                 }
-                _ => Err(RedisError::wrong_type()),
+                let dirty = bytes.len() != old_len;
+                // TODO(port): write back grown bytes to ctx.db_mut().
+                Ok((bytes, dirty))
             }
-        }
+            None => Err(RedisError::wrong_type()),
+        },
     }
 }
 
@@ -535,8 +535,10 @@ pub fn getbit_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg(1)?.clone();
     let bytes: Vec<u8> = match ctx.db().lookup_key_read(key.as_bytes()) {
         None => return ctx.reply_integer(0),
-        Some(RedisObject::String(s)) => s.as_bytes().to_vec(),
-        Some(_) => return Err(RedisError::wrong_type()),
+        Some(o) => match o.as_string_bytes() {
+            Some(s) => s.to_vec(),
+            None => return Err(RedisError::wrong_type()),
+        },
     };
 
     let byte_idx = (bitoffset >> 3) as usize;
@@ -591,17 +593,19 @@ pub fn bitop_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 sources.push(None);
                 minlen = 0;
             }
-            Some(RedisObject::String(s)) => {
-                let bytes = s.as_bytes().to_vec();
-                if bytes.len() > maxlen {
-                    maxlen = bytes.len();
+            Some(o) => match o.as_string_bytes() {
+                Some(s) => {
+                    let bytes = s.to_vec();
+                    if bytes.len() > maxlen {
+                        maxlen = bytes.len();
+                    }
+                    if j == 0 || bytes.len() < minlen {
+                        minlen = bytes.len();
+                    }
+                    sources.push(Some(bytes));
                 }
-                if j == 0 || bytes.len() < minlen {
-                    minlen = bytes.len();
-                }
-                sources.push(Some(bytes));
-            }
-            Some(_) => return Err(RedisError::wrong_type()),
+                None => return Err(RedisError::wrong_type()),
+            },
         }
     }
 
@@ -676,7 +680,7 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let obj = ctx.db().lookup_key_read(key.as_bytes());
     // Validate type early (checkType).
     if let Some(o) = obj {
-        if !matches!(o, RedisObject::String(_)) {
+        if !o.is_string() {
             return Err(RedisError::wrong_type());
         }
     }
@@ -685,8 +689,10 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         // Whole string.
         let bytes: Vec<u8> = match ctx.db().lookup_key_read(key.as_bytes()) {
             None => return ctx.reply_integer(0),
-            Some(RedisObject::String(s)) => s.as_bytes().to_vec(),
-            Some(_) => return Err(RedisError::wrong_type()),
+            Some(o) => match o.as_string_bytes() {
+                Some(s) => s.to_vec(),
+                None => return Err(RedisError::wrong_type()),
+            },
         };
         let count = server_popcount(&bytes);
         return ctx.reply_integer(count);
@@ -719,8 +725,10 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
         let bytes: Vec<u8> = match ctx.db().lookup_key_read(key.as_bytes()) {
             None => return ctx.reply_integer(0),
-            Some(RedisObject::String(s)) => s.as_bytes().to_vec(),
-            Some(_) => return Err(RedisError::wrong_type()),
+            Some(o) => match o.as_string_bytes() {
+                Some(s) => s.to_vec(),
+                None => return Err(RedisError::wrong_type()),
+            },
         };
 
         let strlen = bytes.len() as i64;
@@ -810,8 +818,10 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             // Key does not exist: treat as infinite zero-bit string.
             return ctx.reply_integer(if bit == 1 { -1 } else { 0 });
         }
-        Some(RedisObject::String(s)) => s.as_bytes().to_vec(),
-        Some(_) => return Err(RedisError::wrong_type()),
+        Some(o) => match o.as_string_bytes() {
+            Some(s) => s.to_vec(),
+            None => return Err(RedisError::wrong_type()),
+        },
     };
     let strlen = bytes_opt.len() as i64;
     debug_assert!(strlen <= i64::MAX >> 3, "string too large for bit arithmetic");
@@ -1029,8 +1039,10 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> Result<(), Redi
     let mut bytes: Vec<u8> = if is_readonly_ops {
         match ctx.db().lookup_key_read(key.as_bytes()) {
             None => Vec::new(),
-            Some(RedisObject::String(s)) => s.as_bytes().to_vec(),
-            Some(_) => return Err(RedisError::wrong_type()),
+            Some(o) => match o.as_string_bytes() {
+                Some(s) => s.to_vec(),
+                None => return Err(RedisError::wrong_type()),
+            },
         }
     } else {
         let (b, _dirty) = lookup_string_for_bit_command(ctx, highest_write_offset)?;

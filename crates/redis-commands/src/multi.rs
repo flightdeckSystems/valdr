@@ -488,7 +488,7 @@ pub fn watch_for_key(client: &mut Client, db: &mut RedisDb, key: &RedisObject) {
     // client id to the per-key watcher list in db.watched_keys.
 
     // Record the watch on the client side.
-    let expired = db.key_is_expired(key); // TODO(port): RedisDb::key_is_expired()
+    let expired = db.key_is_expired_obj(key); // TODO(port): RedisDb::key_is_expired_obj() (shim over object payload)
     mstate.watched_keys.push(WatchedKey {
         key: key.clone(), // PERF(port): clone of RedisObject — may be expensive for large vals; profile Phase B
         db_id,

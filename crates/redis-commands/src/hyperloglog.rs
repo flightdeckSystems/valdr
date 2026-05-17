@@ -933,14 +933,9 @@ pub fn is_hll_valid(buf: &[u8]) -> bool {
 // C: hyperloglog.c:1633-1661, isHLLObjectOrReply
 // PORT NOTE: Reply is sent by the caller via `?`; this fn only validates.
 fn require_hll_object(obj: &RedisObject) -> Result<&[u8], RedisError> {
-    let bytes = match obj {
-        RedisObject::String(s) => s.as_bytes(),
-        _ => {
-            return Err(RedisError::runtime(
-                b"WRONGTYPE Key is not a valid HyperLogLog string value.",
-            ))
-        }
-    };
+    let bytes = obj.as_string_bytes().ok_or_else(|| {
+        RedisError::runtime(b"WRONGTYPE Key is not a valid HyperLogLog string value.")
+    })?;
     if !is_hll_valid(bytes) {
         return Err(RedisError::runtime(
             b"WRONGTYPE Key is not a valid HyperLogLog string value.",

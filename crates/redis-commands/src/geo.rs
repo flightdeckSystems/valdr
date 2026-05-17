@@ -476,7 +476,7 @@ pub fn georadius_generic(
     {
         let zobj_ref = ctx.db().lookup_key_read(&src_key);
         if let Some(z) = zobj_ref {
-            if !matches!(z, RedisObject::ZSet(_)) {
+            if !z.is_zset() {
                 return Err(RedisError::wrong_type());
             }
         }
@@ -878,7 +878,7 @@ pub fn geohash_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     {
         let zobj_ref = ctx.db().lookup_key_read(&key);
         if let Some(z) = zobj_ref {
-            if !matches!(z, RedisObject::ZSet(_)) {
+            if !z.is_zset() {
                 return Err(RedisError::wrong_type());
             }
         }
@@ -953,7 +953,7 @@ pub fn geopos_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     {
         let zobj_ref = ctx.db().lookup_key_read(&key);
         if let Some(z) = zobj_ref {
-            if !matches!(z, RedisObject::ZSet(_)) {
+            if !z.is_zset() {
                 return Err(RedisError::wrong_type());
             }
         }
@@ -1021,7 +1021,7 @@ pub fn geodist_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 ctx.reply_null()?;
                 return Ok(());
             }
-            Some(z) if !matches!(z, RedisObject::ZSet(_)) => {
+            Some(z) if !z.is_zset() => {
                 return Err(RedisError::wrong_type());
             }
             _ => {}

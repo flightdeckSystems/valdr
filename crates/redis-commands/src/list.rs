@@ -162,7 +162,7 @@ fn list_type_try_convert_listpack(
     end: usize,
     before_convert: Option<BeforeConvertCallback>,
 ) -> Result<(), RedisError> {
-    debug_assert!(matches!(subject, RedisObject::List(_)));
+    debug_assert!(subject.is_list());
 
     let mut add_bytes: usize = 0;
     let add_length: usize = if args.is_some() {
@@ -173,8 +173,10 @@ fn list_type_try_convert_listpack(
 
     if let Some(argv) = args {
         for i in start..=end {
-            if let Some(RedisObject::String(s)) = argv.get(i) {
-                add_bytes += s.len();
+            if let Some(o) = argv.get(i) {
+                if let Some(s) = o.as_string_bytes() {
+                    add_bytes += s.len();
+                }
             }
         }
     }
@@ -208,7 +210,7 @@ fn list_type_try_convert_quicklist(
     shrinking: bool,
     before_convert: Option<BeforeConvertCallback>,
 ) -> Result<(), RedisError> {
-    debug_assert!(matches!(subject, RedisObject::List(_)));
+    debug_assert!(subject.is_list());
 
     // TODO(port): return early unless ql->len == 1 &&
     //   ql->head->container == QUICKLIST_NODE_CONTAINER_PACKED
@@ -624,7 +626,7 @@ pub fn list_type_delete(
 /// C: `listTypeDup` — t_list.c:433-445.  The resulting object has a
 /// logical refcount of 1 (Rust: single owner).
 pub fn list_type_dup(subject: &RedisObject) -> Result<RedisObject, RedisError> {
-    debug_assert!(matches!(subject, RedisObject::List(_)));
+    debug_assert!(subject.is_list());
     // TODO(port): match encoding {
     //   Listpack  => createObject(OBJ_LIST, lpDup(lp)) with OBJ_ENCODING_LISTPACK
     //   Quicklist => createObject(OBJ_LIST, quicklistDup(ql)) with OBJ_ENCODING_QUICKLIST

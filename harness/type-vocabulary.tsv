@@ -13,7 +13,14 @@
 RedisServer       struct  crates/redis-core/src/server.rs           enforce  stub defined 2026-05-16 architect packet
 Client            struct  crates/redis-core/src/client.rs           enforce  defined 2026-05-16 architect packet
 RedisDb           struct  crates/redis-core/src/db.rs               enforce  stub defined 2026-05-16 architect packet
-RedisObject       enum    crates/redis-core/src/object.rs           enforce  stub defined 2026-05-16 architect packet
+RedisObject       struct  crates/redis-core/src/object.rs           enforce  full port landed 2026-05-17 (was enum stub); struct { lru, expire, kind }
+ObjectKind        enum    crates/redis-core/src/object.rs           enforce  inner discriminator for RedisObject; landed 2026-05-17 with object.c full port
+StringEncoding    enum    crates/redis-core/src/object.rs           enforce  Raw/Embstr/Int sub-variants for ObjectKind::String
+ListEncoding      enum    crates/redis-core/src/object.rs           enforce  ListPack/QuickList sub-variants for ObjectKind::List
+SetEncoding       enum    crates/redis-core/src/object.rs           enforce  ListPack/IntSet/HashTable sub-variants for ObjectKind::Set
+ZSetEncoding      enum    crates/redis-core/src/object.rs           enforce  ListPack/SkipList sub-variants for ObjectKind::ZSet
+HashEncoding      enum    crates/redis-core/src/object.rs           enforce  ListPack/HashTable sub-variants for ObjectKind::Hash
+ObjectType        enum    crates/redis-core/src/object.rs           enforce  discriminant used by check_type (mirrors C OBJ_STRING/OBJ_LIST/…)
 RedisString       struct  crates/redis-types/src/string.rs          enforce  defined 2026-05-16 architect packet
 RedisError        enum    crates/redis-types/src/error.rs           enforce  defined 2026-05-16 architect packet
 RespFrame         enum    crates/redis-protocol/src/frame.rs        enforce  defined 2026-05-16 architect packet

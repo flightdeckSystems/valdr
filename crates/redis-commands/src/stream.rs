@@ -845,7 +845,7 @@ pub fn add_reply_stream_id(ctx: &mut CommandContext, id: &StreamId) -> Result<()
 /// Create a `RedisObject` wrapping the string form of a stream ID.
 /// C source: `t_stream.c:1393-1395`, `createObjectFromStreamID`.
 pub fn create_object_from_stream_id(id: &StreamId) -> RedisObject {
-    RedisObject::String(id.to_redis_string())
+    RedisObject::from_string(id.to_redis_string())
 }
 
 /// Reply with the consumer group lag.
@@ -1947,10 +1947,7 @@ fn to_upper_bytes(b: &[u8]) -> Vec<u8> {
 /// Extract the raw bytes from a `RedisObject::String`.
 /// TODO(architect): RedisObject::String(RedisString) byte accessor.
 fn object_get_bytes(o: &RedisObject) -> Result<&[u8], RedisError> {
-    match o {
-        RedisObject::String(s) => Ok(s.as_bytes()),
-        _ => Err(RedisError::wrong_type()),
-    }
+    o.as_string_bytes().ok_or_else(RedisError::wrong_type)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
