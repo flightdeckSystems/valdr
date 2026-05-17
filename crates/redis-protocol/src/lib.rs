@@ -7,9 +7,11 @@
 
 pub mod frame;
 pub mod parser;
+pub mod request;
 
 pub use frame::{RespFrame, encode_resp2};
 pub use parser::{ParserCallbacks, ParserCursor};
+pub use request::parse_inline_or_multibulk;
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

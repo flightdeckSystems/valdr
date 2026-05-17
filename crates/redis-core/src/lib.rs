@@ -28,6 +28,7 @@ pub mod object;
 pub mod server;
 pub mod strtod;
 pub mod timeout;
+pub mod transport;
 pub mod unix;
 pub mod util;
 
@@ -36,6 +37,7 @@ pub use command_context::CommandContext;
 pub use db::RedisDb;
 pub use object::{ObjectKind, RedisObject};
 pub use server::{RedisServer, ServerConfig};
+pub use transport::Connection;
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

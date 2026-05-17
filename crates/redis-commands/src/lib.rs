@@ -11,11 +11,16 @@
 //! EXISTS, INCR (Phase 3).
 
 pub mod bitops;
+pub mod connection;
+pub mod dispatch;
 pub mod generated;
 pub mod list;
 pub mod multi;
 pub mod pubsub;
 pub mod stream;
+pub mod string;
+
+pub use dispatch::{dispatch, lookup_command, DispatchEntry, Handler};
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

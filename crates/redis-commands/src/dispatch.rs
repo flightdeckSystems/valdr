@@ -1,0 +1,185 @@
+//! Command dispatch table — maps argv[0] (case-insensitive) to a handler fn.
+//!
+//! Wave A wires up the *lookup* side only. Most handler bodies are still
+//! `todo!()`; this module just routes the call. Handler bodies land in Waves
+//! B/C/D.
+//!
+//! Two-layer lookup:
+//!
+//! 1. The generated registry in `generated::COMMANDS` is the source of truth
+//!    for command metadata (arity, flags, ACL category).
+//! 2. A small static `HANDLERS` table maps an uppercase ASCII command name to
+//!    a Rust function. Commands with no handler yet are intentionally absent;
+//!    callers receive an `unknown command` error.
+
+use redis_core::CommandContext;
+use redis_types::{RedisError, RedisResult, RedisString};
+
+/// A command handler.
+pub type Handler = fn(&mut CommandContext) -> RedisResult<()>;
+
+/// One entry in the static dispatch table.
+pub struct DispatchEntry {
+    /// Uppercase ASCII name (e.g. `b"PING"`). Compared case-insensitively.
+    pub name: &'static [u8],
+    /// Handler function pointer.
+    pub handler: Handler,
+}
+
+/// Look up the handler for `name` (case-insensitive ASCII).
+///
+/// Returns `Some(entry)` if a handler is registered, `None` otherwise.
+pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
+    HANDLERS
+        .iter()
+        .find(|entry| ascii_eq_ignore_case(entry.name, name))
+}
+
+/// Dispatch one command using `ctx.client.argv[0]` as the command name.
+///
+/// Returns an error if argv is empty or the command is unknown. The handler's
+/// result is returned verbatim — handlers may write a reply *and* return `Ok`,
+/// or return `Err` (which the I/O layer renders as a `-ERR ...` reply).
+pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let name: RedisString = match ctx.client_ref().arg(0) {
+        Some(s) => s.clone(),
+        None => return Err(RedisError::runtime(b"ERR empty command")),
+    };
+    match lookup_command(name.as_bytes()) {
+        Some(entry) => (entry.handler)(ctx),
+        None => Err(unknown_command_error(name.as_bytes())),
+    }
+}
+
+/// Build the canonical `unknown command '<name>'` error.
+fn unknown_command_error(name: &[u8]) -> RedisError {
+    let mut buf = Vec::with_capacity(b"ERR unknown command '".len() + name.len() + 1);
+    buf.extend_from_slice(b"ERR unknown command '");
+    buf.extend_from_slice(name);
+    buf.push(b'\'');
+    RedisError::runtime(buf)
+}
+
+/// Case-insensitive ASCII equality. Non-ASCII bytes compare strictly.
+fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+}
+
+fn ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
+}
+
+/// Wave A placeholder handler that returns `Err(RedisError::runtime(b"ERR …"))`.
+///
+/// Handler bodies in Waves B/C/D will replace these one by one. Routing to
+/// the stub proves the table is wired correctly.
+fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    let name = ctx.client_ref().arg(0).map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    let mut msg = Vec::with_capacity(b"ERR command not implemented yet: ".len() + name.len());
+    msg.extend_from_slice(b"ERR command not implemented yet: ");
+    msg.extend_from_slice(&name);
+    Err(RedisError::runtime(msg))
+}
+
+/// Static dispatch table.
+///
+/// Only includes commands whose handlers exist in this crate (even if the
+/// handler body is `todo!()`). Wave B fills in PING + ECHO bodies; Wave C
+/// fills in SET/GET/DEL/EXISTS/INCR.
+///
+/// PORT NOTE: For Wave A we route every entry to `unimplemented_handler`
+/// rather than the real handler. The Wave B agent flips PING/ECHO over to
+/// `crate::connection::ping_command` / `echo_command` once those exist;
+/// Wave C does the same for string commands. This avoids `todo!()` panics
+/// crashing the server during Wave A smoke testing.
+pub static HANDLERS: &[DispatchEntry] = &[
+    DispatchEntry { name: b"PING", handler: crate::connection::ping_command },
+    DispatchEntry { name: b"ECHO", handler: crate::connection::echo_command },
+    DispatchEntry { name: b"HELLO", handler: unimplemented_handler },
+    DispatchEntry { name: b"COMMAND", handler: unimplemented_handler },
+    DispatchEntry { name: b"QUIT", handler: unimplemented_handler },
+    DispatchEntry { name: b"SET", handler: crate::string::set_command },
+    DispatchEntry { name: b"GET", handler: crate::string::get_command },
+    DispatchEntry { name: b"DEL", handler: redis_core::db::del_command },
+    DispatchEntry { name: b"EXISTS", handler: redis_core::db::exists_command },
+    DispatchEntry { name: b"INCR", handler: crate::string::incr_command },
+    DispatchEntry { name: b"DECR", handler: crate::string::decr_command },
+    DispatchEntry { name: b"INCRBY", handler: crate::string::incrby_command },
+    DispatchEntry { name: b"DECRBY", handler: crate::string::decrby_command },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::Client;
+
+    #[test]
+    fn lookup_is_case_insensitive() {
+        assert!(lookup_command(b"PING").is_some());
+        assert!(lookup_command(b"ping").is_some());
+        assert!(lookup_command(b"Ping").is_some());
+        assert!(lookup_command(b"PiNg").is_some());
+    }
+
+    #[test]
+    fn unknown_command_is_none() {
+        assert!(lookup_command(b"NOTACOMMAND").is_none());
+    }
+
+    #[test]
+    fn dispatch_unknown_returns_err() {
+        let mut c = Client::new(1);
+        c.set_args(vec![RedisString::from_bytes(b"NOTACOMMAND")]);
+        let mut ctx = CommandContext::new(&mut c);
+        let err = dispatch(&mut ctx).unwrap_err();
+        match err {
+            RedisError::Runtime(s) => {
+                assert!(s.as_bytes().starts_with(b"ERR unknown command"));
+            }
+            _ => panic!("expected Runtime error"),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_known_command() {
+        let mut c = Client::new(1);
+        c.set_args(vec![RedisString::from_bytes(b"HELLO")]);
+        let mut ctx = CommandContext::new(&mut c);
+        let err = dispatch(&mut ctx).unwrap_err();
+        match err {
+            RedisError::Runtime(s) => {
+                assert!(s.as_bytes().starts_with(b"ERR command not implemented yet"));
+            }
+            _ => panic!("expected Runtime error"),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_ping_to_real_handler() {
+        let mut c = Client::new(1);
+        c.set_args(vec![RedisString::from_bytes(b"PING")]);
+        let mut ctx = CommandContext::new(&mut c);
+        dispatch(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"+PONG\r\n");
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        architect packet (Wave A — dispatch lookup fn)
+//   target_crate:  redis-commands
+//   confidence:    high
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Lookup + routing wired. Handler bodies are stubbed via
+//                  unimplemented_handler so the binary returns a clean error
+//                  reply for any command; Waves B/C wire the real bodies.
+// ──────────────────────────────────────────────────────────────────────────

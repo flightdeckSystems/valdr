@@ -14,16 +14,46 @@ use crate::server::RedisServer;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+/// Storage for the database reachable from a `CommandContext`.
+///
+/// In production the server hands every command a shared `&mut RedisDb` so
+/// SET/GET state persists across commands and connections. Unit tests still
+/// want an isolated scratch db per context, so this enum supports both.
+///
+/// Phase 3 will collapse this back to `&'a mut RedisServer` once the server
+/// reference threads through every dispatch site.
+pub enum DbStorage<'a> {
+    Owned(RedisDb),
+    Borrowed(&'a mut RedisDb),
+}
+
+impl<'a> DbStorage<'a> {
+    fn as_ref(&self) -> &RedisDb {
+        match self {
+            DbStorage::Owned(db) => db,
+            DbStorage::Borrowed(db) => db,
+        }
+    }
+
+    fn as_mut(&mut self) -> &mut RedisDb {
+        match self {
+            DbStorage::Owned(db) => db,
+            DbStorage::Borrowed(db) => db,
+        }
+    }
+}
+
 /// Bundle of context every command receives. Wraps a mutable Client and
 /// exposes argument access + reply-writer methods.
 ///
-/// PORT NOTE: `db` is an owned `RedisDb` in this stub. Phase 3 will replace
-/// it with `&'a mut RedisServer` (and `db()` will route through the server's
-/// db list keyed by `client.db_index`).
+/// PORT NOTE: `db` is held in a [`DbStorage`] enum. Production callers use
+/// [`CommandContext::with_db`] to share one `RedisDb` across commands; tests
+/// use [`CommandContext::new`] for an isolated owned scratch db. Phase 3 will
+/// replace this with `&'a mut RedisServer` (and `db()` will route through the
+/// server's db list keyed by `client.db_index`).
 pub struct CommandContext<'a> {
     pub client: &'a mut Client,
-    /// Per-context DB scratch. STUB — Phase 3 replaces with server-owned dbs.
-    pub stub_db: RedisDb,
+    db: DbStorage<'a>,
     /// Per-context server scratch. STUB — Phase 3 replaces with a `&'a mut
     /// RedisServer` carried into every command.
     pub stub_server: RedisServer,
@@ -97,10 +127,26 @@ impl ArgIndex for i32 {
 }
 
 impl<'a> CommandContext<'a> {
+    /// Construct a context with an isolated owned scratch database.
+    ///
+    /// Intended for unit tests; production code paths should use
+    /// [`Self::with_db`] so that state persists across commands.
     pub fn new(client: &'a mut Client) -> Self {
         Self {
             client,
-            stub_db: RedisDb::new(0),
+            db: DbStorage::Owned(RedisDb::new(0)),
+            stub_server: RedisServer::default(),
+        }
+    }
+
+    /// Construct a context sharing the caller-supplied database.
+    ///
+    /// The server's accept loop calls this so every command for every client
+    /// sees the same keyspace.
+    pub fn with_db(client: &'a mut Client, db: &'a mut RedisDb) -> Self {
+        Self {
+            client,
+            db: DbStorage::Borrowed(db),
             stub_server: RedisServer::default(),
         }
     }
@@ -237,13 +283,13 @@ impl<'a> CommandContext<'a> {
 
     /// Per-context database. STUB — Phase 3 routes through the server.
     pub fn db(&self) -> &RedisDb {
-        &self.stub_db
+        self.db.as_ref()
     }
 
     /// Mutable view of the per-context database. STUB — Phase 3 routes through
     /// the server keyed by `client.db_index`.
     pub fn db_mut(&mut self) -> &mut RedisDb {
-        &mut self.stub_db
+        self.db.as_mut()
     }
 
     /// Mutable borrow of the underlying `Client`.

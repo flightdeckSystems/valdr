@@ -10,6 +10,7 @@ use redis_types::RedisString;
 use std::collections::{HashMap, HashSet};
 
 use crate::object::RedisObject;
+use crate::transport::Connection;
 
 pub type ClientId = u64;
 
@@ -108,6 +109,18 @@ pub struct Client {
     ///
     /// STUB — Phase B placeholder. C: `clientFlags flag` bitfield.
     pub flags: ClientFlags,
+    /// Live transport for this client.
+    ///
+    /// `None` for pre-handshake clients, AOF/RDB pseudo-clients, and unit
+    /// tests; `Some` for real network clients accepted by the event loop.
+    pub conn: Option<Connection>,
+    /// Partial read buffer; bytes accumulated by the I/O layer between command
+    /// boundaries.
+    ///
+    /// STUB — Phase B placeholder. The Wave A event loop owns this directly;
+    /// later phases will move it onto Client for compatibility with the C
+    /// `c->querybuf` field.
+    pub query_buf: Vec<u8>,
 }
 
 /// Per-client transient flags.
@@ -134,7 +147,19 @@ impl Client {
             mstate: None,
             slot: -1,
             flags: ClientFlags::default(),
+            conn: None,
+            query_buf: Vec::new(),
         }
+    }
+
+    /// Construct a `Client` bound to a live transport.
+    ///
+    /// The id is left as `0`; callers should call `RedisServer::alloc_client_id`
+    /// and assign `client.id` if they need a unique identifier.
+    pub fn with_connection(conn: Connection) -> Self {
+        let mut c = Self::new(0);
+        c.conn = Some(conn);
+        c
     }
 
     pub fn arg(&self, i: usize) -> Option<&RedisString> {

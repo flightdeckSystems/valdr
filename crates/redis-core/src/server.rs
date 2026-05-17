@@ -8,6 +8,33 @@ use crate::db::RedisDb;
 use crate::client::ClientId;
 use crate::evict::EvictionPool;
 
+/// Stub AOF state. TODO(architect): real type lives in `aof.rs` when ported
+/// (Phase 6+). Until then this is an i32 discriminant matching the C
+/// `AOF_OFF`/`AOF_ON`/`AOF_WAIT_REWRITE` constants.
+pub type AofState = i32;
+
+pub const AOF_OFF: AofState = 0;
+pub const AOF_ON: AofState = 1;
+pub const AOF_WAIT_REWRITE: AofState = 2;
+
+/// Stub command table handle.
+///
+/// TODO(architect): real type later — should be a reference to the registry
+/// in `redis-commands::generated::COMMANDS` plus a `HashMap<&[u8], &spec>`
+/// case-insensitive lookup. The Wave A pilot does the lookup directly via
+/// `redis_commands::dispatch::lookup_command` and does not store a handle on
+/// the server.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CommandTableHandle;
+
+/// Stub listener handle. TODO(architect): real type later (collapse with
+/// `connection::ConnListener` once the vtable registry has live backends).
+#[derive(Debug, Default)]
+pub struct ListenerHandle {
+    /// Number of bound file descriptors (0 when the listener is inactive).
+    pub fd_count: i32,
+}
+
 #[derive(Debug)]
 pub struct RedisServer {
     /// Tick counter for assigning client ids.
@@ -16,13 +43,53 @@ pub struct RedisServer {
     dbs: Vec<RedisDb>,
     /// Bind port (configured at startup).
     pub port: u16,
+    /// Bind addresses as raw bytes (e.g. `b"127.0.0.1"`).
+    pub bind_addrs: Vec<Vec<u8>>,
     /// Single-source-of-truth config flags (more land later).
     pub config: ServerConfig,
     /// LRU/LFU eviction candidate pool.
     /// C: static struct evictionPoolEntry *EvictionPoolLRU — evict.c:64
     /// TODO(port): initialise via eviction_pool_alloc() in server startup path.
     pub eviction_pool: EvictionPool,
+    /// Command-table handle. TODO(architect): real type later.
+    pub commands_table: CommandTableHandle,
+    /// Server event-loop frequency (Hz). C: `server.hz`.
+    pub hz: i32,
+    /// AOF state. TODO(architect): real `AofState` enum later.
+    pub aof_state: AofState,
+    /// Cached command-time snapshot in milliseconds since epoch.
+    /// C: `server.cmd_time_snapshot`.
+    pub cmd_time_snapshot: i64,
+    /// Active TCP listeners. TODO(architect): real type later (Vec of
+    /// `connection::ConnListener` once backends register).
+    pub listeners: Vec<ListenerHandle>,
+    /// Number of clients currently in a MULTI block watching keys.
+    /// C: `server.watching_clients`.
+    pub watching_clients: u64,
+    /// Dirty counter — increments per write command for AOF/replication.
+    /// C: `server.dirty`.
+    pub dirty: i64,
+    /// Whether the server is in the middle of an EXEC dispatch.
+    /// C: `server.in_exec`.
+    pub in_exec: bool,
+    /// Whether the server is paused (CLIENT PAUSE / failover).
+    /// C: `server.pause_cron`.
+    pub pause_cron: bool,
+    /// Maximum size of a bulk reply payload in bytes.
+    /// C: `server.proto_max_bulk_len`.
+    pub proto_max_bulk_len: i64,
+    /// Server start time (Unix milliseconds).
+    pub start_time_ms: i64,
+    /// Shutdown flag — checked by the event loop and accept loop.
+    /// C: `server.shutdown_asap`.
+    pub shutdown_asap: bool,
 }
+
+/// Default value of `server.hz` (events per second).
+pub const CONFIG_DEFAULT_HZ: i32 = 10;
+
+/// Default value of `server.proto_max_bulk_len` (512 MiB).
+pub const PROTO_MAX_BULK_LEN_DEFAULT: i64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone)]
 pub struct ServerConfig {
@@ -45,8 +112,21 @@ impl RedisServer {
             next_client_id: 0,
             dbs: vec![RedisDb::new(0)],
             port,
+            bind_addrs: Vec::new(),
             config: ServerConfig::default(),
             eviction_pool: eviction_pool_alloc(),
+            commands_table: CommandTableHandle,
+            hz: CONFIG_DEFAULT_HZ,
+            aof_state: AOF_OFF,
+            cmd_time_snapshot: 0,
+            listeners: Vec::new(),
+            watching_clients: 0,
+            dirty: 0,
+            in_exec: false,
+            pause_cron: false,
+            proto_max_bulk_len: PROTO_MAX_BULK_LEN_DEFAULT,
+            start_time_ms: 0,
+            shutdown_asap: false,
         }
     }
 
@@ -94,11 +174,8 @@ impl RedisServer {
     }
 
     /// Set the server-wide `in_exec` flag (true while EXEC is mid-flight).
-    ///
-    /// STUB — Phase B placeholder; no backing storage yet. The full
-    /// implementation lands when EXEC dispatches queued commands in Phase 3.
-    pub fn set_in_exec(&mut self, _value: bool) {
-        // TODO(port): persist on RedisServer when in_exec field is added.
+    pub fn set_in_exec(&mut self, value: bool) {
+        self.in_exec = value;
     }
 }
 

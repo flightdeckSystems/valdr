@@ -49,7 +49,8 @@
 //! bypass for `check_string_length`.
 
 use redis_core::command_context::CommandContext;
-use redis_core::object::RedisObject;
+use redis_core::db::LOOKUP_NONE;
+use redis_core::object::{ObjectKind, RedisObject};
 use redis_types::{RedisError, RedisString};
 use std::io::Write;
 
@@ -261,9 +262,25 @@ pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisE
 /// SET key value [NX|XX|IFEQ cmp] [GET]
 ///     [EX s | PX ms | EXAT ts | PXAT ms-ts | KEEPTTL]
 ///
+/// Wave C1 scope: only the two-argument `SET key value` form is honored.
+/// All optional clauses (NX/XX/IFEQ/GET/EX/PX/EXAT/PXAT/KEEPTTL) yield a
+/// not-yet-implemented error so we never silently accept and drop them.
+///
 /// C: `setCommand` (t_string.c:251).
 pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:251, setCommand")
+    if ctx.arg_count() < 3 {
+        return Err(RedisError::wrong_number_of_args(b"set"));
+    }
+    if ctx.arg_count() > 3 {
+        return Err(RedisError::runtime(
+            b"ERR SET options (NX/XX/EX/PX/EXAT/PXAT/KEEPTTL/GET/IFEQ) not implemented yet",
+        ));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let value = ctx.arg_owned(2usize)?;
+    let obj = RedisObject::new_raw_string(value.as_bytes());
+    ctx.db_mut().set_key(key, obj, 0);
+    ctx.reply_simple_string(b"OK")
 }
 
 /// SETNX key value
@@ -296,9 +313,26 @@ pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
 /// GET key
 ///
+/// Replies with the key's bulk-string value, the null bulk `$-1\r\n` if the
+/// key is absent, or `WRONGTYPE` if the key is not a string.
+///
 /// C: `getCommand` (t_string.c:316).
 pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:316, getCommand")
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"get"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let bytes: Option<Vec<u8>> = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE) {
+        None => None,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => Some(obj.as_bytes().to_vec()),
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    match bytes {
+        None => ctx.reply_null_bulk(),
+        Some(b) => ctx.reply_bulk_string(RedisString::from_bytes(&b)),
+    }
 }
 
 /// GETEX key [PERSIST|EX s|PX ms|EXAT ts|PXAT ms-ts]
@@ -364,32 +398,108 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     todo!("C: t_string.c:604, msetexCommand")
 }
 
+/// Parse a `RedisString` as an `i64` using Redis' strict semantics.
+///
+/// Real Redis rejects leading or trailing whitespace, embedded NUL, empty
+/// strings, and any non-decimal characters except an optional leading sign.
+/// This mirrors `string2ll` in util.c.
+fn parse_strict_i64(bytes: &[u8]) -> Option<i64> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    s.parse::<i64>().ok()
+}
+
+/// Shared implementation for INCR / DECR / INCRBY / DECRBY.
+///
+/// Looks up the key, parses its current bytes as a strict `i64` (default 0
+/// if the key is absent), applies the signed delta with overflow checking,
+/// stores the resulting integer as ASCII decimal bytes under the key, and
+/// replies with the new value. Returns the canonical Redis errors when the
+/// existing value is not a parseable integer, when the key is the wrong
+/// type, or when the arithmetic would overflow `i64`.
+fn incr_decr_apply(ctx: &mut CommandContext, key: RedisString, delta: i64) -> Result<(), RedisError> {
+    let current: i64 = match ctx.db_mut().lookup_key_write(&key) {
+        None => 0,
+        Some(obj) => match &obj.kind {
+            ObjectKind::String(_) => {
+                let bytes = obj.as_bytes();
+                if bytes.is_empty() {
+                    return Err(RedisError::not_integer());
+                }
+                match parse_strict_i64(bytes) {
+                    Some(n) => n,
+                    None => return Err(RedisError::not_integer()),
+                }
+            }
+            _ => return Err(RedisError::wrong_type()),
+        },
+    };
+    let next = match current.checked_add(delta) {
+        Some(v) => v,
+        None => {
+            return Err(RedisError::runtime(
+                b"ERR increment or decrement would overflow",
+            ))
+        }
+    };
+    let stored = RedisObject::new_raw_string(&long_long_to_bytes(next));
+    ctx.db_mut().set_key(key, stored, SETKEY_KEEPTTL);
+    ctx.reply_integer(next)
+}
+
 /// INCR key
 ///
 /// C: `incrCommand` (t_string.c:731).
 pub fn incr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:731, incrCommand")
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"incr"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    incr_decr_apply(ctx, key, 1)
 }
 
 /// DECR key
 ///
 /// C: `decrCommand` (t_string.c:735).
 pub fn decr_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:735, decrCommand")
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"decr"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    incr_decr_apply(ctx, key, -1)
 }
 
 /// INCRBY key increment
 ///
 /// C: `incrbyCommand` (t_string.c:739).
 pub fn incrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:739, incrbyCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"incrby"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let delta_raw = ctx.arg_owned(2usize)?;
+    let delta = parse_strict_i64(delta_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    incr_decr_apply(ctx, key, delta)
 }
 
 /// DECRBY key decrement
 ///
 /// C: `decrbyCommand` (t_string.c:746).
 pub fn decrby_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:746, decrbyCommand")
+    if ctx.arg_count() != 3 {
+        return Err(RedisError::wrong_number_of_args(b"decrby"));
+    }
+    let key = ctx.arg_owned(1usize)?;
+    let delta_raw = ctx.arg_owned(2usize)?;
+    let delta = parse_strict_i64(delta_raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    let negated = match delta.checked_neg() {
+        Some(v) => v,
+        None => {
+            return Err(RedisError::runtime(
+                b"ERR increment or decrement would overflow",
+            ))
+        }
+    };
+    incr_decr_apply(ctx, key, negated)
 }
 
 /// INCRBYFLOAT key increment
