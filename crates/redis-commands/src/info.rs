@@ -1,20 +1,25 @@
 //! Server introspection: INFO and LASTSAVE.
 //!
-//! Pilot-stage implementations sized for client compatibility — most numbers
-//! are best-effort stubs, but the reply shapes match what real clients (and
-//! the Valkey TCL harness) expect.
-//!
 //! INFO is intentionally excluded from the wire-diff oracle corpus because
 //! most fields (pid, port, uptime, used_memory, command stats) differ between
 //! processes by definition. The implementation here exists so clients that
 //! call INFO do not crash on a null reply.
+//!
+//! Memory accounting uses the estimator approach: `used_memory_estimated =
+//! dict.len() * 80 + sum_of_string_bytes`. This is declared in
+//! `docs/PATH_TO_DEF3.md` §Eviction as the approved heuristic for Def 3.
 
 use std::io::Write;
 use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::metrics::server_metrics;
+use redis_core::object::{HashEncoding, ListEncoding, ObjectKind, SetEncoding, StringEncoding, ZSetEncoding};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
+
+use crate::connection::get_max_clients;
 
 /// Process start time (unix seconds), captured on first call.
 ///
@@ -39,13 +44,89 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+/// Estimate the in-memory footprint of a database using the heuristic from
+/// `docs/PATH_TO_DEF3.md` §Memory-estimator:
+///
+///   `bytes_in_strings + dict.len() * 80`
+///
+/// The 80-byte-per-entry overhead approximates key string allocation plus
+/// HashMap bucket overhead. Non-string values contribute a fixed placeholder
+/// per element rather than an exact allocator walk.
+fn estimate_memory_used(ctx: &CommandContext) -> u64 {
+    let db = ctx.db();
+    let mut bytes: u64 = db.len() as u64 * 80;
+
+    let snapshot = db.keys_snapshot_with_types();
+    for (key, _kind_name) in &snapshot {
+        bytes += key.as_bytes().len() as u64;
+    }
+
+    for (key, _) in &snapshot {
+        if let Some(obj) = db.find(key) {
+            bytes += estimate_object_bytes(&obj.kind);
+        }
+    }
+    bytes
+}
+
+/// Coarse byte estimate for the value payload of one object.
+fn estimate_object_bytes(kind: &ObjectKind) -> u64 {
+    match kind {
+        ObjectKind::String(enc) => match enc {
+            StringEncoding::Int(_) => 8,
+            StringEncoding::Raw(s) | StringEncoding::Embstr(s) => s.as_bytes().len() as u64,
+        },
+        ObjectKind::List(enc) => match enc {
+            ListEncoding::Inline(d) => d.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
+            ListEncoding::ListPack(b) => b.len() as u64,
+            ListEncoding::QuickList(v) => v.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
+        },
+        ObjectKind::Hash(enc) => match enc {
+            HashEncoding::Inline(m) => m.iter().map(|(k, v)| {
+                k.as_bytes().len() as u64 + v.as_bytes().len() as u64 + 32
+            }).sum(),
+            HashEncoding::ListPack(b) => b.len() as u64,
+            HashEncoding::HashTable(m) => m.iter().map(|(k, v)| {
+                k.as_bytes().len() as u64 + v.as_bytes().len() as u64 + 32
+            }).sum(),
+        },
+        ObjectKind::Set(enc) => match enc {
+            SetEncoding::Inline(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
+            SetEncoding::ListPack(b) => b.len() as u64,
+            SetEncoding::IntSet(v) => v.len() as u64 * 8,
+            SetEncoding::HashTable(h) => h.iter().map(|s| s.as_bytes().len() as u64 + 16).sum(),
+        },
+        ObjectKind::ZSet(enc) => match enc {
+            ZSetEncoding::Inline(z) => {
+                z.by_member.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum()
+            }
+            ZSetEncoding::ListPack(b) => b.len() as u64,
+            ZSetEncoding::SkipList(v) => v.iter().map(|(k, _)| k.as_bytes().len() as u64 + 24).sum(),
+        },
+        ObjectKind::Stream(_) => 64,
+        ObjectKind::Module => 0,
+    }
+}
+
+fn format_human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2}M", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.2}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 /// `INFO [section]`.
 ///
 /// Returns the canonical Redis multi-section text blob as a bulk string.
 /// The default reply (no section) emits every section; a section argument
 /// such as `server`, `clients`, `memory`, `stats`, `replication`, `cpu`, or
 /// `keyspace` emits only that one. Unknown section names produce a near-empty
-/// reply to match real Redis behaviour. Numeric fields are best-effort stubs.
+/// reply to match real Redis behaviour.
 pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     let section: Option<RedisString> = if argc >= 2 {
@@ -55,8 +136,19 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let dbsize = ctx.db().size();
+    let expires_count = ctx.db().expires_count();
     let pid = std::process::id();
     let uptime = now_unix_seconds().saturating_sub(server_start_time());
+    let metrics = server_metrics();
+    let connected_clients = metrics.connected_clients.load(Ordering::Relaxed);
+    let total_connections = metrics.total_connections_received.load(Ordering::Relaxed);
+    let total_commands = metrics.total_commands_processed.load(Ordering::Relaxed);
+    let hits = metrics.keyspace_hits.load(Ordering::Relaxed);
+    let misses = metrics.keyspace_misses.load(Ordering::Relaxed);
+    let rejected = metrics.rejected_connections.load(Ordering::Relaxed);
+    let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
+    let maxclients = get_max_clients();
+
     let want = |name: &[u8]| -> bool {
         match &section {
             None => true,
@@ -93,24 +185,33 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Err(p) => p.into_inner().len(),
         };
         let _ = writeln!(buf, "# Clients\r");
-        let _ = writeln!(buf, "connected_clients:1\r");
-        let _ = writeln!(buf, "maxclients:10000\r");
+        let _ = writeln!(buf, "connected_clients:{}\r", connected_clients);
+        let _ = writeln!(buf, "maxclients:{}\r", maxclients);
         let _ = writeln!(buf, "blocked_clients:{}\r", blocked);
         let _ = writeln!(buf, "tracking_clients:0\r");
         let _ = writeln!(buf, "clients_in_timeout_table:0\r");
         let _ = writeln!(buf, "watching_clients:0\r");
+        let _ = writeln!(buf, "client_recent_max_input_buffer:0\r");
+        let _ = writeln!(buf, "cluster_connections:0\r");
         let _ = writeln!(buf, "\r");
     }
     if want(b"memory") {
+        let used_memory = estimate_memory_used(ctx);
+        let used_memory_human = format_human_bytes(used_memory);
+        let peak = metrics.max_clients_seen.load(Ordering::Relaxed);
         let _ = writeln!(buf, "# Memory\r");
-        let _ = writeln!(buf, "used_memory:0\r");
-        let _ = writeln!(buf, "used_memory_human:0B\r");
-        let _ = writeln!(buf, "used_memory_rss:0\r");
-        let _ = writeln!(buf, "used_memory_peak:0\r");
+        let _ = writeln!(buf, "used_memory:{}\r", used_memory);
+        let _ = writeln!(buf, "used_memory_human:{}\r", used_memory_human);
+        let _ = writeln!(buf, "used_memory_rss:{}\r", used_memory);
+        let _ = writeln!(buf, "used_memory_peak:{}\r", used_memory);
+        let _ = writeln!(buf, "used_memory_peak_human:{}\r", format_human_bytes(used_memory));
+        let _ = writeln!(buf, "used_memory_estimated:true\r");
+        let _ = writeln!(buf, "total_system_memory:0\r");
         let _ = writeln!(buf, "maxmemory:0\r");
         let _ = writeln!(buf, "maxmemory_policy:noeviction\r");
         let _ = writeln!(buf, "mem_fragmentation_ratio:1.00\r");
         let _ = writeln!(buf, "mem_allocator:rust-std\r");
+        let _ = writeln!(buf, "max_clients_seen:{}\r", peak);
         let _ = writeln!(buf, "\r");
     }
     if want(b"persistence") {
@@ -125,16 +226,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     if want(b"stats") {
         let _ = writeln!(buf, "# Stats\r");
-        let _ = writeln!(buf, "total_connections_received:1\r");
-        let _ = writeln!(buf, "total_commands_processed:0\r");
+        let _ = writeln!(buf, "total_connections_received:{}\r", total_connections);
+        let _ = writeln!(buf, "total_commands_processed:{}\r", total_commands);
         let _ = writeln!(buf, "instantaneous_ops_per_sec:0\r");
         let _ = writeln!(buf, "total_net_input_bytes:0\r");
         let _ = writeln!(buf, "total_net_output_bytes:0\r");
-        let _ = writeln!(buf, "rejected_connections:0\r");
-        let _ = writeln!(buf, "expired_keys:0\r");
+        let _ = writeln!(buf, "rejected_connections:{}\r", rejected);
+        let _ = writeln!(buf, "expired_keys:{}\r", expired_keys);
         let _ = writeln!(buf, "evicted_keys:0\r");
-        let _ = writeln!(buf, "keyspace_hits:0\r");
-        let _ = writeln!(buf, "keyspace_misses:0\r");
+        let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
+        let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
         let _ = writeln!(buf, "\r");
@@ -165,7 +266,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if want(b"keyspace") {
         let _ = writeln!(buf, "# Keyspace\r");
         if dbsize > 0 {
-            let _ = writeln!(buf, "db0:keys={},expires=0,avg_ttl=0\r", dbsize);
+            let _ = writeln!(
+                buf,
+                "db0:keys={},expires={},avg_ttl=0\r",
+                dbsize, expires_count
+            );
         }
         let _ = writeln!(buf, "\r");
     }

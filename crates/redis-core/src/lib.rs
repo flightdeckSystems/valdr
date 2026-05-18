@@ -10,6 +10,7 @@
 //! Phases 2-3 of the pilot land here.
 
 pub mod evict;
+pub mod metrics;
 pub mod monotonic;
 pub mod blocked;
 pub mod blocked_keys;

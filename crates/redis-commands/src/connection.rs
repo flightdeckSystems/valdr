@@ -5,12 +5,33 @@
 //! they never need to touch the keyspace.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::expire::active_expire_config;
 use redis_core::object::{get_encoding_thresholds, update_encoding_thresholds};
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
+
+/// Default Valkey `maxclients` value. Matches upstream server.c default.
+pub const DEFAULT_MAX_CLIENTS: u64 = 10_000;
+
+static MAX_CLIENTS: OnceLock<AtomicU64> = OnceLock::new();
+
+/// Return the process-global `maxclients` limit (atomic; updated by CONFIG SET).
+pub fn get_max_clients() -> u64 {
+    MAX_CLIENTS
+        .get_or_init(|| AtomicU64::new(DEFAULT_MAX_CLIENTS))
+        .load(Ordering::Relaxed)
+}
+
+fn set_max_clients(n: u64) {
+    MAX_CLIENTS
+        .get_or_init(|| AtomicU64::new(DEFAULT_MAX_CLIENTS))
+        .store(n, Ordering::Relaxed);
+}
 
 /// `PING [message]`.
 ///
@@ -161,6 +182,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("maxmemory", "0"),
         ("maxmemory-policy", "noeviction"),
         ("maxmemory-samples", "5"),
+        ("maxclients", "10000"),
         ("appendonly", "no"),
         ("appendfsync", "everysec"),
         ("save", ""),
@@ -197,19 +219,32 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("lazyfree-lazy-expire", "no"),
         ("lazyfree-lazy-server-del", "no"),
         ("lazyfree-lazy-user-del", "no"),
+        ("active-expire-effort", "1"),
+        ("hz", "10"),
     ]
 }
 
-/// Builds the full CONFIG parameter list with dynamic encoding thresholds
-/// substituted in.
+/// Builds the full CONFIG parameter list with dynamic values substituted in.
 ///
 /// The static pairs in `default_config_pairs` are reproduced verbatim except
-/// for the eight encoding-threshold keys, whose values are taken from the
-/// live `EncodingThresholds` snapshot supplied by the caller. This ensures
-/// that `CONFIG GET` reflects any `CONFIG SET` that has already been applied.
+/// for the encoding-threshold keys and `maxclients`, whose values are taken from
+/// the live atomic state. This ensures that `CONFIG GET` reflects any
+/// `CONFIG SET` that has already been applied.
 fn config_pairs_with_dynamic(
     t: &redis_core::object::EncodingThresholds,
 ) -> Vec<(String, String)> {
+    let live_maxclients = get_max_clients().to_string();
+    let slowlog_handle = crate::slowlog_cmd::global_slowlog();
+    let (live_slowlog_threshold, live_slowlog_max_len) = {
+        let log = match slowlog_handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        (log.threshold.to_string(), log.max_len.to_string())
+    };
+    let (live_effort, live_hz) = active_expire_config().snapshot();
+    let live_effort_str = live_effort.to_string();
+    let live_hz_str = live_hz.to_string();
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
         let dynamic = match name {
@@ -221,6 +256,11 @@ fn config_pairs_with_dynamic(
             "set-max-listpack-value" => Some(t.set_max_listpack_value.to_string()),
             "zset-max-listpack-entries" => Some(t.zset_max_listpack_entries.to_string()),
             "zset-max-listpack-value" => Some(t.zset_max_listpack_value.to_string()),
+            "maxclients" => Some(live_maxclients.clone()),
+            "slowlog-log-slower-than" => Some(live_slowlog_threshold.clone()),
+            "slowlog-max-len" => Some(live_slowlog_max_len.clone()),
+            "active-expire-effort" => Some(live_effort_str.clone()),
+            "hz" => Some(live_hz_str.clone()),
             _ => None,
         };
         out.push((
@@ -280,6 +320,35 @@ fn apply_config_set(key: &[u8], value: &[u8]) {
         b"zset-max-listpack-value" => {
             if let Some(n) = parse_usize_strict(value) {
                 update_encoding_thresholds(|t| t.zset_max_listpack_value = n);
+            }
+        }
+        b"maxclients" => {
+            if let Some(n) = parse_usize_strict(value) {
+                if n >= 1 {
+                    set_max_clients(n as u64);
+                }
+            }
+        }
+        b"slowlog-log-slower-than" => {
+            if let Some(n) = parse_i64_strict(value) {
+                crate::slowlog_cmd::set_slowlog_threshold(n);
+            }
+        }
+        b"slowlog-max-len" => {
+            if let Some(n) = parse_usize_strict(value) {
+                crate::slowlog_cmd::set_slowlog_max_len(n);
+            }
+        }
+        b"active-expire-effort" => {
+            if let Some(n) = parse_usize_strict(value) {
+                let clamped = n.min(u8::MAX as usize) as u8;
+                active_expire_config().set_effort(clamped);
+            }
+        }
+        b"hz" => {
+            if let Some(n) = parse_usize_strict(value) {
+                let clamped = n.min(u32::MAX as usize) as u32;
+                active_expire_config().set_hz(clamped);
             }
         }
         _ => {}

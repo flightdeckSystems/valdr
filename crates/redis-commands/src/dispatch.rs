@@ -12,6 +12,8 @@
 //!    a Rust function. Commands with no handler yet are intentionally absent;
 //!    callers receive an `unknown command` error.
 
+use std::time::Instant;
+
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -69,12 +71,32 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// Dispatch using an externally-supplied command name.
 ///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
-/// argv without re-entering the queue logic.
+/// argv without re-entering the queue logic. Times the handler execution and
+/// records an entry in the global slowlog when the duration meets the threshold.
 pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> RedisResult<()> {
-    match lookup_command(name) {
-        Some(entry) => (entry.handler)(ctx),
-        None => Err(unknown_command_error(name)),
-    }
+    let entry = match lookup_command(name) {
+        Some(e) => e,
+        None => return Err(unknown_command_error(name)),
+    };
+
+    let argv_snapshot: Vec<RedisString> = (0..ctx.arg_count())
+        .filter_map(|i| ctx.client_ref().arg(i).cloned())
+        .collect();
+    let client_id = ctx.client_ref().id();
+    let client_name = ctx.client_ref().name.clone();
+
+    let start = Instant::now();
+    let result = (entry.handler)(ctx);
+    let elapsed_micros = start.elapsed().as_micros() as u64;
+
+    crate::slowlog_cmd::record_slowlog_entry(
+        &argv_snapshot,
+        elapsed_micros,
+        client_id,
+        client_name,
+    );
+
+    result
 }
 
 /// Build the canonical `unknown command '<name>'` error.
@@ -330,6 +352,9 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"XCLAIM", handler: crate::stream::xclaim_command },
     DispatchEntry { name: b"XAUTOCLAIM", handler: crate::stream::xautoclaim_command },
     DispatchEntry { name: b"XSETID", handler: crate::stream::xsetid_command },
+    // ── SLOWLOG / LATENCY (OV-2) ───────────────────────────────────────────────
+    DispatchEntry { name: b"SLOWLOG", handler: crate::slowlog_cmd::slowlog_command },
+    DispatchEntry { name: b"LATENCY", handler: crate::slowlog_cmd::latency_command },
 ];
 
 #[cfg(test)]

@@ -23,6 +23,7 @@
 //! which handles `*` and `?` but not `[...]` character classes yet.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,7 @@ use redis_types::{RedisError, RedisString};
 
 use crate::client::ClientId;
 use crate::command_context::CommandContext;
+use crate::metrics::server_metrics;
 use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 
 /// Global cross-connection MULTI/WATCH support.
@@ -311,8 +313,8 @@ impl RedisDb {
         // TODO(port): notifyKeyspaceEvent(NOTIFY_EXPIRED, "expired", keyobj, db->id)
         // TODO(port): signalModifiedKey(NULL, db, keyobj)
         // TODO(port): propagateDeletion to AOF + replicas
-        // TODO(port): server.stat_expiredkeys++
         self.dict.remove(key);
+        server_metrics().expired_keys.fetch_add(1, Ordering::Relaxed);
         KeyStatus::Deleted
     }
 
@@ -321,14 +323,23 @@ impl RedisDb {
     /// General-purpose key lookup with flags.
     ///
     /// C: db.c:80 lookupKey
-    pub fn lookup_key(&mut self, key: &RedisString, _flags: u32) -> Option<&RedisObject> {
+    pub fn lookup_key(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
         // TODO(port): LRU touch (unless LOOKUP_NOTOUCH or active child process)
-        // TODO(port): keyspace hit / miss counters (unless LOOKUP_NOSTATS | LOOKUP_WRITE)
         // TODO(port): keymiss keyspace notification (unless LOOKUP_NONOTIFY | LOOKUP_WRITE)
         if self.expire_if_needed(key, 0) != KeyStatus::Valid {
+            if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
+                server_metrics().keyspace_misses.fetch_add(1, Ordering::Relaxed);
+            }
             return None;
         }
-        self.dict.get(key)
+        let result = self.dict.get(key);
+        if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
+            match result {
+                Some(_) => server_metrics().keyspace_hits.fetch_add(1, Ordering::Relaxed),
+                None => server_metrics().keyspace_misses.fetch_add(1, Ordering::Relaxed),
+            };
+        }
+        result
     }
 
     /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
@@ -542,6 +553,13 @@ impl RedisDb {
         self.dict.len() as u64
     }
 
+    /// Number of keys that carry an active TTL (expire != EXPIRY_NONE).
+    ///
+    /// Used by `INFO keyspace` to populate the `expires=N` field.
+    pub fn expires_count(&self) -> u64 {
+        self.dict.values().filter(|o| o.expire != EXPIRY_NONE).count() as u64
+    }
+
     pub fn is_empty(&self) -> bool {
         self.dict.is_empty()
     }
@@ -590,6 +608,40 @@ impl RedisDb {
             .iter()
             .find(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now)
             .map(|(k, _)| k.clone())
+    }
+
+    /// Sample up to `max` (key, expire_ms) pairs from this db's keyspace for the
+    /// active-expiration cycle. Only keys that carry a TTL are returned;
+    /// untagged (persistent) keys are skipped. The starting offset is pseudo-
+    /// randomised from `offset_seed` to avoid biased deletion from HashMap
+    /// iteration order.
+    ///
+    /// PERF(port): O(n) walk over the main dict because Phase B has no
+    /// secondary `expires` index yet. Phase 4 kvstore work replaces this with
+    /// a direct sample over `db->expires`.
+    pub fn sample_expiring_keys(&self, max: usize, offset_seed: u64) -> Vec<(RedisString, i64)> {
+        if max == 0 || self.dict.is_empty() {
+            return Vec::new();
+        }
+        let len = self.dict.len();
+        let start = (offset_seed as usize) % len;
+        let mut out: Vec<(RedisString, i64)> = Vec::with_capacity(max);
+        for (k, obj) in self.dict.iter().cycle().skip(start).take(len) {
+            if obj.expire != EXPIRY_NONE {
+                out.push((k.clone(), obj.expire));
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Number of keys that currently carry a TTL.
+    ///
+    /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
+    pub fn expiring_key_count(&self) -> usize {
+        self.dict.iter().filter(|(_, obj)| obj.expire != EXPIRY_NONE).count()
     }
 
     /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.

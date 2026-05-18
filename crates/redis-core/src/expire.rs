@@ -10,13 +10,17 @@
 //!           `reference/valkey/src/expire.h` (76 lines)
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
 
 use redis_types::{RedisError, RedisString};
 
 use crate::command_context::CommandContext;
 use crate::db::{LOOKUP_NOTOUCH, RedisDb};
+use crate::metrics::ServerMetrics;
 use crate::object::RedisObject;
 use crate::server::RedisServer;
 
@@ -999,6 +1003,224 @@ fn expire_time_error(cmd_name: &[u8]) -> RedisError {
 /// uppercase wire token but Redis embeds the lowercase form.
 fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| b.to_ascii_lowercase()).collect()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase-B active-expiration driver
+//
+// A minimal background thread that reaps TTL keys without depending on the
+// half-ported `active_expire_cycle_job` (which is blocked on kvstore). Real
+// Redis runs the equivalent of this from `serverCron` inside the event loop;
+// our thread polls every `1000ms / hz` and samples up to `20 * effort` keys
+// per tick. When the sample fills with expired entries (>25%) the thread
+// repeats without sleeping until the budget cap (~25 ms) is exhausted.
+//
+// Config is held in `ACTIVE_EXPIRE_CONFIG` as a pair of atomics so the
+// CONFIG SET path can flip values mid-flight without taking a Mutex on the
+// hot loop. The thread re-reads both atomics on every tick.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Maximum wall-time budget for a single active-expire tick. The thread will
+/// stop the aggressive (>25% expired) inner loop once this many milliseconds
+/// have elapsed since the tick began, so that other connections can make
+/// progress.
+const ACTIVE_EXPIRE_TICK_BUDGET_MS: u128 = 25;
+
+/// Number of keys sampled per pass per effort unit. effort=1 → 20 keys,
+/// effort=10 → 200 keys.
+const ACTIVE_EXPIRE_KEYS_PER_EFFORT: usize = 20;
+
+/// Effort/hz pair driving the active-expiration thread.
+///
+/// `effort` of `0` disables the thread (it observes the value and idles); any
+/// non-zero value enables sampling. `hz` controls how often the thread wakes
+/// — `1000 / hz` ms between ticks, default `10` (100 ms tick interval).
+pub struct ActiveExpireConfig {
+    pub effort: AtomicU8,
+    pub hz: AtomicU32,
+}
+
+impl ActiveExpireConfig {
+    /// Default config: effort=1 (minimum aggressiveness), hz=10 (10 Hz wake).
+    pub const fn default_const() -> Self {
+        Self {
+            effort: AtomicU8::new(1),
+            hz: AtomicU32::new(10),
+        }
+    }
+
+    pub fn snapshot(&self) -> (u8, u32) {
+        (self.effort.load(Ordering::Relaxed), self.hz.load(Ordering::Relaxed))
+    }
+
+    pub fn set_effort(&self, effort: u8) {
+        let clamped = effort.min(10);
+        self.effort.store(clamped, Ordering::Relaxed);
+    }
+
+    pub fn set_hz(&self, hz: u32) {
+        let clamped = hz.clamp(1, 500);
+        self.hz.store(clamped, Ordering::Relaxed);
+    }
+}
+
+static ACTIVE_EXPIRE_CONFIG: OnceLock<Arc<ActiveExpireConfig>> = OnceLock::new();
+
+/// Process-global active-expire config. First caller initialises with the
+/// default; CONFIG SET and the spawn helper both go through here.
+pub fn active_expire_config() -> &'static Arc<ActiveExpireConfig> {
+    ACTIVE_EXPIRE_CONFIG.get_or_init(|| Arc::new(ActiveExpireConfig::default_const()))
+}
+
+/// Spawn the active-expire background thread. Returns the join handle so the
+/// caller can `.join()` on shutdown if desired. The thread runs until the
+/// process exits; there is intentionally no stop flag because the binary's
+/// shutdown path tears everything down with the process.
+pub fn spawn_active_expire_thread(
+    db: Arc<Mutex<RedisDb>>,
+    config: Arc<ActiveExpireConfig>,
+    metrics: Option<Arc<ServerMetrics>>,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("active-expire".to_string())
+        .spawn(move || active_expire_loop(db, config, metrics))
+        .unwrap_or_else(|e| {
+            eprintln!("active-expire: thread spawn failed: {}", e);
+            thread::spawn(|| {})
+        })
+}
+
+fn active_expire_loop(
+    db: Arc<Mutex<RedisDb>>,
+    config: Arc<ActiveExpireConfig>,
+    metrics: Option<Arc<ServerMetrics>>,
+) {
+    loop {
+        let (effort, hz) = config.snapshot();
+        let sleep_ms = if hz == 0 { 100 } else { (1000 / hz).max(1) };
+        thread::sleep(Duration::from_millis(sleep_ms as u64));
+
+        if effort == 0 {
+            continue;
+        }
+
+        run_active_expire_tick(&db, effort, metrics.as_deref());
+    }
+}
+
+/// One tick of the active-expire cycle. Locks the db, samples, deletes
+/// expired, repeats while >25% of the sample was expired and the tick budget
+/// has not been exhausted. Returns the number of keys deleted.
+fn run_active_expire_tick(
+    db: &Arc<Mutex<RedisDb>>,
+    effort: u8,
+    metrics: Option<&ServerMetrics>,
+) -> u64 {
+    let sample_size = ACTIVE_EXPIRE_KEYS_PER_EFFORT.saturating_mul(effort as usize);
+    if sample_size == 0 {
+        return 0;
+    }
+
+    let tick_start = std::time::Instant::now();
+    let mut total_deleted: u64 = 0;
+
+    loop {
+        let now_ms = wall_clock_ms();
+        let seed = pseudo_random_seed();
+
+        let expired_in_pass = {
+            let mut guard = match db.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let sample = guard.sample_expiring_keys(sample_size, seed);
+            let mut deleted: u64 = 0;
+            for (key, expire_at) in &sample {
+                if *expire_at <= now_ms {
+                    if guard.sync_delete(key) {
+                        deleted += 1;
+                    }
+                }
+            }
+            (sample.len(), deleted)
+        };
+
+        let (sampled, deleted) = expired_in_pass;
+        total_deleted = total_deleted.saturating_add(deleted);
+        if let Some(m) = metrics {
+            if deleted > 0 {
+                m.expired_keys.fetch_add(deleted, Ordering::Relaxed);
+            }
+        }
+
+        if sampled == 0 {
+            break;
+        }
+        let threshold = sampled / 4;
+        let should_repeat = (deleted as usize) > threshold;
+        if !should_repeat {
+            break;
+        }
+        if tick_start.elapsed().as_millis() >= ACTIVE_EXPIRE_TICK_BUDGET_MS {
+            break;
+        }
+    }
+
+    total_deleted
+}
+
+fn wall_clock_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Cheap pseudo-random seed for sample-start offsets. Uses the system
+/// monotonic clock so successive ticks pick different starting points
+/// without pulling in the `rand` crate.
+fn pseudo_random_seed() -> u64 {
+    get_monotonic_us()
+}
+
+#[cfg(test)]
+mod active_expire_tests {
+    use super::*;
+    use crate::object::{ObjectKind, RedisObject, StringEncoding, EXPIRY_NONE};
+
+    fn make_str_obj_with_expire(value: &[u8], expire: i64) -> RedisObject {
+        RedisObject {
+            lru: Default::default(),
+            expire,
+            kind: ObjectKind::String(StringEncoding::Raw(RedisString::from_bytes(value))),
+        }
+    }
+
+    #[test]
+    fn tick_reaps_expired_keys() {
+        let db = Arc::new(Mutex::new(RedisDb::new(0)));
+        {
+            let mut guard = db.lock().expect("lock");
+            let past = 1i64;
+            guard.add(RedisString::from_bytes(b"a"), make_str_obj_with_expire(b"v", past));
+            guard.add(RedisString::from_bytes(b"b"), make_str_obj_with_expire(b"v", past));
+            guard.add(RedisString::from_bytes(b"c"), make_str_obj_with_expire(b"v", past));
+            guard.add(RedisString::from_bytes(b"keep"), make_str_obj_with_expire(b"v", EXPIRY_NONE));
+        }
+        let deleted = run_active_expire_tick(&db, 1, None);
+        assert!(deleted >= 3, "expected to reap at least 3 expired keys, got {}", deleted);
+        let guard = db.lock().expect("lock");
+        assert!(guard.exists_raw(&RedisString::from_bytes(b"keep")));
+    }
+
+    #[test]
+    fn tick_with_effort_zero_skipped_by_loop() {
+        let config = Arc::new(ActiveExpireConfig::default_const());
+        config.set_effort(0);
+        let (effort, _) = config.snapshot();
+        assert_eq!(effort, 0);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

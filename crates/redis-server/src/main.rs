@@ -24,10 +24,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
+use redis_core::expire::{active_expire_config, spawn_active_expire_thread};
+use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::frame::{encode_resp2, RespFrame};
@@ -183,11 +186,16 @@ fn main() {
     eprintln!("redis-server: listening on {}", addr);
     emit_startup_log();
 
+    let _ = server_metrics();
+
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
-    serve(listener, shutdown, db, next_client_id, registry);
+    let active_expire_cfg = Arc::clone(active_expire_config());
+    let metrics_arc = Arc::clone(server_metrics());
+    let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
+    serve(listener, shutdown, db, next_client_id, registry, args.port);
 }
 
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
@@ -222,12 +230,17 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
 fn install_shutdown_handler(_shutdown: Arc<AtomicBool>) {}
 
 /// Accept loop. One std::thread per accepted connection.
+///
+/// Before spawning a handler thread, checks the live `maxclients` limit against
+/// the `connected_clients` counter in `ServerMetrics`. When the limit is
+/// reached, writes the canonical error reply and closes the socket.
 fn serve(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     db: Arc<Mutex<RedisDb>>,
     next_client_id: Arc<AtomicU64>,
     registry: Arc<Mutex<PubSubRegistry>>,
+    tcp_port: u16,
 ) {
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -235,7 +248,17 @@ fn serve(
             return;
         }
         match incoming {
-            Ok(stream) => {
+            Ok(mut stream) => {
+                let metrics = server_metrics();
+                let current = metrics.connected_clients.load(Ordering::Relaxed);
+                let limit = get_max_clients();
+                if current >= limit {
+                    metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                    let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
+                    drop(stream);
+                    continue;
+                }
+
                 if let Err(e) = stream.set_nodelay(true) {
                     eprintln!("redis-server: set_nodelay failed: {}", e);
                 }
@@ -247,9 +270,11 @@ fn serve(
                 let db = Arc::clone(&db);
                 let registry = Arc::clone(&registry);
                 let id = next_client_id.fetch_add(1, Ordering::Relaxed);
+                metrics.on_connect();
+                metrics.total_connections_received.fetch_add(1, Ordering::Relaxed);
                 let _ = thread::Builder::new()
                     .name(format!("client-{}", peer))
-                    .spawn(move || handle_connection(stream, shutdown, db, id, peer, registry));
+                    .spawn(move || handle_connection(stream, shutdown, db, id, peer, registry, tcp_port));
             }
             Err(e) => {
                 eprintln!("redis-server: accept failed: {}", e);
@@ -292,7 +317,9 @@ fn handle_connection(
     id: u64,
     peer_addr: String,
     registry: Arc<Mutex<PubSubRegistry>>,
+    tcp_port: u16,
 ) {
+    let _ = tcp_port;
     let writer_clone = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -374,6 +401,7 @@ fn handle_connection(
     let _ = pubsub::drop_client_from_registry(&registry, id);
     client.clear_blocked_on_keys();
     drop(outbound);
+    server_metrics().on_disconnect();
 }
 
 /// Install `argv` as the current command and route through the dispatcher.
@@ -390,6 +418,7 @@ fn process_command(
 ) {
     client.clear_blocked_on_keys();
     client.set_args(argv);
+    server_metrics().total_commands_processed.fetch_add(1, Ordering::Relaxed);
     let result = {
         let mut guard = match db.lock() {
             Ok(g) => g,

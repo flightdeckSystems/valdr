@@ -21,6 +21,7 @@ pub mod list;
 pub mod multi;
 pub mod pubsub;
 pub mod set;
+pub mod slowlog_cmd;
 pub mod stream;
 pub mod string;
 pub mod zset;
