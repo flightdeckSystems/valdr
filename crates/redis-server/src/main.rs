@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use redis_commands::connection::get_max_clients;
+use redis_commands::connection::{get_max_clients, set_max_clients};
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
 use redis_core::command_context::CommandContext;
@@ -44,6 +44,7 @@ const DEFAULT_BIND: &str = "127.0.0.1";
 struct CliArgs {
     port: u16,
     bind: String,
+    maxclients: u64,
 }
 
 impl Default for CliArgs {
@@ -51,6 +52,7 @@ impl Default for CliArgs {
         Self {
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
+            maxclients: get_max_clients(),
         }
     }
 }
@@ -122,6 +124,11 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
                     args.bind = first_addr.to_string();
                 }
             }
+            "maxclients" => {
+                if let Ok(v) = value.parse::<u64>() {
+                    args.maxclients = v;
+                }
+            }
             _ => {}
         }
     }
@@ -186,7 +193,8 @@ fn main() {
     eprintln!("redis-server: listening on {}", addr);
     emit_startup_log();
 
-    let _ = server_metrics();
+    server_metrics().set_tcp_port(args.port);
+    set_max_clients(args.maxclients);
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
@@ -418,7 +426,9 @@ fn process_command(
 ) {
     client.clear_blocked_on_keys();
     client.set_args(argv);
-    server_metrics().total_commands_processed.fetch_add(1, Ordering::Relaxed);
+    let metrics = server_metrics();
+    metrics.total_commands_processed.fetch_add(1, Ordering::Relaxed);
+    let t0 = SystemTime::now();
     let result = {
         let mut guard = match db.lock() {
             Ok(g) => g,
@@ -427,6 +437,13 @@ fn process_command(
         let mut ctx = CommandContext::with_db_and_pubsub(client, &mut guard, Arc::clone(registry));
         dispatch(&mut ctx)
     };
+    let elapsed_us = t0
+        .elapsed()
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    metrics
+        .active_time_main_thread_us
+        .fetch_add(elapsed_us, Ordering::Relaxed);
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);

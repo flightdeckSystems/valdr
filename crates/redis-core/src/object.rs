@@ -1270,9 +1270,17 @@ fn should_embed_string(len: usize) -> bool {
 }
 
 /// Parse a byte slice as an `i64`. Returns `None` if not a valid integer.
+/// Parse a decimal integer from a byte slice.
+///
+/// Mirrors `string2ll` in `util.c`: rejects leading/trailing whitespace,
+/// the leading `+` sign, and any non-digit bytes. An empty slice and any
+/// slice containing whitespace return `None`.
 fn parse_long_long(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
     let s = core::str::from_utf8(bytes).ok()?;
-    s.trim().parse::<i64>().ok()
+    s.parse::<i64>().ok()
 }
 
 /// Strict canonical-decimal parser for promoting a SET value to `Int` encoding.

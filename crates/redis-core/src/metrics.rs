@@ -7,7 +7,7 @@
 //! `info.rs`, `db.rs`, and `main.rs` can all reach the same instance without
 //! threading the object through every call-site parameter list.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +30,8 @@ pub fn server_metrics() -> &'static Arc<ServerMetrics> {
 pub struct ServerMetrics {
     /// Unix milliseconds when the server process started.
     pub start_time_ms: u64,
+    /// TCP port the server is bound to. Written once at startup.
+    pub tcp_port: AtomicU16,
     /// Number of clients whose TCP session is currently open.
     pub connected_clients: AtomicU64,
     /// Peak value of `connected_clients` ever observed.
@@ -46,12 +48,15 @@ pub struct ServerMetrics {
     pub rejected_connections: AtomicU64,
     /// Keys removed by lazy or active expiration.
     pub expired_keys: AtomicU64,
+    /// Cumulative microseconds spent inside command dispatch on the main thread.
+    pub active_time_main_thread_us: AtomicU64,
 }
 
 impl ServerMetrics {
     fn new(start_time_ms: u64) -> Self {
         Self {
             start_time_ms,
+            tcp_port: AtomicU16::new(0),
             connected_clients: AtomicU64::new(0),
             max_clients_seen: AtomicU64::new(0),
             total_connections_received: AtomicU64::new(0),
@@ -60,6 +65,7 @@ impl ServerMetrics {
             keyspace_misses: AtomicU64::new(0),
             rejected_connections: AtomicU64::new(0),
             expired_keys: AtomicU64::new(0),
+            active_time_main_thread_us: AtomicU64::new(0),
         }
     }
 
@@ -85,5 +91,39 @@ impl ServerMetrics {
     /// Decrement `connected_clients` on disconnect.
     pub fn on_disconnect(&self) {
         self.connected_clients.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Store the TCP port the server bound. Called once after `TcpListener::bind`
+    /// succeeds, before any connection is accepted.
+    pub fn set_tcp_port(&self, port: u16) {
+        self.tcp_port.store(port, Ordering::Relaxed);
+    }
+}
+
+/// Return the resident set size of this process in bytes, or `None` if the
+/// platform does not expose `/proc/self/statm` or reading it fails.
+///
+/// On Linux each field in `/proc/self/statm` is measured in pages. The second
+/// field is the resident set size. Multiply by `sysconf(_SC_PAGESIZE)` —
+/// approximated here as 4096 bytes because `libc::sysconf` would add a C FFI
+/// dependency. Real page sizes other than 4096 (e.g. huge-page kernels) will
+/// produce a proportional error, which is acceptable for the INFO estimator.
+///
+/// TODO(architect): replace the 4096 constant with a `sysconf(_SC_PAGESIZE)`
+/// call once we accept the `libc` dependency.
+pub fn rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let rss_pages: u64 = text
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
+        Some(rss_pages * 4096)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
     }
 }

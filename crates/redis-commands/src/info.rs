@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redis_core::metrics::server_metrics;
+use redis_core::metrics::{rss_bytes, server_metrics};
 use redis_core::object::{HashEncoding, ListEncoding, ObjectKind, SetEncoding, StringEncoding, ZSetEncoding};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -129,11 +129,20 @@ fn format_human_bytes(bytes: u64) -> String {
 /// reply to match real Redis behaviour.
 pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    let section: Option<RedisString> = if argc >= 2 {
-        Some(ctx.arg_owned(1usize)?)
-    } else {
-        None
-    };
+
+    let mut sections: Vec<RedisString> = Vec::new();
+    for i in 1..argc {
+        sections.push(ctx.arg_owned(i)?);
+    }
+
+    let has_all = sections.iter().any(|s| {
+        ascii_eq_ignore_case(s.as_bytes(), b"all")
+            || ascii_eq_ignore_case(s.as_bytes(), b"everything")
+    });
+    let has_default = sections.is_empty()
+        || sections
+            .iter()
+            .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"default"));
 
     let dbsize = ctx.db().size();
     let expires_count = ctx.db().expires_count();
@@ -147,19 +156,22 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let misses = metrics.keyspace_misses.load(Ordering::Relaxed);
     let rejected = metrics.rejected_connections.load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
+    let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
     let maxclients = get_max_clients();
 
     let want = |name: &[u8]| -> bool {
-        match &section {
-            None => true,
-            Some(s) => {
-                ascii_eq_ignore_case(s.as_bytes(), name)
-                    || ascii_eq_ignore_case(s.as_bytes(), b"all")
-                    || ascii_eq_ignore_case(s.as_bytes(), b"default")
-                    || ascii_eq_ignore_case(s.as_bytes(), b"everything")
-            }
+        if has_all || has_default {
+            return true;
         }
+        sections
+            .iter()
+            .any(|s| ascii_eq_ignore_case(s.as_bytes(), name))
     };
+
+    let want_commandstats = has_all
+        || sections
+            .iter()
+            .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"commandstats"));
 
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
 
@@ -173,7 +185,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "os:{}\r", std::env::consts::OS);
         let _ = writeln!(buf, "arch_bits:64\r");
         let _ = writeln!(buf, "process_id:{}\r", pid);
-        let _ = writeln!(buf, "tcp_port:0\r");
+        let _ = writeln!(buf, "tcp_port:{}\r", metrics.tcp_port.load(Ordering::Relaxed));
         let _ = writeln!(buf, "uptime_in_seconds:{}\r", uptime);
         let _ = writeln!(buf, "uptime_in_days:{}\r", uptime / 86400);
         let _ = writeln!(buf, "hz:10\r");
@@ -199,10 +211,16 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let used_memory = estimate_memory_used(ctx);
         let used_memory_human = format_human_bytes(used_memory);
         let peak = metrics.max_clients_seen.load(Ordering::Relaxed);
+        let (rss, rss_source) = match rss_bytes() {
+            Some(r) => (r, "proc"),
+            None => (used_memory, "estimated"),
+        };
         let _ = writeln!(buf, "# Memory\r");
         let _ = writeln!(buf, "used_memory:{}\r", used_memory);
         let _ = writeln!(buf, "used_memory_human:{}\r", used_memory_human);
-        let _ = writeln!(buf, "used_memory_rss:{}\r", used_memory);
+        let _ = writeln!(buf, "used_memory_rss:{}\r", rss);
+        let _ = writeln!(buf, "used_memory_rss_human:{}\r", format_human_bytes(rss));
+        let _ = writeln!(buf, "used_memory_rss_source:{}\r", rss_source);
         let _ = writeln!(buf, "used_memory_peak:{}\r", used_memory);
         let _ = writeln!(buf, "used_memory_peak_human:{}\r", format_human_bytes(used_memory));
         let _ = writeln!(buf, "used_memory_estimated:true\r");
@@ -238,6 +256,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
+        let _ = writeln!(buf, "used_active_time_main_thread:{}\r", active_time_us);
         let _ = writeln!(buf, "\r");
     }
     if want(b"replication") {
@@ -254,8 +273,15 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "used_cpu_user:0.0\r");
         let _ = writeln!(buf, "\r");
     }
-    if want(b"commandstats") {
+    if want_commandstats {
+        // TODO(architect): replace stub with real per-command call/usec counters
+        // once dispatch.rs timing wrap (OV-2) accumulates into a shared HashMap.
         let _ = writeln!(buf, "# Commandstats\r");
+        let _ = writeln!(
+            buf,
+            "cmdstat_info:calls={},usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0\r",
+            total_commands
+        );
         let _ = writeln!(buf, "\r");
     }
     if want(b"cluster") {

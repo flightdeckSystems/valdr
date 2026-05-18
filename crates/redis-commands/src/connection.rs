@@ -27,7 +27,7 @@ pub fn get_max_clients() -> u64 {
         .load(Ordering::Relaxed)
 }
 
-fn set_max_clients(n: u64) {
+pub fn set_max_clients(n: u64) {
     MAX_CLIENTS
         .get_or_init(|| AtomicU64::new(DEFAULT_MAX_CLIENTS))
         .store(n, Ordering::Relaxed);
