@@ -166,6 +166,14 @@ pub struct Client {
     /// path or the per-server timeout thread when those deliver the reply
     /// via the client's outbound mpsc.
     pub blocked_on_keys: bool,
+    /// Keys that need blocked-waiter wakes deferred until after EXEC drains.
+    ///
+    /// Populated by list push/move commands when `flag_deny_blocking` is set
+    /// (i.e. the command is running inside an EXEC drain). After the drain
+    /// completes and `flag_deny_blocking` is cleared, `exec_command` takes
+    /// this vec and fires the real `wake_blocked_for_key` for each entry in
+    /// insertion order.
+    pub pending_wakes: Vec<RedisString>,
 }
 
 /// Per-client transient flags.
@@ -202,6 +210,7 @@ impl Client {
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
             blocked_on_keys: false,
+            pending_wakes: Vec::new(),
         }
     }
 
@@ -246,6 +255,7 @@ impl Client {
         self.resp_proto = 2;
         self.subscribed_channels.clear();
         self.subscribed_patterns.clear();
+        self.pending_wakes.clear();
         crate::db::watched_keys_index_remove_client(self.id);
         let _ = crate::db::watched_keys_take_dirty(self.id);
         self.clear_blocked_on_keys();

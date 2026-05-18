@@ -212,6 +212,9 @@ fn encode_bulk_reply(value: &RedisString) -> Vec<u8> {
 /// receives the canonical reply through its mpsc sender, and is removed from
 /// every queue it was parked on. Loop terminates when `key` becomes empty or
 /// no waiter remains.
+///
+/// Call sites inside EXEC drain should use `schedule_or_wake` instead so that
+/// wakes are deferred until after EXEC completes.
 pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) {
     loop {
         let value_present = matches!(
@@ -235,6 +238,22 @@ pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) {
     }
 }
 
+/// Wake blocked waiters for `key`, or defer the wake if the calling client is
+/// currently inside an EXEC drain.
+///
+/// When `ctx.client_ref().flag_deny_blocking()` is true the command is
+/// executing inside `exec_command`'s queue drain; in that case the key is
+/// appended to `client.pending_wakes` so `exec_command` can fire the real
+/// wake after the drain finishes. Otherwise `wake_blocked_for_key` is called
+/// immediately.
+fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
+    if ctx.client_ref().flag_deny_blocking() {
+        ctx.client_mut().pending_wakes.push(key.clone());
+    } else {
+        wake_blocked_for_key(ctx.db_mut(), key);
+    }
+}
+
 /// Pop one element to satisfy `waiter` and ship the encoded reply.
 ///
 /// For BLMOVE/BRPOPLPUSH actions the destination type is verified at wake
@@ -250,6 +269,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             dst_key,
             dst_side,
         } => (*side, Some((dst_key.clone(), *dst_side))),
+        BlockedAction::Stream { .. } => return,
     };
     if let Some((dst_key, _)) = &dst {
         if let Some(dst_obj) = db.lookup_key_read(dst_key) {
@@ -337,7 +357,7 @@ fn push_generic(
             deque.len() as i64
         }
     };
-    wake_blocked_for_key(ctx.db_mut(), &key);
+    schedule_or_wake(ctx, &key);
     ctx.reply_integer(new_len)
 }
 
@@ -754,7 +774,7 @@ fn lmove_generic(
             ctx.db_mut().set_key(dst_key.clone(), obj, 0);
         }
     }
-    wake_blocked_for_key(ctx.db_mut(), &dst_key);
+    schedule_or_wake(ctx, &dst_key);
     ctx.reply_bulk_string(value)
 }
 
@@ -1082,6 +1102,7 @@ fn park_blocked_client(
         return match action {
             BlockedAction::Pop { .. } => ctx.reply_null_array(),
             BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+            BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
         };
     }
     let registry = match ctx.pubsub.as_ref() {
@@ -1090,6 +1111,7 @@ fn park_blocked_client(
             return match action {
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+                BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
             };
         }
     };
@@ -1106,6 +1128,7 @@ fn park_blocked_client(
             return match action {
                 BlockedAction::Pop { .. } => ctx.reply_null_array(),
                 BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+                BlockedAction::Stream { .. } => ctx.reply_null_bulk(),
             };
         }
     };

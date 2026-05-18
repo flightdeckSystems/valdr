@@ -322,6 +322,14 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"XTRIM", handler: crate::stream::xtrim_command },
     DispatchEntry { name: b"XREAD", handler: crate::stream::xread_command },
     DispatchEntry { name: b"XINFO", handler: crate::stream::xinfo_command },
+    // ── STREAM CONSUMER GROUPS (Round 13c) ─────────────────────────────────
+    DispatchEntry { name: b"XGROUP", handler: crate::stream::xgroup_command },
+    DispatchEntry { name: b"XREADGROUP", handler: crate::stream::xreadgroup_command },
+    DispatchEntry { name: b"XACK", handler: crate::stream::xack_command },
+    DispatchEntry { name: b"XPENDING", handler: crate::stream::xpending_command },
+    DispatchEntry { name: b"XCLAIM", handler: crate::stream::xclaim_command },
+    DispatchEntry { name: b"XAUTOCLAIM", handler: crate::stream::xautoclaim_command },
+    DispatchEntry { name: b"XSETID", handler: crate::stream::xsetid_command },
 ];
 
 #[cfg(test)]

@@ -201,7 +201,6 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
     let _ = thread::Builder::new()
         .name("blocked-timeout".to_string())
         .spawn(move || {
-            use redis_core::blocked_keys::BlockedAction;
             while !shutdown.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(100));
                 let expired = {
@@ -212,10 +211,7 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
                     idx.take_expired(current_time_ms())
                 };
                 for waiter in expired {
-                    let reply: &[u8] = match waiter.action {
-                        BlockedAction::Pop { .. } => b"*-1\r\n",
-                        BlockedAction::Move { .. } => b"$-1\r\n",
-                    };
+                    let reply = waiter.action.timeout_reply_bytes();
                     let _ = waiter.sender.send(reply.to_vec());
                 }
             }

@@ -1,4 +1,4 @@
-//! Global cross-connection BLPOP/BRPOP/BLMOVE/BRPOPLPUSH/BLMPOP wait queue.
+//! Global cross-connection BLPOP/BRPOP/BLMOVE/BRPOPLPUSH/BLMPOP/XREAD BLOCK wait queue.
 //!
 //! Each entry holds a per-client `mpsc::Sender<Vec<u8>>` (the same writer-thread
 //! channel that `PubSubRegistry` uses) plus a `BlockSpec` describing how to
@@ -11,13 +11,15 @@
 //! All access goes through `Arc<Mutex<BlockedKeysIndex>>` returned by
 //! [`blocked_keys_index`]. The blocking command handler inserts a waiter;
 //! the LIST family's push hook drains FIFO entries via [`take_waiter`]; the
-//! timer thread drains expired entries via [`take_expired`].
+//! STREAM family's XADD wakes stream waiters via [`take_stream_waiters_for`];
+//! the timer thread drains expired entries via [`take_expired`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_ds::stream::StreamId;
 use redis_types::RedisString;
 
 use crate::client::ClientId;
@@ -34,6 +36,8 @@ pub enum BlockedSide {
 /// `Pop` returns a `*2 [key, value]` reply (BLPOP / BRPOP / BLMPOP shape).
 /// `Move` pops from the source and pushes onto `dst_key` at `dst_side`, then
 /// replies with a bulk-string of the moved value (BLMOVE / BRPOPLPUSH shape).
+/// `Stream` parks the client until a new entry with id strictly greater than
+/// `id_after` arrives on the stream key (XREAD BLOCK shape).
 #[derive(Debug, Clone)]
 pub enum BlockedAction {
     Pop { side: BlockedSide },
@@ -42,6 +46,23 @@ pub enum BlockedAction {
         dst_key: RedisString,
         dst_side: BlockedSide,
     },
+    Stream { id_after: StreamId },
+}
+
+impl BlockedAction {
+    /// Return the RESP bytes to send when this waiter's deadline expires with
+    /// no data delivered.
+    ///
+    /// BLPOP / BRPOP / BLMPOP: null array (`*-1\r\n`).
+    /// BLMOVE / BRPOPLPUSH: null bulk (`$-1\r\n`).
+    /// XREAD BLOCK: null bulk (`$-1\r\n`) — matches real Redis behaviour.
+    pub fn timeout_reply_bytes(&self) -> &'static [u8] {
+        match self {
+            BlockedAction::Pop { .. } => b"*-1\r\n",
+            BlockedAction::Move { .. } => b"$-1\r\n",
+            BlockedAction::Stream { .. } => b"$-1\r\n",
+        }
+    }
 }
 
 /// One blocked client's full wait spec.
@@ -122,6 +143,36 @@ impl BlockedKeysIndex {
         for cid in expired {
             if let Some(w) = self.remove_client(cid) {
                 out.push(w);
+            }
+        }
+        out
+    }
+
+    /// Drain all `Stream` waiters for `key` whose `id_after` is strictly less
+    /// than `new_id`, remove them from the index, and return their records.
+    ///
+    /// Unlike list pop semantics (FIFO, one waiter per element), XREAD BLOCK
+    /// uses broadcast semantics: every blocked reader whose cursor is behind
+    /// the new entry receives a wake, and all of them receive the same entry.
+    pub fn take_stream_waiters_for(
+        &mut self,
+        key: &RedisString,
+        new_id: StreamId,
+    ) -> Vec<BlockedWaiter> {
+        let client_ids: Vec<ClientId> = match self.keys.get(key) {
+            None => return Vec::new(),
+            Some(deque) => deque.iter().copied().collect(),
+        };
+        let mut out = Vec::new();
+        for cid in client_ids {
+            let matches = match self.waiters.get(&cid) {
+                Some(w) => matches!(&w.action, BlockedAction::Stream { id_after } if *id_after < new_id),
+                None => false,
+            };
+            if matches {
+                if let Some(w) = self.remove_client(cid) {
+                    out.push(w);
+                }
             }
         }
         out

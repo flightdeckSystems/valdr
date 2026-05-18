@@ -31,6 +31,8 @@ use redis_core::db::{
 use redis_protocol::frame::{encode_resp2, RespFrame};
 use redis_types::{RedisError, RedisResult, RedisString};
 
+use crate::list::wake_blocked_for_key;
+
 use crate::dispatch::{dispatch_command_name, lookup_command};
 
 const NAME_RESET: &[u8] = b"RESET";
@@ -167,6 +169,12 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     ctx.client_mut().set_flag_deny_blocking(false);
+
+    let deferred_keys: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
+    for key in deferred_keys {
+        wake_blocked_for_key(ctx.db_mut(), &key);
+    }
+
     reset_multi_state(ctx.client_mut());
     header_res
 }

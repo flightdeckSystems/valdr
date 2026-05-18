@@ -13,6 +13,7 @@
 //! replaces this with a real radix-tree + listpack representation.
 
 use redis_types::RedisString;
+use std::collections::HashMap;
 
 /// 128-bit composite stream identifier `(ms, seq)`.
 ///
@@ -117,6 +118,45 @@ pub struct StreamEntry {
     pub fields: Vec<(RedisString, RedisString)>,
 }
 
+/// One entry in a Pending Entry List (PEL).
+///
+/// Records the entry id, when it was last delivered (unix ms) and how
+/// many times it has been delivered. Group-level and per-consumer PELs
+/// hold separate `PelEntry` copies that are kept in lock-step.
+#[derive(Clone, Debug)]
+pub struct PelEntry {
+    pub entry_id: StreamId,
+    pub delivery_time_ms: i64,
+    pub delivery_count: u64,
+}
+
+/// One consumer inside a consumer group.
+///
+/// `pel` is sorted by `entry_id` ascending. `seen_time_ms` updates on any
+/// XREADGROUP/XCLAIM touch (even with no entries delivered); `active_time_ms`
+/// only updates when at least one entry was delivered or claimed.
+#[derive(Clone, Debug)]
+pub struct Consumer {
+    pub name: RedisString,
+    pub seen_time_ms: i64,
+    pub active_time_ms: i64,
+    pub pel: Vec<PelEntry>,
+}
+
+/// One consumer group.
+///
+/// `pel` is the group-wide PEL: it is the union of the per-consumer PELs
+/// and is also sorted by `entry_id`. Helpers on `InlineStream` keep the
+/// two views consistent so callers can scan either side cheaply.
+#[derive(Clone, Debug)]
+pub struct ConsumerGroup {
+    pub name: RedisString,
+    pub last_delivered_id: StreamId,
+    pub consumers: HashMap<RedisString, Consumer>,
+    pub pel: Vec<PelEntry>,
+    pub entries_read: u64,
+}
+
 /// Phase-B inline stream storage.
 ///
 /// `entries` is kept sorted by `id` ascending and is therefore
@@ -129,6 +169,7 @@ pub struct InlineStream {
     pub last_id: StreamId,
     pub max_deleted_id: StreamId,
     pub entries_added: u64,
+    pub groups: HashMap<RedisString, ConsumerGroup>,
 }
 
 impl InlineStream {
@@ -173,6 +214,80 @@ impl InlineStream {
             return true;
         }
         false
+    }
+}
+
+impl Consumer {
+    pub fn new(name: RedisString, now_ms: i64) -> Self {
+        Self {
+            name,
+            seen_time_ms: now_ms,
+            active_time_ms: now_ms,
+            pel: Vec::new(),
+        }
+    }
+
+    /// Index of the first PEL entry with `entry_id >= target`.
+    pub fn pel_lower_bound(&self, target: &StreamId) -> usize {
+        self.pel.partition_point(|e| e.entry_id < *target)
+    }
+
+    /// Find a PEL entry by id; returns the slot index if present.
+    pub fn pel_find(&self, target: &StreamId) -> Option<usize> {
+        let idx = self.pel_lower_bound(target);
+        if idx < self.pel.len() && self.pel[idx].entry_id == *target {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+}
+
+impl ConsumerGroup {
+    pub fn new(name: RedisString, last_delivered_id: StreamId) -> Self {
+        Self {
+            name,
+            last_delivered_id,
+            consumers: HashMap::new(),
+            pel: Vec::new(),
+            entries_read: 0,
+        }
+    }
+
+    /// Index of the first PEL entry with `entry_id >= target`.
+    pub fn pel_lower_bound(&self, target: &StreamId) -> usize {
+        self.pel.partition_point(|e| e.entry_id < *target)
+    }
+
+    /// Find a PEL entry by id; returns the slot index if present.
+    pub fn pel_find(&self, target: &StreamId) -> Option<usize> {
+        let idx = self.pel_lower_bound(target);
+        if idx < self.pel.len() && self.pel[idx].entry_id == *target {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Insert or update a group PEL entry for `entry_id`, keeping the
+    /// sorted order. Used by `pel_add` and `pel_claim`.
+    pub fn pel_upsert(&mut self, entry: PelEntry) {
+        let idx = self.pel_lower_bound(&entry.entry_id);
+        if idx < self.pel.len() && self.pel[idx].entry_id == entry.entry_id {
+            self.pel[idx] = entry;
+        } else {
+            self.pel.insert(idx, entry);
+        }
+    }
+
+    /// Remove a group PEL entry by id. Returns the removed entry.
+    pub fn pel_remove(&mut self, target: &StreamId) -> Option<PelEntry> {
+        let idx = self.pel_lower_bound(target);
+        if idx < self.pel.len() && self.pel[idx].entry_id == *target {
+            Some(self.pel.remove(idx))
+        } else {
+            None
+        }
     }
 }
 
