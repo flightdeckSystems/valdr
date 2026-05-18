@@ -715,30 +715,32 @@ impl RedisObject {
 
     /// Return the encoding name for `OBJECT ENCODING`.
     /// C: strEncoding(encoding) → object.c:1171
+    ///
+    /// For the `Inline` interim encodings, the reported name follows the
+    /// listpack→big-encoding crossover heuristics Valkey applies: small
+    /// collections that would fit in a listpack report `"listpack"` (or
+    /// `"intset"` for all-integer sets), and larger ones report the big
+    /// encoding (`"hashtable"`, `"quicklist"`, or `"skiplist"`). The
+    /// underlying storage is unchanged — this is a wire-level fiction
+    /// matching real Redis's reported encoding.
     pub fn encoding_name(&self) -> &'static str {
         match &self.kind {
             ObjectKind::String(StringEncoding::Raw(_)) => "raw",
             ObjectKind::String(StringEncoding::Embstr(_)) => "embstr",
             ObjectKind::String(StringEncoding::Int(_)) => "int",
-            ObjectKind::List(ListEncoding::Inline(d)) => {
-                if list_inline_is_quicklist(d) {
-                    "quicklist"
-                } else {
-                    "listpack"
-                }
-            }
+            ObjectKind::List(ListEncoding::Inline(d)) => list_inline_observed_encoding(d),
             ObjectKind::List(ListEncoding::QuickList(_)) => "quicklist",
             ObjectKind::List(ListEncoding::ListPack(_)) => "listpack",
-            ObjectKind::Set(SetEncoding::Inline(_)) => "listpack",
+            ObjectKind::Set(SetEncoding::Inline(h)) => set_inline_observed_encoding(h),
             ObjectKind::Set(SetEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Set(SetEncoding::IntSet(_)) => "intset",
             ObjectKind::Set(SetEncoding::ListPack(_)) => "listpack",
-            ObjectKind::ZSet(ZSetEncoding::Inline(_)) => "skiplist",
+            ObjectKind::ZSet(ZSetEncoding::Inline(z)) => zset_inline_observed_encoding(z),
             ObjectKind::ZSet(ZSetEncoding::SkipList(_)) => "skiplist",
             ObjectKind::ZSet(ZSetEncoding::ListPack(_)) => "listpack",
             ObjectKind::Hash(HashEncoding::HashTable(_)) => "hashtable",
             ObjectKind::Hash(HashEncoding::ListPack(_)) => "listpack",
-            ObjectKind::Hash(HashEncoding::Inline(_)) => "hashtable",
+            ObjectKind::Hash(HashEncoding::Inline(h)) => hash_inline_observed_encoding(h),
             ObjectKind::Stream(StreamEncoding::Inline(_)) => "stream",
             ObjectKind::Module => "unknown",
         }
@@ -977,6 +979,44 @@ pub const LIST_LISTPACK_MAX_ELEMENT_BYTES: usize = 4 * 1024;
 /// the small per-entry overhead that the C listpack format imposes.
 pub const LIST_LISTPACK_NODE_MAX_BYTES: usize = 16 * 1024;
 
+/// Valkey default `list-max-listpack-size` entry-count cap used by the
+/// `OBJECT ENCODING` listpack→quicklist heuristic. Lists with more entries
+/// report `quicklist`.
+pub const LIST_LISTPACK_MAX_ENTRIES: usize = 128;
+
+/// Per-element byte cap used by the listpack heuristic. Mirrors Valkey's
+/// default `list-max-listpack-size` per-element threshold.
+pub const LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES: usize = 64;
+
+/// Valkey default `hash-max-listpack-entries`. Hashes with more entries
+/// report `hashtable`.
+pub const HASH_LISTPACK_MAX_ENTRIES: usize = 128;
+
+/// Valkey default `hash-max-listpack-value`. Hashes with any field or value
+/// longer than this report `hashtable`.
+pub const HASH_LISTPACK_MAX_VALUE_BYTES: usize = 64;
+
+/// Valkey default `set-max-intset-entries`. All-integer sets at or below this
+/// size report `intset`.
+pub const SET_INTSET_MAX_ENTRIES: usize = 512;
+
+/// Valkey default `set-max-listpack-entries`. Mixed-content sets at or below
+/// this size with all members shorter than `SET_LISTPACK_MAX_VALUE_BYTES`
+/// report `listpack`; otherwise `hashtable`.
+pub const SET_LISTPACK_MAX_ENTRIES: usize = 128;
+
+/// Valkey default `set-max-listpack-value`. Sets with any member longer than
+/// this report `hashtable` rather than `listpack`.
+pub const SET_LISTPACK_MAX_VALUE_BYTES: usize = 64;
+
+/// Valkey default `zset-max-listpack-entries`. Sorted sets with more entries
+/// report `skiplist`.
+pub const ZSET_LISTPACK_MAX_ENTRIES: usize = 128;
+
+/// Valkey default `zset-max-listpack-value`. Sorted sets with any member
+/// longer than this report `skiplist`.
+pub const ZSET_LISTPACK_MAX_VALUE_BYTES: usize = 64;
+
 /// Decide whether an `Inline`-encoded list should be reported as
 /// `quicklist`. The C port uses a real quicklist; here we approximate by
 /// summing element byte sizes and flagging any single oversized element.
@@ -993,6 +1033,123 @@ fn list_inline_is_quicklist(d: &VecDeque<RedisString>) -> bool {
         }
     }
     false
+}
+
+/// Encoding name reported for an `Inline`-encoded list.
+///
+/// Returns `"quicklist"` when the list has more than
+/// `LIST_LISTPACK_MAX_ENTRIES` items, when any element exceeds
+/// `LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES`, or when the aggregate listpack
+/// node-byte estimate trips the legacy `list_inline_is_quicklist` guard.
+fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
+    if d.len() > LIST_LISTPACK_MAX_ENTRIES {
+        return "quicklist";
+    }
+    for v in d {
+        if v.as_bytes().len() > LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES {
+            return "quicklist";
+        }
+    }
+    if list_inline_is_quicklist(d) {
+        "quicklist"
+    } else {
+        "listpack"
+    }
+}
+
+/// Encoding name reported for an `Inline`-encoded hash.
+///
+/// Returns `"listpack"` when the entry count is at or below
+/// `HASH_LISTPACK_MAX_ENTRIES` and every field and value is at most
+/// `HASH_LISTPACK_MAX_VALUE_BYTES` bytes; `"hashtable"` otherwise.
+fn hash_inline_observed_encoding(h: &HashMap<RedisString, RedisString>) -> &'static str {
+    if h.len() > HASH_LISTPACK_MAX_ENTRIES {
+        return "hashtable";
+    }
+    for (k, v) in h {
+        if k.as_bytes().len() > HASH_LISTPACK_MAX_VALUE_BYTES
+            || v.as_bytes().len() > HASH_LISTPACK_MAX_VALUE_BYTES
+        {
+            return "hashtable";
+        }
+    }
+    "listpack"
+}
+
+/// Encoding name reported for an `Inline`-encoded set.
+///
+/// All-integer sets at or below `SET_INTSET_MAX_ENTRIES` report `"intset"`.
+/// Otherwise mixed-content sets at or below `SET_LISTPACK_MAX_ENTRIES` with
+/// every member at most `SET_LISTPACK_MAX_VALUE_BYTES` bytes report
+/// `"listpack"`; anything larger reports `"hashtable"`.
+fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
+    let mut all_integer = true;
+    let mut max_len: usize = 0;
+    for m in h {
+        let bytes = m.as_bytes();
+        if bytes.len() > max_len {
+            max_len = bytes.len();
+        }
+        if all_integer && !is_canonical_i64_ascii(bytes) {
+            all_integer = false;
+        }
+    }
+    if all_integer && h.len() <= SET_INTSET_MAX_ENTRIES {
+        return "intset";
+    }
+    if h.len() <= SET_LISTPACK_MAX_ENTRIES && max_len <= SET_LISTPACK_MAX_VALUE_BYTES {
+        return "listpack";
+    }
+    "hashtable"
+}
+
+/// Encoding name reported for an `Inline`-encoded sorted set.
+///
+/// Returns `"listpack"` when the entry count is at or below
+/// `ZSET_LISTPACK_MAX_ENTRIES` and every member is at most
+/// `ZSET_LISTPACK_MAX_VALUE_BYTES` bytes; `"skiplist"` otherwise.
+fn zset_inline_observed_encoding(z: &InlineZSet) -> &'static str {
+    if z.len() > ZSET_LISTPACK_MAX_ENTRIES {
+        return "skiplist";
+    }
+    for m in z.by_member.keys() {
+        if m.as_bytes().len() > ZSET_LISTPACK_MAX_VALUE_BYTES {
+            return "skiplist";
+        }
+    }
+    "listpack"
+}
+
+/// Returns `true` when `bytes` is the canonical decimal-ASCII form of an
+/// `i64` value (optional leading minus sign, no leading zeros except for
+/// the literal `"0"`, no whitespace, no leading `+`). Used by the
+/// set-encoding heuristic to decide whether an `Inline` set qualifies for
+/// the `intset` label.
+fn is_canonical_i64_ascii(bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > 20 {
+        return false;
+    }
+    let (sign_skip, digits) = if bytes[0] == b'-' {
+        (1usize, &bytes[1..])
+    } else {
+        (0usize, bytes)
+    };
+    if digits.is_empty() {
+        return false;
+    }
+    if digits.len() > 1 && digits[0] == b'0' {
+        return false;
+    }
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return false;
+        }
+    }
+    let _ = sign_skip;
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.parse::<i64>().is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Return `true` if a string of `len` bytes should use EMBSTR encoding.

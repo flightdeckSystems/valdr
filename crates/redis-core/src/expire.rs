@@ -724,20 +724,25 @@ pub fn parse_extended_expire_arguments(
 // ── expire.c:724-748, convertExpireArgumentToUnixTime ────────────────────
 /// Parses `arg` as an integer, applies `unit` conversion, adds `basetime`,
 /// and returns the resulting absolute Unix millisecond timestamp.
+///
+/// `cmd_name` is the lowercase command name used to format the canonical
+/// `ERR invalid expire time in '<cmd>' command` error when validation
+/// fails.
 pub fn convert_expire_argument_to_unix_time(
     arg: &RedisString,
     basetime: MsTime,
     unit: i32,
+    cmd_name: &[u8],
 ) -> Result<MsTime, RedisError> {
     let when: i64 = parse_i64_from_redis_string(arg)?;
 
     if when < 0 {
-        return Err(expire_time_error());
+        return Err(expire_time_error(cmd_name));
     }
 
     let when = if unit == UNIT_SECONDS {
         if when > i64::MAX / 1000 {
-            return Err(expire_time_error());
+            return Err(expire_time_error(cmd_name));
         }
         when * 1000
     } else {
@@ -745,7 +750,7 @@ pub fn convert_expire_argument_to_unix_time(
     };
 
     if when > i64::MAX - basetime {
-        return Err(expire_time_error());
+        return Err(expire_time_error(cmd_name));
     }
 
     Ok(when + basetime)
@@ -768,17 +773,18 @@ pub fn expire_generic_command(
     }
     parse_extended_expire_arguments(ctx, &mut flag, argc)?;
 
+    let cmd_name_lower = ascii_lower(ctx.command_name());
     let param = ctx.arg(2)?.clone();
     let mut when: MsTime = parse_i64_from_redis_string(&param)?;
 
     if unit == UNIT_SECONDS {
         if when > i64::MAX / 1000 || when < i64::MIN / 1000 {
-            return Err(expire_time_error());
+            return Err(expire_time_error(&cmd_name_lower));
         }
         when *= 1000;
     }
     if basetime > 0 && when > i64::MAX - basetime {
-        return Err(expire_time_error());
+        return Err(expire_time_error(&cmd_name_lower));
     }
     when += basetime;
 
@@ -976,11 +982,23 @@ fn parse_i64_from_redis_string(s: &RedisString) -> Result<i64, RedisError> {
     Ok(if negative { -result } else { result })
 }
 
-/// Canonical "invalid expire time" error, matching the Redis wire error string.
-fn expire_time_error() -> RedisError {
-    // TODO(port): C macro addReplyErrorExpireTime embeds the command name;
-    // generic message used here until command name is available via ctx in Phase B.
-    RedisError::runtime(b"ERR invalid expire time in command".as_ref())
+/// Canonical "invalid expire time" error, matching the Redis wire format
+/// `ERR invalid expire time in '<cmd>' command`. The C macro
+/// `addReplyErrorExpireTime` embeds the command name in the same way.
+fn expire_time_error(cmd_name: &[u8]) -> RedisError {
+    let mut buf =
+        Vec::with_capacity(b"ERR invalid expire time in '".len() + cmd_name.len() + b"' command".len());
+    buf.extend_from_slice(b"ERR invalid expire time in '");
+    buf.extend_from_slice(cmd_name);
+    buf.extend_from_slice(b"' command");
+    RedisError::runtime(buf)
+}
+
+/// Returns a lowercase copy of `bytes`, used to format the command-name
+/// portion of `expire_time_error` since `ctx.command_name()` is the
+/// uppercase wire token but Redis embeds the lowercase form.
+fn ascii_lower(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().map(|b| b.to_ascii_lowercase()).collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

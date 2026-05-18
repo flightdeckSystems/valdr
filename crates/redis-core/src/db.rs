@@ -1080,8 +1080,11 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 
     let current_db_id = ctx.db().id() as i64;
     if let Some(target) = target_db {
-        if target != current_db_id {
+        if !(0..=15).contains(&target) {
             return Err(RedisError::runtime(b"ERR DB index is out of range"));
+        }
+        if target != current_db_id {
+            return ctx.reply_integer(0);
         }
     }
 
