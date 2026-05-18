@@ -156,15 +156,19 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let queued: Vec<Vec<RedisString>> = std::mem::take(&mut ctx.client_mut().queued_argvs);
     ctx.client_mut().set_flag_multi(false);
+    ctx.client_mut().set_flag_deny_blocking(true);
 
-    ctx.reply_array_header(queued.len())?;
+    let header_res = ctx.reply_array_header(queued.len());
 
-    for argv in queued.into_iter() {
-        run_one_queued(ctx, argv);
+    if header_res.is_ok() {
+        for argv in queued.into_iter() {
+            run_one_queued(ctx, argv);
+        }
     }
 
+    ctx.client_mut().set_flag_deny_blocking(false);
     reset_multi_state(ctx.client_mut());
-    Ok(())
+    header_res
 }
 
 /// Run a single queued argv as if the client had just sent it directly.

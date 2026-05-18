@@ -12,6 +12,7 @@
 pub mod evict;
 pub mod monotonic;
 pub mod blocked;
+pub mod blocked_keys;
 pub mod memory_prefetch;
 pub mod localtime;
 pub mod defrag;

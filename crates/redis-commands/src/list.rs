@@ -29,7 +29,11 @@
 
 use std::collections::VecDeque;
 
+use redis_core::blocked_keys::{
+    blocked_keys_index, deadline_from_timeout_secs, BlockedAction, BlockedSide, BlockedWaiter,
+};
 use redis_core::command_context::CommandContext;
+use redis_core::db::RedisDb;
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -133,6 +137,149 @@ fn resolve_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> {
     Some((s as usize, e as usize))
 }
 
+/// Pop one element from `key`'s list at `side` (head or tail).
+///
+/// Returns `None` if the key is missing or holds an empty list. Deletes the
+/// key when the pop empties it so the wake loop terminates promptly.
+fn pop_one(db: &mut RedisDb, key: &RedisString, side: BlockedSide) -> Option<RedisString> {
+    let popped = {
+        let deque = db.lookup_key_write(key)?.list_mut()?;
+        match side {
+            BlockedSide::Head => deque.pop_front(),
+            BlockedSide::Tail => deque.pop_back(),
+        }
+    };
+    if matches!(db.lookup_key_read(key), Some(o) if o.list().map(|d| d.is_empty()).unwrap_or(false))
+    {
+        db.sync_delete(key);
+    }
+    popped
+}
+
+/// Push `value` onto `dst_key`'s list at `side`, creating the list if absent.
+fn push_one(db: &mut RedisDb, dst_key: &RedisString, value: RedisString, side: BlockedSide) {
+    match db.lookup_key_write(dst_key) {
+        Some(obj) => {
+            if let Some(deque) = obj.list_mut() {
+                match side {
+                    BlockedSide::Head => deque.push_front(value),
+                    BlockedSide::Tail => deque.push_back(value),
+                }
+            }
+        }
+        None => {
+            let mut obj = RedisObject::new_list();
+            if let Some(deque) = obj.list_mut() {
+                match side {
+                    BlockedSide::Head => deque.push_front(value),
+                    BlockedSide::Tail => deque.push_back(value),
+                }
+            }
+            db.set_key(dst_key.clone(), obj, 0);
+        }
+    }
+}
+
+/// Encode a `*2 [key, value]` BLPOP-style reply.
+fn encode_pop_reply(key: &RedisString, value: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + key.len() + value.len());
+    buf.extend_from_slice(b"*2\r\n$");
+    buf.extend_from_slice(key.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(b"\r\n$");
+    buf.extend_from_slice(value.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Encode a `$<len>\r\n<bytes>\r\n` bulk-string reply (BLMOVE / BRPOPLPUSH).
+fn encode_bulk_reply(value: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + value.len());
+    buf.push(b'$');
+    buf.extend_from_slice(value.len().to_string().as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(value.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf
+}
+
+/// Drain blocked waiters for `key` after a LPUSH / RPUSH / LMOVE landed data.
+///
+/// Each waiter pops one element off `key` according to its `BlockedAction`,
+/// receives the canonical reply through its mpsc sender, and is removed from
+/// every queue it was parked on. Loop terminates when `key` becomes empty or
+/// no waiter remains.
+pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) {
+    loop {
+        let value_present = matches!(
+            db.lookup_key_read(key),
+            Some(o) if o.list().map(|d| !d.is_empty()).unwrap_or(false)
+        );
+        if !value_present {
+            return;
+        }
+        let waiter = {
+            let mut idx = match blocked_keys_index().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match idx.take_waiter(key) {
+                Some(w) => w,
+                None => return,
+            }
+        };
+        deliver_to_waiter(db, key, waiter);
+    }
+}
+
+/// Pop one element to satisfy `waiter` and ship the encoded reply.
+///
+/// For BLMOVE/BRPOPLPUSH actions the destination type is verified at wake
+/// time: if it exists and is not a list, the source value is restored at the
+/// same end it would have been popped from and the waiter receives a
+/// WRONGTYPE error. Returning the value to the source keeps the FIFO order
+/// invariant intact for the next waiter.
+fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter) {
+    let (side, dst): (BlockedSide, Option<(RedisString, BlockedSide)>) = match &waiter.action {
+        BlockedAction::Pop { side } => (*side, None),
+        BlockedAction::Move {
+            side,
+            dst_key,
+            dst_side,
+        } => (*side, Some((dst_key.clone(), *dst_side))),
+    };
+    if let Some((dst_key, _)) = &dst {
+        if let Some(dst_obj) = db.lookup_key_read(dst_key) {
+            if !dst_obj.is_list() {
+                let _ = waiter.sender.send(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+                        .to_vec(),
+                );
+                return;
+            }
+        }
+    }
+    let value = match pop_one(db, key, side) {
+        Some(v) => v,
+        None => return,
+    };
+    let reply = match &dst {
+        None => encode_pop_reply(key, &value),
+        Some(_) => encode_bulk_reply(&value),
+    };
+    if waiter.sender.send(reply).is_err() {
+        push_one(db, key, value, side);
+        return;
+    }
+    if let Some((dst_key, dst_side)) = dst {
+        push_one(db, &dst_key, value, dst_side);
+        wake_blocked_for_key(db, &dst_key);
+    }
+}
+
 /// Implementation shared by LPUSH / RPUSH / LPUSHX / RPUSHX.
 ///
 /// When `xx` is true (LPUSHX / RPUSHX), a missing key short-circuits to
@@ -153,7 +300,7 @@ fn push_generic(
         values.push(ctx.arg_owned(j)?);
     }
     let existing = ctx.db_mut().lookup_key_write(&key);
-    match existing {
+    let new_len: i64 = match existing {
         None => {
             if xx {
                 return ctx.reply_integer(0);
@@ -170,9 +317,9 @@ fn push_generic(
                     }
                 }
             }
-            let new_len = obj.list().map(|d| d.len()).unwrap_or(0) as i64;
-            ctx.db_mut().set_key(key, obj, 0);
-            ctx.reply_integer(new_len)
+            let n = obj.list().map(|d| d.len()).unwrap_or(0) as i64;
+            ctx.db_mut().set_key(key.clone(), obj, 0);
+            n
         }
         Some(obj) => {
             if !obj.is_list() {
@@ -187,10 +334,11 @@ fn push_generic(
                     ListPosition::Tail => deque.push_back(v),
                 }
             }
-            let new_len = deque.len() as i64;
-            ctx.reply_integer(new_len)
+            deque.len() as i64
         }
-    }
+    };
+    wake_blocked_for_key(ctx.db_mut(), &key);
+    ctx.reply_integer(new_len)
 }
 
 /// Implementation shared by LPOP / RPOP.
@@ -603,9 +751,10 @@ fn lmove_generic(
                     ListPosition::Tail => deque.push_back(value.clone()),
                 }
             }
-            ctx.db_mut().set_key(dst_key, obj, 0);
+            ctx.db_mut().set_key(dst_key.clone(), obj, 0);
         }
     }
+    wake_blocked_for_key(ctx.db_mut(), &dst_key);
     ctx.reply_bulk_string(value)
 }
 
@@ -907,20 +1056,90 @@ fn parse_blocking_timeout(bytes: &[u8]) -> Result<f64, RedisError> {
     Ok(parsed)
 }
 
+/// Translate a [`ListPosition`] into the index-only [`BlockedSide`] enum used
+/// by the cross-thread blocked-keys index.
+fn position_to_side(p: ListPosition) -> BlockedSide {
+    match p {
+        ListPosition::Head => BlockedSide::Head,
+        ListPosition::Tail => BlockedSide::Tail,
+    }
+}
+
+/// Park the current client in the global blocked-keys index.
+///
+/// Sets `client.blocked_on_keys` so the per-connection loop knows the empty
+/// reply buffer is intentional, then registers a [`BlockedWaiter`] holding a
+/// clone of the client's outbound mpsc sender. Returns `Ok(())` with no
+/// reply written when the registration succeeded, or an error reply when no
+/// sender is registered for this client (unit tests / pseudo-clients).
+fn park_blocked_client(
+    ctx: &mut CommandContext,
+    keys: Vec<RedisString>,
+    action: BlockedAction,
+    timeout_secs: f64,
+) -> RedisResult<()> {
+    if ctx.client_ref().flag_deny_blocking() {
+        return match action {
+            BlockedAction::Pop { .. } => ctx.reply_null_array(),
+            BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+        };
+    }
+    let registry = match ctx.pubsub.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            return match action {
+                BlockedAction::Pop { .. } => ctx.reply_null_array(),
+                BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+            };
+        }
+    };
+    let sender = {
+        let guard = match registry.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.sender_for(ctx.client_ref().id)
+    };
+    let sender = match sender {
+        Some(s) => s,
+        None => {
+            return match action {
+                BlockedAction::Pop { .. } => ctx.reply_null_array(),
+                BlockedAction::Move { .. } => ctx.reply_null_bulk(),
+            };
+        }
+    };
+    let waiter = BlockedWaiter {
+        client_id: ctx.client_ref().id,
+        sender,
+        keys,
+        action,
+        deadline_ms: deadline_from_timeout_secs(timeout_secs),
+    };
+    {
+        let mut idx = match blocked_keys_index().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        idx.add(waiter);
+    }
+    ctx.client_mut().blocked_on_keys = true;
+    Ok(())
+}
+
 /// Shared implementation for BLPOP / BRPOP.
 ///
-/// Args: `name key [key ...] timeout`. Validates the timeout, then pops one
-/// element from the first non-empty list. Returns `[key, value]` on success
-/// or a null array immediately when every key is empty — the blocking-wait
-/// path is not yet wired up so the stub degrades gracefully into the same
-/// shape that a timed-out blocking call would return.
+/// Pops from the first non-empty key immediately. Otherwise registers the
+/// client in the global blocked-keys index and returns with no reply: a
+/// subsequent push (or the per-server timeout thread) wakes the client by
+/// shipping `*2 [key, value]` or `*-1` through the outbound mpsc.
 fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(ctx.command_name()));
     }
     let timeout_raw = ctx.arg_owned(argc - 1)?;
-    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let timeout_secs = parse_blocking_timeout(timeout_raw.as_bytes())?;
     let mut keys: Vec<RedisString> = Vec::with_capacity(argc - 2);
     for j in 1..(argc - 1) {
         keys.push(ctx.arg_owned(j)?);
@@ -963,28 +1182,36 @@ fn bpop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult
         ctx.reply_bulk_string(key.clone())?;
         return ctx.reply_bulk_string(value);
     }
-    ctx.reply_null_array()
+    park_blocked_client(
+        ctx,
+        keys,
+        BlockedAction::Pop {
+            side: position_to_side(position),
+        },
+        timeout_secs,
+    )
 }
 
 /// BLPOP key [key ...] timeout
 ///
-/// Non-blocking stub: behaves like LPOP on the first non-empty key and
-/// returns null-array immediately when every key is empty rather than
-/// suspending the client. Real blocking requires the `blockForKeys`
-/// scheduler in `redis-core::blocked` to be wired into the I/O loop.
+/// Pops the head of the first non-empty key. If every key is empty the
+/// client is parked in the global blocked-keys index until either a push
+/// arrives on one of the keys (replying `*2 [key, value]`) or the timeout
+/// elapses (replying `*-1`). A timeout of `0` blocks forever.
 pub fn blpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bpop_generic(ctx, ListPosition::Head)
 }
 
-/// BRPOP key [key ...] timeout — non-blocking stub mirroring `blpop_command`.
+/// BRPOP key [key ...] timeout — tail variant of [`blpop_command`].
 pub fn brpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     bpop_generic(ctx, ListPosition::Tail)
 }
 
 /// BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout
 ///
-/// Non-blocking stub: delegates to the LMOVE path. Returns a null bulk
-/// immediately when the source list is empty or missing.
+/// Behaves like LMOVE when `source` has data. Otherwise parks the client on
+/// `source` only; a later push on `source` triggers an atomic pop-then-push
+/// (with the same direction pair) and replies with the moved bulk value.
 pub fn blmove_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 6 {
         return Err(RedisError::wrong_number_of_args(b"blmove"));
@@ -994,13 +1221,32 @@ pub fn blmove_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let wherefrom = parse_list_position(ctx.arg(3)?.as_bytes())?;
     let whereto = parse_list_position(ctx.arg(4)?.as_bytes())?;
     let timeout_raw = ctx.arg_owned(5usize)?;
-    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
-    lmove_generic(ctx, src_key, dst_key, wherefrom, whereto)
+    let timeout_secs = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let has_data = match ctx.db().find(&src_key) {
+        None => false,
+        Some(o) => {
+            if !o.is_list() {
+                return Err(RedisError::wrong_type());
+            }
+            o.list().map(|d| !d.is_empty()).unwrap_or(false)
+        }
+    };
+    if has_data {
+        return lmove_generic(ctx, src_key, dst_key, wherefrom, whereto);
+    }
+    park_blocked_client(
+        ctx,
+        vec![src_key],
+        BlockedAction::Move {
+            side: position_to_side(wherefrom),
+            dst_key,
+            dst_side: position_to_side(whereto),
+        },
+        timeout_secs,
+    )
 }
 
-/// BRPOPLPUSH source destination timeout
-///
-/// Non-blocking stub: delegates to the RPOPLPUSH path.
+/// BRPOPLPUSH source destination timeout — RIGHT/LEFT variant of BLMOVE.
 pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() != 4 {
         return Err(RedisError::wrong_number_of_args(b"brpoplpush"));
@@ -1008,20 +1254,51 @@ pub fn brpoplpush_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let src_key = ctx.arg_owned(1usize)?;
     let dst_key = ctx.arg_owned(2usize)?;
     let timeout_raw = ctx.arg_owned(3usize)?;
-    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
-    lmove_generic(ctx, src_key, dst_key, ListPosition::Tail, ListPosition::Head)
+    let timeout_secs = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let has_data = match ctx.db().find(&src_key) {
+        None => false,
+        Some(o) => {
+            if !o.is_list() {
+                return Err(RedisError::wrong_type());
+            }
+            o.list().map(|d| !d.is_empty()).unwrap_or(false)
+        }
+    };
+    if has_data {
+        return lmove_generic(
+            ctx,
+            src_key,
+            dst_key,
+            ListPosition::Tail,
+            ListPosition::Head,
+        );
+    }
+    park_blocked_client(
+        ctx,
+        vec![src_key],
+        BlockedAction::Move {
+            side: BlockedSide::Tail,
+            dst_key,
+            dst_side: BlockedSide::Head,
+        },
+        timeout_secs,
+    )
 }
 
 /// BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
 ///
-/// Non-blocking stub: validates args and delegates to LMPOP's pop loop.
+/// When some key has data: pops up to `COUNT` (default 1) elements from the
+/// first non-empty key and replies `*2 [key, [popped]]`. Otherwise parks the
+/// client on every supplied key; a push on any one wakes the waiter and
+/// satisfies the `count` argument back to one element (subsequent waiters
+/// share the rest in FIFO order). Timeout `0` blocks forever.
 pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 5 {
         return Err(RedisError::wrong_number_of_args(b"blmpop"));
     }
     let timeout_raw = ctx.arg_owned(1usize)?;
-    let _ = parse_blocking_timeout(timeout_raw.as_bytes())?;
+    let timeout_secs = parse_blocking_timeout(timeout_raw.as_bytes())?;
     let numkeys_signed = parse_strict_i64(ctx.arg(2)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR numkeys should be greater than 0"))?;
     if numkeys_signed <= 0 {
@@ -1097,7 +1374,14 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
         return Ok(());
     }
-    ctx.reply_null_array()
+    park_blocked_client(
+        ctx,
+        keys,
+        BlockedAction::Pop {
+            side: position_to_side(position),
+        },
+        timeout_secs,
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────

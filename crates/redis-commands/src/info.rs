@@ -88,9 +88,17 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "\r");
     }
     if want(b"clients") {
+        let blocked = match redis_core::blocked_keys::blocked_keys_index().lock() {
+            Ok(g) => g.len(),
+            Err(p) => p.into_inner().len(),
+        };
         let _ = writeln!(buf, "# Clients\r");
         let _ = writeln!(buf, "connected_clients:1\r");
         let _ = writeln!(buf, "maxclients:10000\r");
+        let _ = writeln!(buf, "blocked_clients:{}\r", blocked);
+        let _ = writeln!(buf, "tracking_clients:0\r");
+        let _ = writeln!(buf, "clients_in_timeout_table:0\r");
+        let _ = writeln!(buf, "watching_clients:0\r");
         let _ = writeln!(buf, "\r");
     }
     if want(b"memory") {

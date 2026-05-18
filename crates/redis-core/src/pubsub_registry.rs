@@ -135,6 +135,15 @@ impl PubSubRegistry {
         }
     }
 
+    /// Clone the outbound mpsc sender for `client_id` if it is registered.
+    ///
+    /// Used by the blocked-keys index so a parked BLPOP waiter can be woken
+    /// later from a different connection's push handler — the wake hook owns
+    /// the cloned sender and never has to re-enter the registry mutex.
+    pub fn sender_for(&self, client_id: ClientId) -> Option<Sender<Vec<u8>>> {
+        self.senders.get(&client_id).cloned()
+    }
+
     /// Iterate every currently-active channel, optionally filtered by a glob
     /// pattern. Returns owned clones; intended for PUBSUB CHANNELS.
     pub fn list_channels(

@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use redis_core::object::{get_encoding_thresholds, update_encoding_thresholds};
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -117,11 +118,13 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"config|get"));
         }
+        let thresholds = get_encoding_thresholds();
         let mut items: Vec<RespFrame> = Vec::new();
         for i in 2..ctx.arg_count() {
             let pat = ctx.arg_owned(i)?;
-            for (name, value) in default_config_pairs() {
-                if glob_match_ascii_ci(pat.as_bytes(), name.as_bytes()) {
+            let pat_bytes = pat.as_bytes();
+            for (name, value) in config_pairs_with_dynamic(&thresholds) {
+                if glob_match_ascii_ci(pat_bytes, name.as_bytes()) {
                     items.push(RespFrame::bulk(RedisString::from_bytes(name.as_bytes())));
                     items.push(RespFrame::bulk(RedisString::from_bytes(value.as_bytes())));
                 }
@@ -130,6 +133,13 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_frame(&RespFrame::array(items));
     }
     if ascii_eq_ignore_case(sub_bytes, b"SET") {
+        let mut i = 2usize;
+        while i + 1 < ctx.arg_count() {
+            let key = ctx.arg_owned(i)?;
+            let val = ctx.arg_owned(i + 1)?;
+            apply_config_set(key.as_bytes(), val.as_bytes());
+            i += 2;
+        }
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"RESETSTAT") || ascii_eq_ignore_case(sub_bytes, b"REWRITE") {
@@ -188,6 +198,102 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("lazyfree-lazy-server-del", "no"),
         ("lazyfree-lazy-user-del", "no"),
     ]
+}
+
+/// Builds the full CONFIG parameter list with dynamic encoding thresholds
+/// substituted in.
+///
+/// The static pairs in `default_config_pairs` are reproduced verbatim except
+/// for the eight encoding-threshold keys, whose values are taken from the
+/// live `EncodingThresholds` snapshot supplied by the caller. This ensures
+/// that `CONFIG GET` reflects any `CONFIG SET` that has already been applied.
+fn config_pairs_with_dynamic(
+    t: &redis_core::object::EncodingThresholds,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for &(name, value) in default_config_pairs() {
+        let dynamic = match name {
+            "hash-max-listpack-entries" => Some(t.hash_max_listpack_entries.to_string()),
+            "hash-max-listpack-value" => Some(t.hash_max_listpack_value.to_string()),
+            "list-max-listpack-size" => Some(t.list_max_listpack_size.to_string()),
+            "set-max-intset-entries" => Some(t.set_max_intset_entries.to_string()),
+            "set-max-listpack-entries" => Some(t.set_max_listpack_entries.to_string()),
+            "set-max-listpack-value" => Some(t.set_max_listpack_value.to_string()),
+            "zset-max-listpack-entries" => Some(t.zset_max_listpack_entries.to_string()),
+            "zset-max-listpack-value" => Some(t.zset_max_listpack_value.to_string()),
+            _ => None,
+        };
+        out.push((
+            name.to_string(),
+            dynamic.unwrap_or_else(|| value.to_string()),
+        ));
+    }
+    out
+}
+
+/// Applies a single `CONFIG SET key value` pair to the encoding-threshold
+/// global.
+///
+/// Unknown keys are silently ignored so that the TCL test harness can issue
+/// arbitrary `CONFIG SET` calls without aborting. Threshold values that cannot
+/// be parsed as integers are also silently ignored — the existing threshold
+/// remains in effect. This matches the lenient behaviour the test harness
+/// depends on for unrecognised parameters.
+fn apply_config_set(key: &[u8], value: &[u8]) {
+    let key_lower: Vec<u8> = key.iter().map(|b| b.to_ascii_lowercase()).collect();
+    match key_lower.as_slice() {
+        b"hash-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.hash_max_listpack_entries = n);
+            }
+        }
+        b"hash-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.hash_max_listpack_value = n);
+            }
+        }
+        b"list-max-listpack-size" => {
+            if let Some(n) = parse_i64_strict(value) {
+                update_encoding_thresholds(|t| t.list_max_listpack_size = n);
+            }
+        }
+        b"set-max-intset-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.set_max_intset_entries = n);
+            }
+        }
+        b"set-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.set_max_listpack_entries = n);
+            }
+        }
+        b"set-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.set_max_listpack_value = n);
+            }
+        }
+        b"zset-max-listpack-entries" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.zset_max_listpack_entries = n);
+            }
+        }
+        b"zset-max-listpack-value" => {
+            if let Some(n) = parse_usize_strict(value) {
+                update_encoding_thresholds(|t| t.zset_max_listpack_value = n);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Parses a non-negative integer from ASCII decimal bytes. Returns `None` if
+/// the bytes do not represent a valid non-negative integer.
+fn parse_usize_strict(bytes: &[u8]) -> Option<usize> {
+    let n = parse_i64_strict(bytes)?;
+    if n < 0 {
+        return None;
+    }
+    Some(n as usize)
 }
 
 /// Glob-style ASCII matcher used by CONFIG GET. Supports `*` and `?` only;

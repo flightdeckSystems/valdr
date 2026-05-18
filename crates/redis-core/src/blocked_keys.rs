@@ -1,0 +1,241 @@
+//! Global cross-connection BLPOP/BRPOP/BLMOVE/BRPOPLPUSH/BLMPOP wait queue.
+//!
+//! Each entry holds a per-client `mpsc::Sender<Vec<u8>>` (the same writer-thread
+//! channel that `PubSubRegistry` uses) plus a `BlockSpec` describing how to
+//! satisfy the wait when the key becomes ready.
+//!
+//! Layout:
+//!   * `keys` — key → FIFO `VecDeque<ClientId>` of waiters in arrival order.
+//!   * `waiters` — `ClientId` → `Waiter { sender, deadline_ms, keys, spec }`.
+//!
+//! All access goes through `Arc<Mutex<BlockedKeysIndex>>` returned by
+//! [`blocked_keys_index`]. The blocking command handler inserts a waiter;
+//! the LIST family's push hook drains FIFO entries via [`take_waiter`]; the
+//! timer thread drains expired entries via [`take_expired`].
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use redis_types::RedisString;
+
+use crate::client::ClientId;
+
+/// Which end of the list to pop on wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedSide {
+    Head,
+    Tail,
+}
+
+/// How a woken waiter consumes its element.
+///
+/// `Pop` returns a `*2 [key, value]` reply (BLPOP / BRPOP / BLMPOP shape).
+/// `Move` pops from the source and pushes onto `dst_key` at `dst_side`, then
+/// replies with a bulk-string of the moved value (BLMOVE / BRPOPLPUSH shape).
+#[derive(Debug, Clone)]
+pub enum BlockedAction {
+    Pop { side: BlockedSide },
+    Move {
+        side: BlockedSide,
+        dst_key: RedisString,
+        dst_side: BlockedSide,
+    },
+}
+
+/// One blocked client's full wait spec.
+#[derive(Debug, Clone)]
+pub struct BlockedWaiter {
+    pub client_id: ClientId,
+    pub sender: Sender<Vec<u8>>,
+    pub keys: Vec<RedisString>,
+    pub action: BlockedAction,
+    pub deadline_ms: i64,
+}
+
+/// Server-wide blocked-keys index.
+#[derive(Default)]
+pub struct BlockedKeysIndex {
+    keys: HashMap<RedisString, VecDeque<ClientId>>,
+    waiters: HashMap<ClientId, BlockedWaiter>,
+}
+
+impl BlockedKeysIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `waiter` under each of its keys, in order of arrival.
+    ///
+    /// Overwrites any prior waiter for the same `client_id` (callers must
+    /// ensure a client never re-blocks while already parked).
+    pub fn add(&mut self, waiter: BlockedWaiter) {
+        let cid = waiter.client_id;
+        for key in &waiter.keys {
+            self.keys.entry(key.clone()).or_default().push_back(cid);
+        }
+        self.waiters.insert(cid, waiter);
+    }
+
+    /// Pop the FIFO-front waiter for `key` and return its full record.
+    ///
+    /// Also clears that client from every other key it was waiting on so a
+    /// single push can never satisfy the same waiter twice across two keys.
+    pub fn take_waiter(&mut self, key: &RedisString) -> Option<BlockedWaiter> {
+        let cid = loop {
+            let deque = self.keys.get_mut(key)?;
+            let front = deque.pop_front()?;
+            if deque.is_empty() {
+                self.keys.remove(key);
+            }
+            if self.waiters.contains_key(&front) {
+                break front;
+            }
+        };
+        self.remove_client(cid)
+    }
+
+    /// Remove `client_id` from every key queue and return its waiter record.
+    pub fn remove_client(&mut self, client_id: ClientId) -> Option<BlockedWaiter> {
+        let waiter = self.waiters.remove(&client_id)?;
+        for key in &waiter.keys {
+            if let Some(deque) = self.keys.get_mut(key) {
+                deque.retain(|cid| *cid != client_id);
+                if deque.is_empty() {
+                    self.keys.remove(key);
+                }
+            }
+        }
+        Some(waiter)
+    }
+
+    /// Drain every waiter whose `deadline_ms` is `<= now_ms`.
+    pub fn take_expired(&mut self, now_ms: i64) -> Vec<BlockedWaiter> {
+        let expired: Vec<ClientId> = self
+            .waiters
+            .iter()
+            .filter(|(_, w)| w.deadline_ms <= now_ms)
+            .map(|(cid, _)| *cid)
+            .collect();
+        let mut out = Vec::with_capacity(expired.len());
+        for cid in expired {
+            if let Some(w) = self.remove_client(cid) {
+                out.push(w);
+            }
+        }
+        out
+    }
+
+    /// Whether any waiter currently parks on `key`.
+    pub fn has_waiters_for(&self, key: &RedisString) -> bool {
+        self.keys.get(key).is_some_and(|d| !d.is_empty())
+    }
+
+    /// Snapshot the number of currently-blocked clients (test/debug helper).
+    pub fn len(&self) -> usize {
+        self.waiters.len()
+    }
+
+    /// Whether the index is empty.
+    pub fn is_empty(&self) -> bool {
+        self.waiters.is_empty()
+    }
+}
+
+static BLOCKED_KEYS_INDEX: OnceLock<Arc<Mutex<BlockedKeysIndex>>> = OnceLock::new();
+
+/// Install or fetch the global blocked-keys index.
+pub fn blocked_keys_index() -> &'static Arc<Mutex<BlockedKeysIndex>> {
+    BLOCKED_KEYS_INDEX.get_or_init(|| Arc::new(Mutex::new(BlockedKeysIndex::new())))
+}
+
+/// Wall-clock time in milliseconds since the Unix epoch.
+pub fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Convert a non-negative seconds timeout (BLPOP-style) into an absolute
+/// millisecond deadline. A `seconds` of `0.0` means block forever and maps to
+/// `i64::MAX`.
+pub fn deadline_from_timeout_secs(seconds: f64) -> i64 {
+    if seconds <= 0.0 {
+        return i64::MAX;
+    }
+    let now = current_time_ms();
+    let add_ms = (seconds * 1000.0) as i64;
+    now.saturating_add(add_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn k(s: &[u8]) -> RedisString {
+        RedisString::from_bytes(s)
+    }
+
+    fn waiter(id: ClientId, keys: Vec<RedisString>, deadline: i64) -> BlockedWaiter {
+        let (tx, _rx) = mpsc::channel();
+        BlockedWaiter {
+            client_id: id,
+            sender: tx,
+            keys,
+            action: BlockedAction::Pop { side: BlockedSide::Head },
+            deadline_ms: deadline,
+        }
+    }
+
+    #[test]
+    fn fifo_order_per_key() {
+        let mut idx = BlockedKeysIndex::new();
+        idx.add(waiter(1, vec![k(b"q")], i64::MAX));
+        idx.add(waiter(2, vec![k(b"q")], i64::MAX));
+        idx.add(waiter(3, vec![k(b"q")], i64::MAX));
+        assert_eq!(idx.take_waiter(&k(b"q")).map(|w| w.client_id), Some(1));
+        assert_eq!(idx.take_waiter(&k(b"q")).map(|w| w.client_id), Some(2));
+        assert_eq!(idx.take_waiter(&k(b"q")).map(|w| w.client_id), Some(3));
+        assert!(idx.take_waiter(&k(b"q")).is_none());
+    }
+
+    #[test]
+    fn multi_key_wake_removes_from_other_queues() {
+        let mut idx = BlockedKeysIndex::new();
+        idx.add(waiter(1, vec![k(b"a"), k(b"b")], i64::MAX));
+        let w = idx.take_waiter(&k(b"a")).expect("wake on a");
+        assert_eq!(w.client_id, 1);
+        assert!(!idx.has_waiters_for(&k(b"b")));
+    }
+
+    #[test]
+    fn expired_waiters_drained() {
+        let mut idx = BlockedKeysIndex::new();
+        idx.add(waiter(1, vec![k(b"a")], 100));
+        idx.add(waiter(2, vec![k(b"b")], 200));
+        let expired = idx.take_expired(150);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].client_id, 1);
+        assert!(idx.has_waiters_for(&k(b"b")));
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        round-12b BLPOP/BRPOP/BLMOVE blocking architecture
+//                  (no direct C analogue — Rust replacement for the
+//                  `serverDb.blocking_keys` + `bio` timer/ready-key plumbing
+//                  in `src/blocked.c` / `src/t_list.c`).
+//   target_crate:  redis-core
+//   confidence:    high
+//   todos:         0
+//   port_notes:    0
+//   unsafe_blocks: 0
+//   notes:         Reuses each client's PubSubRegistry mpsc Sender for the
+//                  cross-connection wake reply; FIFO ordering preserved per
+//                  key. Background timer thread scans take_expired() every
+//                  100 ms in main.rs.
+// ──────────────────────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
 
 use redis_ds::stream::InlineStream;
 use redis_types::{RedisError, RedisString};
@@ -964,6 +965,92 @@ impl RedisObject {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Dynamic encoding thresholds (CONFIG-settable)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Live encoding-threshold table.
+///
+/// Mirrors the CONFIG keys that Valkey accepts for the listpack/intset cutoffs.
+/// Every `*_inline_observed_encoding` function reads from this struct rather
+/// than the compile-time constants so that `CONFIG SET` takes effect
+/// immediately on subsequent `OBJECT ENCODING` calls.
+///
+/// TODO(architect): move to `RedisServer` when `CommandContext` threads a real
+/// `&mut RedisServer` reference through every command call, eliminating the
+/// need for a process-wide global.
+#[derive(Debug, Clone)]
+pub struct EncodingThresholds {
+    /// `hash-max-listpack-entries` (default 128).
+    pub hash_max_listpack_entries: usize,
+    /// `hash-max-listpack-value` (default 64).
+    pub hash_max_listpack_value: usize,
+    /// `list-max-listpack-size` (default -2).
+    ///
+    /// Negative values denote byte-size caps in real Valkey (-2 = 8 KiB per
+    /// node). For the `Inline(VecDeque)` encoding used here we only support an
+    /// entry-count cap. When the stored value is negative we fall back to
+    /// `LIST_LISTPACK_MAX_ENTRIES` (128); a positive value is used directly as
+    /// the entry-count threshold. This is a documented simplification for the
+    /// port's inline-list representation.
+    pub list_max_listpack_size: i64,
+    /// `set-max-listpack-entries` (default 128).
+    pub set_max_listpack_entries: usize,
+    /// `set-max-listpack-value` (default 64).
+    pub set_max_listpack_value: usize,
+    /// `set-max-intset-entries` (default 512).
+    pub set_max_intset_entries: usize,
+    /// `zset-max-listpack-entries` (default 128).
+    pub zset_max_listpack_entries: usize,
+    /// `zset-max-listpack-value` (default 64).
+    pub zset_max_listpack_value: usize,
+}
+
+impl Default for EncodingThresholds {
+    fn default() -> Self {
+        Self {
+            hash_max_listpack_entries: HASH_LISTPACK_MAX_ENTRIES,
+            hash_max_listpack_value: HASH_LISTPACK_MAX_VALUE_BYTES,
+            list_max_listpack_size: -2,
+            set_max_listpack_entries: SET_LISTPACK_MAX_ENTRIES,
+            set_max_listpack_value: SET_LISTPACK_MAX_VALUE_BYTES,
+            set_max_intset_entries: SET_INTSET_MAX_ENTRIES,
+            zset_max_listpack_entries: ZSET_LISTPACK_MAX_ENTRIES,
+            zset_max_listpack_value: ZSET_LISTPACK_MAX_VALUE_BYTES,
+        }
+    }
+}
+
+/// Process-wide encoding threshold table, initialised to Valkey defaults on
+/// first access. CONFIG SET writes through to this global; the encoding
+/// heuristics read from it on every call.
+static ENCODING_THRESHOLDS: OnceLock<Mutex<EncodingThresholds>> = OnceLock::new();
+
+/// Returns a clone of the current encoding thresholds.
+///
+/// Initialises the global to Valkey defaults on the first call.
+pub fn get_encoding_thresholds() -> EncodingThresholds {
+    let lock = ENCODING_THRESHOLDS.get_or_init(|| Mutex::new(EncodingThresholds::default()));
+    lock.lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| EncodingThresholds::default())
+}
+
+/// Writes a partial update to the encoding threshold table.
+///
+/// `updater` receives a mutable reference to the current thresholds and may
+/// modify any subset of fields. A poisoned mutex falls back to a fresh default
+/// so callers never receive an error.
+pub fn update_encoding_thresholds<F>(updater: F)
+where
+    F: FnOnce(&mut EncodingThresholds),
+{
+    let lock = ENCODING_THRESHOLDS.get_or_init(|| Mutex::new(EncodingThresholds::default()));
+    if let Ok(mut guard) = lock.lock() {
+        updater(&mut guard);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Free-standing object creation helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1037,12 +1124,20 @@ fn list_inline_is_quicklist(d: &VecDeque<RedisString>) -> bool {
 
 /// Encoding name reported for an `Inline`-encoded list.
 ///
-/// Returns `"quicklist"` when the list has more than
-/// `LIST_LISTPACK_MAX_ENTRIES` items, when any element exceeds
+/// Returns `"quicklist"` when the list exceeds the entry-count threshold
+/// derived from `list-max-listpack-size`, when any element exceeds
 /// `LIST_LISTPACK_MAX_ELEMENT_SOFT_BYTES`, or when the aggregate listpack
 /// node-byte estimate trips the legacy `list_inline_is_quicklist` guard.
+/// Negative `list-max-listpack-size` values (byte-size caps in real Valkey)
+/// are treated as the compile-time default of `LIST_LISTPACK_MAX_ENTRIES`.
 fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
-    if d.len() > LIST_LISTPACK_MAX_ENTRIES {
+    let t = get_encoding_thresholds();
+    let entry_cap = if t.list_max_listpack_size > 0 {
+        t.list_max_listpack_size as usize
+    } else {
+        LIST_LISTPACK_MAX_ENTRIES
+    };
+    if d.len() > entry_cap {
         return "quicklist";
     }
     for v in d {
@@ -1060,15 +1155,18 @@ fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
 /// Encoding name reported for an `Inline`-encoded hash.
 ///
 /// Returns `"listpack"` when the entry count is at or below
-/// `HASH_LISTPACK_MAX_ENTRIES` and every field and value is at most
-/// `HASH_LISTPACK_MAX_VALUE_BYTES` bytes; `"hashtable"` otherwise.
+/// `hash-max-listpack-entries` and every field and value is at most
+/// `hash-max-listpack-value` bytes; `"hashtable"` otherwise. Both thresholds
+/// are read from the process-wide `ENCODING_THRESHOLDS` global so that
+/// `CONFIG SET` takes effect immediately.
 fn hash_inline_observed_encoding(h: &HashMap<RedisString, RedisString>) -> &'static str {
-    if h.len() > HASH_LISTPACK_MAX_ENTRIES {
+    let t = get_encoding_thresholds();
+    if h.len() > t.hash_max_listpack_entries {
         return "hashtable";
     }
     for (k, v) in h {
-        if k.as_bytes().len() > HASH_LISTPACK_MAX_VALUE_BYTES
-            || v.as_bytes().len() > HASH_LISTPACK_MAX_VALUE_BYTES
+        if k.as_bytes().len() > t.hash_max_listpack_value
+            || v.as_bytes().len() > t.hash_max_listpack_value
         {
             return "hashtable";
         }
@@ -1078,11 +1176,14 @@ fn hash_inline_observed_encoding(h: &HashMap<RedisString, RedisString>) -> &'sta
 
 /// Encoding name reported for an `Inline`-encoded set.
 ///
-/// All-integer sets at or below `SET_INTSET_MAX_ENTRIES` report `"intset"`.
-/// Otherwise mixed-content sets at or below `SET_LISTPACK_MAX_ENTRIES` with
-/// every member at most `SET_LISTPACK_MAX_VALUE_BYTES` bytes report
-/// `"listpack"`; anything larger reports `"hashtable"`.
+/// All-integer sets at or below `set-max-intset-entries` report `"intset"`.
+/// Otherwise mixed-content sets at or below `set-max-listpack-entries` with
+/// every member at most `set-max-listpack-value` bytes report `"listpack"`;
+/// anything larger reports `"hashtable"`. All thresholds are read from the
+/// process-wide `ENCODING_THRESHOLDS` global so that `CONFIG SET` takes effect
+/// immediately.
 fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
+    let t = get_encoding_thresholds();
     let mut all_integer = true;
     let mut max_len: usize = 0;
     for m in h {
@@ -1094,10 +1195,10 @@ fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
             all_integer = false;
         }
     }
-    if all_integer && h.len() <= SET_INTSET_MAX_ENTRIES {
+    if all_integer && h.len() <= t.set_max_intset_entries {
         return "intset";
     }
-    if h.len() <= SET_LISTPACK_MAX_ENTRIES && max_len <= SET_LISTPACK_MAX_VALUE_BYTES {
+    if h.len() <= t.set_max_listpack_entries && max_len <= t.set_max_listpack_value {
         return "listpack";
     }
     "hashtable"
@@ -1106,14 +1207,17 @@ fn set_inline_observed_encoding(h: &HashSet<RedisString>) -> &'static str {
 /// Encoding name reported for an `Inline`-encoded sorted set.
 ///
 /// Returns `"listpack"` when the entry count is at or below
-/// `ZSET_LISTPACK_MAX_ENTRIES` and every member is at most
-/// `ZSET_LISTPACK_MAX_VALUE_BYTES` bytes; `"skiplist"` otherwise.
+/// `zset-max-listpack-entries` and every member is at most
+/// `zset-max-listpack-value` bytes; `"skiplist"` otherwise. Both thresholds
+/// are read from the process-wide `ENCODING_THRESHOLDS` global so that
+/// `CONFIG SET` takes effect immediately.
 fn zset_inline_observed_encoding(z: &InlineZSet) -> &'static str {
-    if z.len() > ZSET_LISTPACK_MAX_ENTRIES {
+    let t = get_encoding_thresholds();
+    if z.len() > t.zset_max_listpack_entries {
         return "skiplist";
     }
     for m in z.by_member.keys() {
-        if m.as_bytes().len() > ZSET_LISTPACK_MAX_VALUE_BYTES {
+        if m.as_bytes().len() > t.zset_max_listpack_value {
             return "skiplist";
         }
     }

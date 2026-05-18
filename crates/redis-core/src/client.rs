@@ -158,6 +158,14 @@ pub struct Client {
     pub subscribed_channels: HashSet<RedisString>,
     /// Glob patterns this client is subscribed to.
     pub subscribed_patterns: HashSet<RedisString>,
+    /// True while the client is parked inside the global `BlockedKeysIndex`
+    /// from a BLPOP / BRPOP / BLMOVE / BRPOPLPUSH / BLMPOP call.
+    ///
+    /// Set by the blocking command handler immediately before it returns
+    /// without writing a reply; cleared by the wake hook in the LIST push
+    /// path or the per-server timeout thread when those deliver the reply
+    /// via the client's outbound mpsc.
+    pub blocked_on_keys: bool,
 }
 
 /// Per-client transient flags.
@@ -193,6 +201,7 @@ impl Client {
             resp_proto: 2,
             subscribed_channels: HashSet::new(),
             subscribed_patterns: HashSet::new(),
+            blocked_on_keys: false,
         }
     }
 
@@ -239,6 +248,21 @@ impl Client {
         self.subscribed_patterns.clear();
         crate::db::watched_keys_index_remove_client(self.id);
         let _ = crate::db::watched_keys_take_dirty(self.id);
+        self.clear_blocked_on_keys();
+    }
+
+    /// Drop the client from the global blocked-keys index, if registered.
+    ///
+    /// Called from `RESET`, from the per-connection cleanup path when a
+    /// socket closes, and after a successful BLPOP wake/timeout reply has
+    /// been delivered through the outbound mpsc.
+    pub fn clear_blocked_on_keys(&mut self) {
+        if self.blocked_on_keys {
+            self.blocked_on_keys = false;
+            if let Ok(mut idx) = crate::blocked_keys::blocked_keys_index().lock() {
+                let _ = idx.remove_client(self.id);
+            }
+        }
     }
 
     /// Total per-client pub/sub subscriptions across channels and patterns.

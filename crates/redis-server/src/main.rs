@@ -22,9 +22,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redis_commands::{dispatch, pubsub};
+use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
 use redis_core::command_context::CommandContext;
 use redis_core::db::RedisDb;
 use redis_core::pubsub_registry::PubSubRegistry;
@@ -185,7 +186,40 @@ fn main() {
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
+    spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     serve(listener, shutdown, db, next_client_id, registry);
+}
+
+/// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
+/// their deadline elapses.
+///
+/// Polls the global `BlockedKeysIndex` every 100 ms, drains entries whose
+/// `deadline_ms` is in the past, and ships either `*-1\r\n` (null array,
+/// for BLPOP / BRPOP / BLMPOP) or `$-1\r\n` (null bulk, for BLMOVE /
+/// BRPOPLPUSH) through each waiter's outbound mpsc.
+fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
+    let _ = thread::Builder::new()
+        .name("blocked-timeout".to_string())
+        .spawn(move || {
+            use redis_core::blocked_keys::BlockedAction;
+            while !shutdown.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+                let expired = {
+                    let mut idx = match blocked_keys_index().lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    idx.take_expired(current_time_ms())
+                };
+                for waiter in expired {
+                    let reply: &[u8] = match waiter.action {
+                        BlockedAction::Pop { .. } => b"*-1\r\n",
+                        BlockedAction::Move { .. } => b"$-1\r\n",
+                    };
+                    let _ = waiter.sender.send(reply.to_vec());
+                }
+            }
+        });
 }
 
 /// Best-effort SIGINT/SIGTERM handler stub.
@@ -342,16 +376,23 @@ fn handle_connection(
     }
 
     let _ = pubsub::drop_client_from_registry(&registry, id);
+    client.clear_blocked_on_keys();
     drop(outbound);
 }
 
 /// Install `argv` as the current command and route through the dispatcher.
+///
+/// If the previous command parked the client on the global blocked-keys
+/// index, the wake/timeout reply has already gone out via the writer thread
+/// before this fresh read returned bytes — clear the residual flag and any
+/// surviving registry entry before dispatching the new command.
 fn process_command(
     client: &mut Client,
     argv: Vec<RedisString>,
     db: &Arc<Mutex<RedisDb>>,
     registry: &Arc<Mutex<PubSubRegistry>>,
 ) {
+    client.clear_blocked_on_keys();
     client.set_args(argv);
     let result = {
         let mut guard = match db.lock() {
