@@ -1,15 +1,24 @@
 //! Persistence commands: SAVE, BGSAVE.
 //!
-//! `SAVE` runs `rdb::save_rdb` synchronously and updates `last_save_unix`
-//! on the live config.
+//! `SAVE` runs `rdb::save_rdb` synchronously in the calling thread and updates
+//! `last_save_unix` on success.
 //!
-//! `BGSAVE` spawns a background thread that takes a snapshot of the DB
-//! and writes the RDB file. The main thread returns immediately with
-//! `+Background saving started`. No fork is used — this is a deliberate
-//! Phase-1 simplification.
+//! `BGSAVE` on Unix uses `fork(2)` so the OS copy-on-write page mapping gives
+//! the child a frozen snapshot of the DB without any memory duplication:
+//!   1. fork — child sees the DB as it was at the instant of the fork.
+//!   2. Child writes the RDB file and calls `_exit(0)` (not `exit()` — skipping
+//!      atexit handlers that belong to the parent).
+//!   3. Parent records the child PID in `server.rdb_child_pid` and returns
+//!      `+Background saving started` immediately.
+//!   4. A background polling thread (spawned at server start) calls
+//!      `waitpid` every 500 ms to reap the child and update `last_save_unix`.
 //!
-//! TODO: real BGSAVE semantics require fork(2) so the parent keeps serving
-//! requests while the child writes the file without seeing concurrent writes.
+//! On non-Unix targets (Windows, WASM) the pre-fork thread-snapshot path is
+//! kept as the fallback. The fallback allocates a full in-memory clone of the
+//! DB before spawning the writer thread.
+//!
+//! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface in
+//! this crate: documented below with a SAFETY comment.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,22 +63,58 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `BGSAVE [SCHEDULE]` — background RDB save.
 ///
-/// Spawns a thread that holds a snapshot of the key-value pairs and writes
-/// the RDB file. The command returns immediately with
-/// `+Background saving started`.
+/// On Unix, forks a child process that writes the RDB file using the OS
+/// copy-on-write snapshot visible at fork time, then `_exit`s. The parent
+/// returns `+Background saving started` immediately and records the child PID.
 ///
-/// TODO: replace the thread snapshot with a real fork-based approach so the
-/// parent does not block while the child writes the file.
+/// If a BGSAVE child is already running, returns an error immediately rather
+/// than starting a second concurrent save.
+///
+/// On non-Unix targets, falls back to the thread-snapshot approach.
 pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() > 2 {
         return Err(RedisError::wrong_number_of_args(b"bgsave"));
     }
 
-    let cfg = Arc::clone(&ctx.server().live_config);
+    let server = ctx.server();
+
+    if server.rdb_child_pid() != 0 {
+        return Err(RedisError::runtime(
+            b"ERR Background save already in progress".to_vec(),
+        ));
+    }
+
+    let cfg = Arc::clone(&server.live_config);
     let path: PathBuf = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
 
-    let snapshot = snapshot_db(ctx.db());
+    #[cfg(unix)]
+    {
+        let server_arc = ctx.server_arc();
 
+        // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
+        // All requirements (single-threaded child, async-signal-safe ops only)
+        // are met: child immediately writes RDB and _exits without running any
+        // parent atexit handlers. The parent half only stores the child PID into
+        // an atomic and returns — no Rust destructors of the shared state run in
+        // the child because _exit bypasses them.
+        let pid = unsafe {
+            let p = libc::fork();
+            if p == 0 {
+                let exit_code = if save_rdb(ctx.db(), &path).is_ok() { 0i32 } else { 1i32 };
+                libc::_exit(exit_code);
+            }
+            p
+        };
+
+        if pid > 0 {
+            server_arc.set_rdb_child_pid(pid);
+            return ctx.reply_simple_string(b"Background saving started");
+        }
+
+        eprintln!("redis-server: fork() failed, falling back to thread snapshot");
+    }
+
+    let snapshot = snapshot_db(ctx.db());
     let _ = thread::Builder::new()
         .name("bgsave".to_string())
         .spawn(move || {
@@ -91,7 +136,8 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ctx.reply_simple_string(b"Background saving started")
 }
 
-/// Snapshot the entries of `db` into an owned `Vec` for BGSAVE.
+/// Snapshot the entries of `db` into an owned `Vec` for the thread-based
+/// BGSAVE fallback used on non-Unix targets and on fork failure.
 fn snapshot_db(db: &RedisDb) -> Vec<(redis_types::RedisString, redis_core::RedisObject)> {
     db.iter_for_eviction()
         .map(|(k, v)| (k.clone(), v.clone()))

@@ -10,6 +10,7 @@ redis-types = { workspace = true }
 redis-protocol = { workspace = true }
 redis-core = { workspace = true }
 redis-commands = { workspace = true }
+libc = { workspace = true }
 
 [[bin]]
 name = "redis-server"

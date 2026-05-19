@@ -13,6 +13,10 @@
 pub mod bitops;
 pub mod connection;
 pub mod dispatch;
+pub mod eval;
+pub mod geo;
+pub mod geohash_geohash;
+pub mod geohash_geohash_helper;
 pub mod generated;
 pub mod hash;
 pub mod hyperloglog;

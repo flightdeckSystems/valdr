@@ -11,7 +11,7 @@
 //! atomics so the server is shareable through `&RedisServer` without giving
 //! out a `&mut` reference.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::client::ClientId;
@@ -85,6 +85,11 @@ pub struct RedisServer {
     pub shutdown_asap: AtomicBool,
     /// Per-db count budget for the eviction pool's round-robin scan.
     pub eviction_db_cursor: AtomicUsize,
+    /// PID of the in-flight BGSAVE child process, or 0 when no child is running.
+    ///
+    /// Written by the BGSAVE fork path and cleared by the reaper thread once the
+    /// child exits. Polled by a background thread every 500 ms.
+    pub rdb_child_pid: AtomicI32,
 }
 
 /// Default value of `server.proto_max_bulk_len` (512 MiB).
@@ -129,6 +134,7 @@ impl RedisServer {
             start_time_ms: 0,
             shutdown_asap: AtomicBool::new(false),
             eviction_db_cursor: AtomicUsize::new(0),
+            rdb_child_pid: AtomicI32::new(0),
         }
     }
 
@@ -224,6 +230,16 @@ impl RedisServer {
         self.proto_max_bulk_len.store(n, Ordering::Relaxed);
     }
 
+    /// Return the PID of the in-flight BGSAVE child, or 0 if none is running.
+    pub fn rdb_child_pid(&self) -> i32 {
+        self.rdb_child_pid.load(Ordering::SeqCst)
+    }
+
+    /// Store the PID of the newly-forked BGSAVE child.
+    pub fn set_rdb_child_pid(&self, pid: i32) {
+        self.rdb_child_pid.store(pid, Ordering::SeqCst);
+    }
+
     /// Stub random number used by lolwut. Centralised here so command handlers
     /// can call `ctx.server().pseudo_random_f32_minus1_to_1()` without an
     /// external `rand` dependency.
@@ -243,6 +259,7 @@ impl RedisServer {
 //   port_notes:    1
 //   unsafe_blocks: 0
 //   notes:         Live config moved to LiveConfig (atomic per-field reads).
+//                  rdb_child_pid (AtomicI32) tracks the in-flight BGSAVE child.
 //                  Mutation now goes through interior atomics so the server
 //                  ships through Arc to every CommandContext.
 // ──────────────────────────────────────────────────────────────────────

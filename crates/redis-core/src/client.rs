@@ -9,6 +9,7 @@ use redis_protocol::RespFrame;
 use redis_types::RedisString;
 use std::collections::{HashMap, HashSet};
 
+use crate::acl::global_acl_state;
 use crate::object::RedisObject;
 use crate::transport::Connection;
 
@@ -150,14 +151,15 @@ pub struct Client {
     /// Defaults to 2 (the version implied by every legacy RESP2 client).
     /// RESP3 upgrade path is a TODO.
     pub resp_proto: i32,
-    /// Whether this client has successfully authenticated.
+    /// The ACL username this client is authenticated as.
     ///
-    /// Starts `true` when no requirepass is configured; set to `true` by a
-    /// successful AUTH command when requirepass is active. The accept loop
-    /// initialises this field based on whether requirepass is set at the
-    /// moment the connection is accepted. Authentication state persists across
-    /// RESET (real Redis behaviour).
-    pub authenticated: bool,
+    /// `None` means the client has not yet authenticated (pre-AUTH state).
+    /// `Some(name)` means the client has successfully authenticated as that
+    /// user. The default user (`default on nopass`) grants immediate access on
+    /// connect without requiring AUTH; the accept loop sets this to
+    /// `Some("default")` when the default user is enabled and has `nopass`.
+    /// Authentication state persists across RESET (real Redis behaviour).
+    pub authenticated_user: Option<RedisString>,
     /// Channels this client is subscribed to.
     ///
     /// Round 8a per-client pub/sub bookkeeping; mirrors the channel half of
@@ -198,6 +200,26 @@ pub struct ClientFlags {
     pub aof_client: bool,
 }
 
+/// Determine the initial `authenticated_user` for a new `Client`.
+///
+/// Consults the global ACL state: if the `default` user is enabled and has
+/// `nopass`, the client starts authenticated as `default` (backwards compat).
+/// Otherwise returns `None` — the client must run AUTH before other commands.
+fn initial_authenticated_user() -> Option<RedisString> {
+    let default_key = RedisString::from_bytes(b"default");
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Some(user) = guard.users.get(&default_key) {
+        if user.flags.enabled && user.flags.nopass {
+            return Some(default_key);
+        }
+    }
+    None
+}
+
 impl Client {
     pub fn new(id: ClientId) -> Self {
         Self {
@@ -219,7 +241,7 @@ impl Client {
             subscribed_patterns: HashSet::new(),
             blocked_on_keys: false,
             pending_wakes: Vec::new(),
-            authenticated: true,
+            authenticated_user: initial_authenticated_user(),
         }
     }
 

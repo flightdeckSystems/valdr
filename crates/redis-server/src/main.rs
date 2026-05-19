@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, current_time_ms};
@@ -221,6 +223,7 @@ fn main() {
     live_config.set_rdb_filename(args.dbfilename.clone());
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
+    redis_core::acl::install_acl_state();
 
     let server = Arc::new(redis_core::RedisServer::with_live_config(
         args.port,
@@ -264,7 +267,74 @@ fn main() {
     let metrics_arc = Arc::clone(server_metrics());
     let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
     let _ = spawn_lru_clock_thread();
+    spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
     serve(listener, shutdown, db, next_client_id, registry, server, args.port);
+}
+
+/// Reaper thread for BGSAVE child processes.
+///
+/// Polls `server.rdb_child_pid` every 500 ms. When a non-zero PID is
+/// recorded, calls `waitpid` with `WNOHANG` to check if the child has exited.
+/// On success: updates `last_save_unix` and clears the PID. On failure
+/// (non-zero exit status): logs an error and clears the PID.
+///
+/// Only compiled on Unix — the thread-snapshot BGSAVE fallback on non-Unix
+/// platforms does not produce child processes and needs no reaping.
+#[cfg(unix)]
+fn spawn_bgsave_reaper(
+    server: Arc<redis_core::RedisServer>,
+    live_config: Arc<redis_core::live_config::LiveConfig>,
+) {
+    use std::sync::atomic::Ordering;
+    let _ = thread::Builder::new()
+        .name("bgsave-reaper".to_string())
+        .spawn(move || loop {
+            thread::sleep(Duration::from_millis(500));
+            let child_pid = server.rdb_child_pid();
+            if child_pid == 0 {
+                continue;
+            }
+            let mut status: libc::c_int = 0;
+            let ret = unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG) };
+            if ret == 0 {
+                continue;
+            }
+            if ret < 0 {
+                eprintln!("redis-server: waitpid({}) failed: errno={}", child_pid, ret);
+                server.set_rdb_child_pid(0);
+                server_metrics()
+                    .rdb_saves_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            let exited_ok = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+            if exited_ok {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                live_config.set_last_save_unix(now);
+                server_metrics()
+                    .rdb_saves_succeeded
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                eprintln!(
+                    "redis-server: BGSAVE child {} exited with status {}",
+                    child_pid, status
+                );
+                server_metrics()
+                    .rdb_saves_failed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            server.set_rdb_child_pid(0);
+        });
+}
+
+#[cfg(not(unix))]
+fn spawn_bgsave_reaper(
+    _server: Arc<redis_core::RedisServer>,
+    _live_config: Arc<redis_core::live_config::LiveConfig>,
+) {
 }
 
 /// Background scanner that wakes blocked BLPOP/BRPOP/BLMOVE waiters once
@@ -412,7 +482,7 @@ fn handle_connection(
     let mut client = Client::with_connection(Connection::Tcp(stream));
     client.id = id;
     client.addr = Some(peer_addr);
-    client.authenticated = server.live_config.requirepass().is_none();
+    client.authenticated_user = determine_initial_user();
     let mut read_buf = [0u8; 16 * 1024];
 
     loop {
@@ -534,6 +604,26 @@ fn flush_reply(client: &mut Client, outbound: &Sender<Vec<u8>>) -> bool {
     }
     let bytes = std::mem::take(&mut client.reply_buf);
     outbound.send(bytes).is_ok()
+}
+
+/// Determine the initial authenticated username for a newly accepted connection.
+///
+/// If the global default ACL user is enabled and has `nopass`, the client
+/// starts pre-authenticated as `default`. Otherwise the client must AUTH before
+/// running commands.
+fn determine_initial_user() -> Option<RedisString> {
+    let acl = redis_core::acl::global_acl_state();
+    let default_key = RedisString::from_bytes(b"default");
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if let Some(user) = guard.users.get(&default_key) {
+        if user.flags.enabled && user.flags.nopass {
+            return Some(default_key);
+        }
+    }
+    None
 }
 
 /// Append a RESP error line to the pending reply buffer for later flushing.

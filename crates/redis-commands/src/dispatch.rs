@@ -14,8 +14,8 @@
 
 use std::time::Instant;
 
-use redis_core::eviction::{try_evict_to_fit, unimplemented_policy_reply, EvictionOutcome};
-use redis_core::live_config::MaxmemoryPolicyCode;
+use redis_core::acl::{category as acl_category, global_acl_state};
+use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
@@ -104,11 +104,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         None => return Err(unknown_command_error(name)),
     };
 
-    if ctx.live_config().requirepass().is_some() && !ctx.client_ref().authenticated {
-        if !command_has_no_auth_flag(name) {
-            ctx.client_mut()
-                .reply_buf
-                .extend_from_slice(b"-NOAUTH Authentication required.\r\n");
+    if !command_has_no_auth_flag(name) {
+        if let Some(noauth_reply) = enforce_acl_gate(ctx, name) {
+            ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
     }
@@ -138,6 +136,114 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     result
 }
 
+/// Return the combined ACL category bitmask for a named command.
+///
+/// Uses the generated `COMMANDS` registry which records the `acl_categories`
+/// from Valkey's command JSON definitions. Multiple entries can share the same
+/// name (sub-command inheritance); the bitmask is OR-ed across all of them.
+fn command_acl_categories(name: &[u8]) -> u64 {
+    let mut bits: u64 = 0;
+    for spec in COMMANDS.iter() {
+        if ascii_eq_ignore_case(spec.name.as_bytes(), name) {
+            for &cat in spec.acl_categories {
+                bits |= match cat {
+                    crate::generated::AclCategory::KEYSPACE    => acl_category::KEYSPACE,
+                    crate::generated::AclCategory::READ        => acl_category::READ,
+                    crate::generated::AclCategory::WRITE       => acl_category::WRITE,
+                    crate::generated::AclCategory::SET         => acl_category::SET,
+                    crate::generated::AclCategory::SORTEDSET   => acl_category::SORTEDSET,
+                    crate::generated::AclCategory::LIST        => acl_category::LIST,
+                    crate::generated::AclCategory::HASH        => acl_category::HASH,
+                    crate::generated::AclCategory::STRING      => acl_category::STRING,
+                    crate::generated::AclCategory::BITMAP      => acl_category::BITMAP,
+                    crate::generated::AclCategory::HYPERLOGLOG => acl_category::HYPERLOGLOG,
+                    crate::generated::AclCategory::GEO         => acl_category::GEO,
+                    crate::generated::AclCategory::STREAM      => acl_category::STREAM,
+                    crate::generated::AclCategory::PUBSUB      => acl_category::PUBSUB,
+                    crate::generated::AclCategory::ADMIN       => acl_category::ADMIN,
+                    crate::generated::AclCategory::FAST        => acl_category::FAST,
+                    crate::generated::AclCategory::SLOW        => acl_category::SLOW,
+                    crate::generated::AclCategory::BLOCKING    => acl_category::BLOCKING,
+                    crate::generated::AclCategory::DANGEROUS   => acl_category::DANGEROUS,
+                    crate::generated::AclCategory::CONNECTION  => acl_category::CONNECTION,
+                    crate::generated::AclCategory::TRANSACTION => acl_category::TRANSACTION,
+                    crate::generated::AclCategory::SCRIPTING   => acl_category::SCRIPTING,
+                };
+            }
+        }
+    }
+    bits
+}
+
+/// ACL gate: check that the current client is authenticated and allowed to run `name`.
+///
+/// Returns `Some(reply_bytes)` to short-circuit dispatch with the encoded error.
+/// Returns `None` when the command should proceed.
+fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+    let default_name = RedisString::from_bytes(b"default");
+    let user_name = ctx
+        .client_ref()
+        .authenticated_user
+        .clone()
+        .unwrap_or_else(|| default_name.clone());
+
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+
+    let user = match guard.users.get(&user_name) {
+        Some(u) => u,
+        None => {
+            return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
+        }
+    };
+
+    if !user.flags.enabled {
+        return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
+    }
+
+    if ctx.client_ref().authenticated_user.is_none() {
+        return Some(b"-NOAUTH Authentication required.\r\n".to_vec());
+    }
+
+    if is_always_allowed_for_authenticated(ctx, name) {
+        return None;
+    }
+
+    let cmd_categories = command_acl_categories(name);
+    if user.can_execute_command(name, cmd_categories) {
+        return None;
+    }
+
+    let mut msg: Vec<u8> = Vec::new();
+    msg.extend_from_slice(b"-NOPERM This user has no permissions to run the '");
+    for b in name.iter().map(|c| c.to_ascii_lowercase()) {
+        msg.push(b);
+    }
+    msg.extend_from_slice(b"' command\r\n");
+    Some(msg)
+}
+
+/// Return `true` for commands that any authenticated user may run regardless of
+/// their command permissions.
+///
+/// `ACL WHOAMI` and `ACL HELP` are informational connection-level queries that
+/// do not expose sensitive data and do not mutate state. Real Redis allows these
+/// for any authenticated user.
+fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"ACL") {
+        return false;
+    }
+    let sub = match ctx.client_ref().arg(1) {
+        Some(s) => s,
+        None => return false,
+    };
+    ascii_eq_ignore_case(sub.as_bytes(), b"WHOAMI")
+        || ascii_eq_ignore_case(sub.as_bytes(), b"HELP")
+}
+
 /// Pre-handler maxmemory enforcement.
 ///
 /// Returns `Some(reply_bytes)` when the command must be rejected because the
@@ -158,18 +264,12 @@ fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<V
         return None;
     }
     let policy = ctx.live_config().maxmemory_policy();
-    let outcome = try_evict_to_fit(ctx.db_mut(), maxmem, policy);
+    let log_factor = ctx.live_config().lfu_log_factor();
+    let decay_time = ctx.live_config().lfu_decay_time();
+    let outcome = try_evict_to_fit(ctx.db_mut(), maxmem, policy, log_factor, decay_time);
     match outcome {
         EvictionOutcome::Sufficient | EvictionOutcome::Evicted(_) => None,
-        EvictionOutcome::StillOver => Some(oom_reply_for_policy(policy)),
-    }
-}
-
-fn oom_reply_for_policy(policy: MaxmemoryPolicyCode) -> Vec<u8> {
-    if redis_core::eviction::is_policy_supported(policy) {
-        b"-OOM command not allowed when used memory > 'maxmemory'.\r\n".to_vec()
-    } else {
-        unimplemented_policy_reply(policy)
+        EvictionOutcome::StillOver => Some(oom_error_reply()),
     }
 }
 
@@ -435,6 +535,21 @@ pub static HANDLERS: &[DispatchEntry] = &[
     // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
     DispatchEntry { name: b"SAVE", handler: crate::persist::save_command },
     DispatchEntry { name: b"BGSAVE", handler: crate::persist::bgsave_command },
+    // ── GEO (Session 1B) ───────────────────────────────────────────────────
+    DispatchEntry { name: b"GEOADD", handler: crate::geo::geoadd_command },
+    DispatchEntry { name: b"GEODIST", handler: crate::geo::geodist_command },
+    DispatchEntry { name: b"GEOHASH", handler: crate::geo::geohash_command },
+    DispatchEntry { name: b"GEOPOS", handler: crate::geo::geopos_command },
+    DispatchEntry { name: b"GEOSEARCH", handler: crate::geo::geosearch_command },
+    DispatchEntry { name: b"GEOSEARCHSTORE", handler: crate::geo::geosearchstore_command },
+    DispatchEntry { name: b"GEORADIUS", handler: crate::geo::georadius_command },
+    DispatchEntry { name: b"GEORADIUSBYMEMBER", handler: crate::geo::georadiusbymember_command },
+    DispatchEntry { name: b"GEORADIUS_RO", handler: crate::geo::georadiusro_command },
+    DispatchEntry { name: b"GEORADIUSBYMEMBER_RO", handler: crate::geo::georadiusbymemberro_command },
+    // ── EVAL / SCRIPTING (Session 1A) ──────────────────────────────────────
+    DispatchEntry { name: b"EVAL", handler: crate::eval::eval_command },
+    DispatchEntry { name: b"EVALSHA", handler: crate::eval::evalsha_command },
+    DispatchEntry { name: b"SCRIPT", handler: crate::eval::script_command },
 ];
 
 #[cfg(test)]

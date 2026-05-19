@@ -11,5 +11,11 @@
 "redis-types"     = 0
 "redis-protocol"  = 0
 "redis-core"      = 0
-"redis-commands"  = 0
-"redis-server"    = 0
+# Raised to 1 for the fork(2)-based BGSAVE in persist.rs (Round 19 Session 1D).
+# The single unsafe block covers libc::fork + libc::_exit in the child path.
+# This is the standard Unix COW-snapshot mechanism; no other unsafe is expected.
+"redis-commands"  = 1
+# Raised to 1 for the BGSAVE child reaper in main.rs (Round 19 Session 1D).
+# The single unsafe block calls libc::waitpid(WNOHANG) to reap the fork child
+# without blocking. Necessary companion to the fork in redis-commands::persist.
+"redis-server"    = 1

@@ -52,6 +52,10 @@ pub struct ServerMetrics {
     pub evicted_keys: AtomicU64,
     /// Cumulative microseconds spent inside command dispatch on the main thread.
     pub active_time_main_thread_us: AtomicU64,
+    /// Number of BGSAVE child processes that exited with status 0.
+    pub rdb_saves_succeeded: AtomicU64,
+    /// Number of BGSAVE child processes that exited with a non-zero status.
+    pub rdb_saves_failed: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -69,6 +73,8 @@ impl ServerMetrics {
             expired_keys: AtomicU64::new(0),
             evicted_keys: AtomicU64::new(0),
             active_time_main_thread_us: AtomicU64::new(0),
+            rdb_saves_succeeded: AtomicU64::new(0),
+            rdb_saves_failed: AtomicU64::new(0),
         }
     }
 

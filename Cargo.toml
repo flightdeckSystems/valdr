@@ -20,3 +20,5 @@ redis-protocol = { path = "crates/redis-protocol" }
 redis-core = { path = "crates/redis-core" }
 redis-commands = { path = "crates/redis-commands" }
 redis-ds = { path = "crates/redis-ds" }
+mlua = { version = "0.10", features = ["lua51", "vendored"] }
+libc = "0.2"

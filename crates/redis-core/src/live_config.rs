@@ -121,6 +121,12 @@ pub struct LiveConfig {
     pub rdb_filename: Mutex<String>,
     /// Unix timestamp (seconds) of the last successful RDB save.
     pub last_save_unix: AtomicI64,
+    /// LFU logarithmic counter growth factor (`lfu-log-factor` config key).
+    /// Higher values make the counter saturate more slowly. Default 10.
+    pub lfu_log_factor: AtomicU32,
+    /// Minutes between LFU counter decay ticks (`lfu-decay-time` config key).
+    /// Default 1.
+    pub lfu_decay_time: AtomicU32,
 }
 
 /// Default `maxclients` (matches upstream server.c).
@@ -137,6 +143,12 @@ pub const DEFAULT_HZ: u32 = 10;
 
 /// Default `active-expire-effort` (minimum aggressiveness).
 pub const DEFAULT_ACTIVE_EXPIRE_EFFORT: u8 = 1;
+
+/// Default `lfu-log-factor` — controls how fast the LFU counter saturates.
+pub const DEFAULT_LFU_LOG_FACTOR: u32 = 10;
+
+/// Default `lfu-decay-time` in minutes — how often the LFU counter decays by 1.
+pub const DEFAULT_LFU_DECAY_TIME: u32 = 1;
 
 /// Default `hash-max-listpack-entries` per Valkey config.
 pub const DEFAULT_HASH_MAX_LISTPACK_ENTRIES: usize = 128;
@@ -185,6 +197,8 @@ impl Default for LiveConfig {
             rdb_dir: Mutex::new(DEFAULT_RDB_DIR.to_string()),
             rdb_filename: Mutex::new(DEFAULT_RDB_FILENAME.to_string()),
             last_save_unix: AtomicI64::new(0),
+            lfu_log_factor: AtomicU32::new(DEFAULT_LFU_LOG_FACTOR),
+            lfu_decay_time: AtomicU32::new(DEFAULT_LFU_DECAY_TIME),
         }
     }
 }
@@ -392,6 +406,22 @@ impl LiveConfig {
     /// Record the timestamp of a successful RDB save.
     pub fn set_last_save_unix(&self, ts: i64) {
         self.last_save_unix.store(ts, Ordering::Relaxed);
+    }
+
+    pub fn lfu_log_factor(&self) -> u32 {
+        self.lfu_log_factor.load(Ordering::Relaxed)
+    }
+
+    pub fn set_lfu_log_factor(&self, factor: u32) {
+        self.lfu_log_factor.store(factor, Ordering::Relaxed);
+    }
+
+    pub fn lfu_decay_time(&self) -> u32 {
+        self.lfu_decay_time.load(Ordering::Relaxed)
+    }
+
+    pub fn set_lfu_decay_time(&self, minutes: u32) {
+        self.lfu_decay_time.store(minutes, Ordering::Relaxed);
     }
 
     /// Snapshot of encoding thresholds — convenience for the encoding

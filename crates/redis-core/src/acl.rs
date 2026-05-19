@@ -1,0 +1,548 @@
+//! Multi-user ACL state — per-user permission model.
+//!
+//! Implements the Redis 6+ ACL semantics:
+//!   - Multiple named users, each with passwords (SHA-256 hashed), enabled/disabled
+//!     flag, allowed commands (by category bitmask), key patterns, and channel patterns.
+//!   - The `default` user starts as `on nopass ~* &* +@all` for backwards compatibility.
+//!   - ACL state lives in a process-global `OnceLock<Arc<Mutex<AclState>>>`.
+//!
+//! TODOs:
+//!   - Per-key pattern enforcement at the per-command level (currently tracked in
+//!     `AclUser::key_patterns` but not checked during dispatch).
+//!   - ACL persistence to aclfile / `users` config section.
+//!   - ACL LOG real implementation (currently stub: empty array / +OK).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use redis_types::RedisString;
+
+/// SHA-256 hash of a password (32 bytes).
+pub type PasswordHash = [u8; 32];
+
+/// Compute the SHA-256 hash of a cleartext password.
+pub fn sha256_hash(password: &[u8]) -> PasswordHash {
+    use std::num::Wrapping;
+
+    let mut hash = [0u8; 32];
+    sha256_raw(password, &mut hash);
+    hash
+}
+
+/// Minimal pure-Rust SHA-256 implementation (no external crate needed).
+///
+/// Implements FIPS 180-4 SHA-256. Used only on the ACL write path (SETUSER),
+/// not in hot paths.
+fn sha256_raw(data: &[u8], out: &mut [u8; 32]) {
+    #[allow(clippy::unreadable_literal)]
+    let k: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg: Vec<u8> = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for (i, bytes) in chunk.chunks(4).enumerate().take(16) {
+            w[i] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7)
+                ^ w[i - 15].rotate_right(18)
+                ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17)
+                ^ w[i - 2].rotate_right(19)
+                ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    for (i, &word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+}
+
+/// Hex-encode a SHA-256 hash for wire output.
+pub fn hash_to_hex(hash: &PasswordHash) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    for &b in hash {
+        out.push(HEX_CHARS[(b >> 4) as usize]);
+        out.push(HEX_CHARS[(b & 0xf) as usize]);
+    }
+    out
+}
+
+const HEX_CHARS: &[u8] = b"0123456789abcdef";
+
+/// Attempt to decode a 64-char hex string into a 32-byte hash.
+pub fn hex_to_hash(hex: &[u8]) -> Option<PasswordHash> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in hex.chunks(2).enumerate() {
+        let hi = hex_digit(pair[0])?;
+        let lo = hex_digit(pair[1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Bitmask flags on an ACL user.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AclUserFlags {
+    /// User is enabled (can authenticate and run commands).
+    pub enabled: bool,
+    /// No password required; any password (or none) is accepted.
+    pub nopass: bool,
+    /// Allow all commands regardless of `allowed_categories`.
+    pub allcommands: bool,
+    /// Allow all keys (`~*`).
+    pub allkeys: bool,
+    /// Allow all channels (`&*`).
+    pub allchannels: bool,
+}
+
+/// ACL category bitmask constants (aligned with Valkey acl.c).
+pub mod category {
+    pub const KEYSPACE: u64     = 1 << 0;
+    pub const READ: u64         = 1 << 1;
+    pub const WRITE: u64        = 1 << 2;
+    pub const SET: u64          = 1 << 3;
+    pub const SORTEDSET: u64    = 1 << 4;
+    pub const LIST: u64         = 1 << 5;
+    pub const HASH: u64         = 1 << 6;
+    pub const STRING: u64       = 1 << 7;
+    pub const BITMAP: u64       = 1 << 8;
+    pub const HYPERLOGLOG: u64  = 1 << 9;
+    pub const GEO: u64          = 1 << 10;
+    pub const STREAM: u64       = 1 << 11;
+    pub const PUBSUB: u64       = 1 << 12;
+    pub const ADMIN: u64        = 1 << 13;
+    pub const FAST: u64         = 1 << 14;
+    pub const SLOW: u64         = 1 << 15;
+    pub const BLOCKING: u64     = 1 << 16;
+    pub const DANGEROUS: u64    = 1 << 17;
+    pub const CONNECTION: u64   = 1 << 18;
+    pub const TRANSACTION: u64  = 1 << 19;
+    pub const SCRIPTING: u64    = 1 << 20;
+
+    /// All categories combined.
+    pub const ALL: u64 = KEYSPACE | READ | WRITE | SET | SORTEDSET | LIST | HASH
+        | STRING | BITMAP | HYPERLOGLOG | GEO | STREAM | PUBSUB | ADMIN | FAST
+        | SLOW | BLOCKING | DANGEROUS | CONNECTION | TRANSACTION | SCRIPTING;
+}
+
+/// Map a category name (lowercase ASCII) to its bitmask bit.
+pub fn category_name_to_bit(name: &[u8]) -> Option<u64> {
+    let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+    match lower.as_slice() {
+        b"keyspace"     => Some(category::KEYSPACE),
+        b"read"         => Some(category::READ),
+        b"write"        => Some(category::WRITE),
+        b"set"          => Some(category::SET),
+        b"sortedset"    => Some(category::SORTEDSET),
+        b"list"         => Some(category::LIST),
+        b"hash"         => Some(category::HASH),
+        b"string"       => Some(category::STRING),
+        b"bitmap"       => Some(category::BITMAP),
+        b"hyperloglog"  => Some(category::HYPERLOGLOG),
+        b"geo"          => Some(category::GEO),
+        b"stream"       => Some(category::STREAM),
+        b"pubsub"       => Some(category::PUBSUB),
+        b"admin"        => Some(category::ADMIN),
+        b"fast"         => Some(category::FAST),
+        b"slow"         => Some(category::SLOW),
+        b"blocking"     => Some(category::BLOCKING),
+        b"dangerous"    => Some(category::DANGEROUS),
+        b"connection"   => Some(category::CONNECTION),
+        b"transaction"  => Some(category::TRANSACTION),
+        b"scripting"    => Some(category::SCRIPTING),
+        b"all"          => Some(category::ALL),
+        _ => None,
+    }
+}
+
+/// Sorted list of all category names (for ACL CAT output).
+pub const ALL_CATEGORY_NAMES: &[&[u8]] = &[
+    b"admin", b"bitmap", b"blocking", b"connection", b"dangerous",
+    b"fast", b"geo", b"hash", b"hyperloglog", b"keyspace", b"list",
+    b"pubsub", b"read", b"scripting", b"set", b"slow", b"sortedset",
+    b"stream", b"string", b"transaction", b"write",
+];
+
+/// A single ACL user entry.
+#[derive(Debug, Clone)]
+pub struct AclUser {
+    pub name: RedisString,
+    pub flags: AclUserFlags,
+    /// SHA-256 hashed passwords.
+    pub passwords: Vec<PasswordHash>,
+    /// Bitmask of allowed ACL categories.
+    pub allowed_categories: u64,
+    /// Explicitly allowed individual command names (lowercase).
+    pub allowed_commands: Vec<RedisString>,
+    /// Explicitly denied individual command names (lowercase).
+    pub denied_commands: Vec<RedisString>,
+    /// Key glob patterns allowed (`~pattern`).
+    pub key_patterns: Vec<RedisString>,
+    /// Channel glob patterns allowed (`&pattern`).
+    pub channel_patterns: Vec<RedisString>,
+}
+
+impl AclUser {
+    /// Create a new user in reset/deny-all state.
+    pub fn new_reset(name: RedisString) -> Self {
+        AclUser {
+            name,
+            flags: AclUserFlags {
+                enabled: false,
+                nopass: false,
+                allcommands: false,
+                allkeys: false,
+                allchannels: false,
+            },
+            passwords: Vec::new(),
+            allowed_categories: 0,
+            allowed_commands: Vec::new(),
+            denied_commands: Vec::new(),
+            key_patterns: Vec::new(),
+            channel_patterns: Vec::new(),
+        }
+    }
+
+    /// Create the default user: `on nopass ~* &* +@all`.
+    pub fn new_default() -> Self {
+        AclUser {
+            name: RedisString::from_bytes(b"default"),
+            flags: AclUserFlags {
+                enabled: true,
+                nopass: true,
+                allcommands: true,
+                allkeys: true,
+                allchannels: true,
+            },
+            passwords: Vec::new(),
+            allowed_categories: category::ALL,
+            allowed_commands: Vec::new(),
+            denied_commands: Vec::new(),
+            key_patterns: vec![RedisString::from_bytes(b"*")],
+            channel_patterns: vec![RedisString::from_bytes(b"*")],
+        }
+    }
+
+    /// Check whether this user can execute the given command name.
+    ///
+    /// Checks (in order):
+    ///   1. If user is disabled → deny.
+    ///   2. If `allcommands` flag is set → allow.
+    ///   3. If command is in `denied_commands` → deny.
+    ///   4. If command is in `allowed_commands` → allow.
+    ///   5. Check `allowed_categories` against the command's ACL categories.
+    pub fn can_execute_command(&self, cmd_name: &[u8], cmd_categories: u64) -> bool {
+        if !self.flags.enabled {
+            return false;
+        }
+        if self.flags.allcommands {
+            return true;
+        }
+        let lower: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let lower_rs = RedisString::from_bytes(&lower);
+        if self.denied_commands.iter().any(|c| c == &lower_rs) {
+            return false;
+        }
+        if self.allowed_commands.iter().any(|c| c == &lower_rs) {
+            return true;
+        }
+        self.allowed_categories & cmd_categories != 0
+    }
+
+    /// Check whether this user's password list contains the given cleartext password.
+    pub fn check_password(&self, cleartext: &[u8]) -> bool {
+        if self.flags.nopass {
+            return true;
+        }
+        let hash = sha256_hash(cleartext);
+        self.passwords.iter().any(|h| *h == hash)
+    }
+
+    /// Render this user as an `ACL LIST` / `ACL SETUSER` rule string.
+    pub fn to_rule_string(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"user ");
+        out.extend_from_slice(self.name.as_bytes());
+        out.push(b' ');
+        if self.flags.enabled {
+            out.extend_from_slice(b"on");
+        } else {
+            out.extend_from_slice(b"off");
+        }
+        if self.flags.nopass {
+            out.extend_from_slice(b" nopass");
+        }
+        for hash in &self.passwords {
+            out.extend_from_slice(b" #");
+            out.extend_from_slice(&hash_to_hex(hash));
+        }
+        if self.flags.allkeys {
+            out.extend_from_slice(b" ~*");
+        } else {
+            for pat in &self.key_patterns {
+                out.push(b' ');
+                out.push(b'~');
+                out.extend_from_slice(pat.as_bytes());
+            }
+        }
+        if self.flags.allchannels {
+            out.extend_from_slice(b" &*");
+        } else {
+            for pat in &self.channel_patterns {
+                out.push(b' ');
+                out.push(b'&');
+                out.extend_from_slice(pat.as_bytes());
+            }
+        }
+        if self.flags.allcommands {
+            out.extend_from_slice(b" +@all");
+        } else {
+            for cat_name in ALL_CATEGORY_NAMES {
+                let bit = category_name_to_bit(cat_name).unwrap_or(0);
+                if self.allowed_categories & bit != 0 {
+                    out.extend_from_slice(b" +@");
+                    out.extend_from_slice(cat_name);
+                }
+            }
+            for cmd in &self.allowed_commands {
+                out.push(b' ');
+                out.push(b'+');
+                out.extend_from_slice(cmd.as_bytes());
+            }
+            for cmd in &self.denied_commands {
+                out.push(b' ');
+                out.push(b'-');
+                out.extend_from_slice(cmd.as_bytes());
+            }
+        }
+        out
+    }
+
+    /// Return a string describing the commands permission state for GETUSER.
+    pub fn commands_summary(&self) -> Vec<u8> {
+        if self.flags.allcommands {
+            return b"+@all".to_vec();
+        }
+        if self.allowed_categories == 0 && self.allowed_commands.is_empty() {
+            return b"-@all".to_vec();
+        }
+        let mut out: Vec<u8> = Vec::new();
+        for cat_name in ALL_CATEGORY_NAMES {
+            let bit = category_name_to_bit(cat_name).unwrap_or(0);
+            if self.allowed_categories & bit != 0 {
+                if !out.is_empty() { out.push(b' '); }
+                out.extend_from_slice(b"+@");
+                out.extend_from_slice(cat_name);
+            }
+        }
+        for cmd in &self.allowed_commands {
+            if !out.is_empty() { out.push(b' '); }
+            out.push(b'+');
+            out.extend_from_slice(cmd.as_bytes());
+        }
+        out
+    }
+
+    /// Render key patterns for GETUSER.
+    pub fn keys_summary(&self) -> Vec<u8> {
+        if self.flags.allkeys {
+            return b"~*".to_vec();
+        }
+        if self.key_patterns.is_empty() {
+            return b"".to_vec();
+        }
+        let mut out: Vec<u8> = Vec::new();
+        for pat in &self.key_patterns {
+            if !out.is_empty() { out.push(b' '); }
+            out.push(b'~');
+            out.extend_from_slice(pat.as_bytes());
+        }
+        out
+    }
+
+    /// Render channel patterns for GETUSER.
+    pub fn channels_summary(&self) -> Vec<u8> {
+        if self.flags.allchannels {
+            return b"&*".to_vec();
+        }
+        if self.channel_patterns.is_empty() {
+            return b"".to_vec();
+        }
+        let mut out: Vec<u8> = Vec::new();
+        for pat in &self.channel_patterns {
+            if !out.is_empty() { out.push(b' '); }
+            out.push(b'&');
+            out.extend_from_slice(pat.as_bytes());
+        }
+        out
+    }
+}
+
+/// Process-wide ACL state: map of username → `AclUser`.
+pub struct AclState {
+    pub users: HashMap<RedisString, AclUser>,
+}
+
+impl AclState {
+    /// Initialise with just the `default` user.
+    pub fn new() -> Self {
+        let mut users = HashMap::new();
+        let default_user = AclUser::new_default();
+        users.insert(default_user.name.clone(), default_user);
+        AclState { users }
+    }
+}
+
+impl Default for AclState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static GLOBAL_ACL_STATE: OnceLock<Arc<Mutex<AclState>>> = OnceLock::new();
+
+/// Initialise the global ACL state. Idempotent.
+pub fn install_acl_state() {
+    let _ = GLOBAL_ACL_STATE.set(Arc::new(Mutex::new(AclState::new())));
+}
+
+/// Return a clone of the global ACL state handle.
+pub fn global_acl_state() -> Arc<Mutex<AclState>> {
+    GLOBAL_ACL_STATE
+        .get_or_init(|| Arc::new(Mutex::new(AclState::new())))
+        .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_empty_input() {
+        let hash = sha256_hash(b"");
+        let hex = hash_to_hex(&hash);
+        assert_eq!(
+            hex,
+            b"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_known_vector() {
+        let hash = sha256_hash(b"abc");
+        let hex = hash_to_hex(&hash);
+        assert_eq!(
+            hex,
+            b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .as_ref()
+        );
+    }
+
+    #[test]
+    fn default_user_allows_all() {
+        let user = AclUser::new_default();
+        assert!(user.can_execute_command(b"GET", category::READ | category::FAST | category::STRING));
+        assert!(user.can_execute_command(b"SET", category::WRITE | category::SLOW | category::STRING));
+        assert!(user.flags.enabled);
+        assert!(user.flags.nopass);
+    }
+
+    #[test]
+    fn reset_user_denies_all() {
+        let user = AclUser::new_reset(RedisString::from_bytes(b"testuser"));
+        assert!(!user.can_execute_command(b"GET", category::READ));
+        assert!(!user.flags.enabled);
+    }
+
+    #[test]
+    fn password_check() {
+        let mut user = AclUser::new_reset(RedisString::from_bytes(b"alice"));
+        user.passwords.push(sha256_hash(b"secret123"));
+        assert!(user.check_password(b"secret123"));
+        assert!(!user.check_password(b"wrong"));
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        let hash = sha256_hash(b"hello");
+        let hex = hash_to_hex(&hash);
+        let back = hex_to_hash(&hex).unwrap();
+        assert_eq!(hash, back);
+    }
+}

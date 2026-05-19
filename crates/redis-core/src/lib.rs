@@ -9,6 +9,7 @@
 //!
 //! Phases 2-3 of the pilot land here.
 
+pub mod acl;
 pub mod evict;
 pub mod eviction;
 pub mod live_config;
