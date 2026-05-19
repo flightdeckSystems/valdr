@@ -55,11 +55,23 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
     };
     repl.become_replica_of(host.clone(), port);
-    eprintln!(
-        "redis-server: REPLICAOF {} {} — TODO: replica handshake (Wave C)",
-        String::from_utf8_lossy(host.as_bytes()),
-        port
-    );
+    match crate::replica_dialer::spawn_replica_dialer(host.clone(), port) {
+        Ok(()) => {
+            eprintln!(
+                "redis-server: REPLICAOF {} {} — replica dialer spawned",
+                String::from_utf8_lossy(host.as_bytes()),
+                port
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "redis-server: REPLICAOF {} {} — dialer spawn failed: {}",
+                String::from_utf8_lossy(host.as_bytes()),
+                port,
+                e
+            );
+        }
+    }
     ctx.reply_simple_string(b"OK")
 }
 

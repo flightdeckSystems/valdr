@@ -24,3 +24,4 @@ mlua = { version = "0.10", features = ["lua51", "vendored"] }
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pemfile = "2"
+serde_json = "1"

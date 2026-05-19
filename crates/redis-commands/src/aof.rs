@@ -207,7 +207,18 @@ pub fn spawn_fsync_thread() {
 /// Hash   → HMSET (batched ≤ 64 field/value pairs)
 /// Set    → SADD (batched ≤ 64 members)
 /// ZSet   → ZADD (batched ≤ 64 score/member pairs)
-/// Stream → emit a comment line and skip (Opus follow-up)
+/// Stream → XADD per entry, XSETID to lock last_id / max_deleted_id /
+///          entries_added, XGROUP CREATE per group, XGROUP CREATECONSUMER
+///          per consumer, and XCLAIM JUSTID FORCE per PEL entry. Streams
+///          with no entries but at least one group emit a placeholder
+///          XADD + XDEL pair followed by XSETID to recreate the key.
+///          Truly-empty streams (no entries and no groups) are skipped —
+///          replay won't recreate the key. XCLAIM is emitted with FORCE
+///          so the PEL entry is created during replay even though the
+///          consumer's PEL is empty at that point. JUSTID preserves the
+///          previous `delivery_count` slot in our codebase (zero), so
+///          original per-PEL `delivery_count` and `delivery_time_ms` are
+///          not restored exactly — they reset to zero / replay-time.
 ///
 /// After the data command each key with a TTL gets PEXPIREAT.
 pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<()> {
@@ -329,14 +340,16 @@ pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<(
                 }
                 write_pexpireat(writer, key, obj.expire)?;
             }
-            ObjectKind::Stream(_) => {
-                let comment = format!(
-                    "# STREAM {} SKIPPED\r\n",
-                    String::from_utf8_lossy(key.as_bytes())
-                );
-                writer.write_all(comment.as_bytes())?;
+            ObjectKind::Stream(redis_core::object::StreamEncoding::Inline(stream)) => {
+                if stream.entries.is_empty() && stream.groups.is_empty() {
+                    continue;
+                }
+                write_stream_rewrite(writer, key, stream)?;
+                write_pexpireat(writer, key, obj.expire)?;
             }
             ObjectKind::Module => {}
+            ObjectKind::Json(_) => {}
+            ObjectKind::Bloom(_) => {}
         }
     }
     Ok(())
@@ -352,6 +365,114 @@ fn write_pexpireat<W: Write>(writer: &mut W, key: &RedisString, expire: i64) -> 
         RedisString::from_vec(expire.to_string().into_bytes()),
     ];
     writer.write_all(&encode_resp_command(&cmd))
+}
+
+/// Emit the per-stream command sequence: XADD per entry, XSETID, then per
+/// group XGROUP CREATE + XGROUP CREATECONSUMER + XCLAIM JUSTID FORCE.
+///
+/// For empty-but-existing streams (no entries, has at least one group), a
+/// placeholder `XADD <key> 1-1 _ _` followed by `XDEL <key> 1-1` is emitted
+/// so the key exists before the XGROUP commands run; the trailing XSETID
+/// then restores the original `last_id`, `entries_added`, and
+/// `max_deleted_id`.
+fn write_stream_rewrite<W: Write>(
+    writer: &mut W,
+    key: &RedisString,
+    stream: &redis_ds::stream::InlineStream,
+) -> io::Result<()> {
+    if stream.entries.is_empty() {
+        let placeholder_id = RedisString::from_bytes(b"1-1");
+        let xadd = [
+            RedisString::from_bytes(b"XADD"),
+            key.clone(),
+            placeholder_id.clone(),
+            RedisString::from_bytes(b"_"),
+            RedisString::from_bytes(b"_"),
+        ];
+        writer.write_all(&encode_resp_command(&xadd))?;
+        let xdel = [
+            RedisString::from_bytes(b"XDEL"),
+            key.clone(),
+            placeholder_id,
+        ];
+        writer.write_all(&encode_resp_command(&xdel))?;
+    } else {
+        for entry in &stream.entries {
+            let mut cmd: Vec<RedisString> = Vec::with_capacity(3 + entry.fields.len() * 2);
+            cmd.push(RedisString::from_bytes(b"XADD"));
+            cmd.push(key.clone());
+            cmd.push(RedisString::from_vec(entry.id.to_display_bytes()));
+            for (field, value) in &entry.fields {
+                cmd.push(field.clone());
+                cmd.push(value.clone());
+            }
+            writer.write_all(&encode_resp_command(&cmd))?;
+        }
+    }
+
+    let mut xsetid: Vec<RedisString> = Vec::with_capacity(7);
+    xsetid.push(RedisString::from_bytes(b"XSETID"));
+    xsetid.push(key.clone());
+    xsetid.push(RedisString::from_vec(stream.last_id.to_display_bytes()));
+    xsetid.push(RedisString::from_bytes(b"ENTRIESADDED"));
+    xsetid.push(RedisString::from_vec(
+        stream.entries_added.to_string().into_bytes(),
+    ));
+    if stream.max_deleted_id != redis_ds::stream::StreamId::ZERO {
+        xsetid.push(RedisString::from_bytes(b"MAXDELETEDID"));
+        xsetid.push(RedisString::from_vec(stream.max_deleted_id.to_display_bytes()));
+    }
+    writer.write_all(&encode_resp_command(&xsetid))?;
+
+    let mut group_names: Vec<&RedisString> = stream.groups.keys().collect();
+    group_names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    for gname in group_names {
+        let group = match stream.groups.get(gname) {
+            Some(g) => g,
+            None => continue,
+        };
+        let create = [
+            RedisString::from_bytes(b"XGROUP"),
+            RedisString::from_bytes(b"CREATE"),
+            key.clone(),
+            gname.clone(),
+            RedisString::from_vec(group.last_delivered_id.to_display_bytes()),
+        ];
+        writer.write_all(&encode_resp_command(&create))?;
+
+        let mut consumer_names: Vec<&RedisString> = group.consumers.keys().collect();
+        consumer_names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for cname in consumer_names {
+            let consumer = match group.consumers.get(cname) {
+                Some(c) => c,
+                None => continue,
+            };
+            let createcons = [
+                RedisString::from_bytes(b"XGROUP"),
+                RedisString::from_bytes(b"CREATECONSUMER"),
+                key.clone(),
+                gname.clone(),
+                cname.clone(),
+            ];
+            writer.write_all(&encode_resp_command(&createcons))?;
+
+            for pel_entry in &consumer.pel {
+                let xclaim = [
+                    RedisString::from_bytes(b"XCLAIM"),
+                    key.clone(),
+                    gname.clone(),
+                    cname.clone(),
+                    RedisString::from_bytes(b"0"),
+                    RedisString::from_vec(pel_entry.entry_id.to_display_bytes()),
+                    RedisString::from_bytes(b"JUSTID"),
+                    RedisString::from_bytes(b"FORCE"),
+                ];
+                writer.write_all(&encode_resp_command(&xclaim))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn format_score(score: f64) -> String {

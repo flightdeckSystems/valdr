@@ -12,7 +12,9 @@
 
 pub mod aof;
 pub mod bitops;
+pub mod bloom;
 pub mod connection;
+pub mod json;
 pub mod dispatch;
 pub mod eval;
 pub mod geo;
@@ -26,6 +28,7 @@ pub mod list;
 pub mod multi;
 pub mod persist;
 pub mod pubsub;
+pub mod replica_dialer;
 pub mod replication;
 pub mod set;
 pub mod slowlog_cmd;

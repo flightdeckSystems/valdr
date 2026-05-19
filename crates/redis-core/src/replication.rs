@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -301,6 +301,9 @@ pub struct ReplicationState {
     /// finished shipping the RDB and catch-up bytes to every waiter; then
     /// reset to `None`.
     pub repl_bgsave_job: Mutex<Option<ReplBgsaveJob>>,
+    /// Set to `true` by `REPLICAOF NO ONE` to signal the running dialer thread
+    /// to exit its reconnection loop immediately.
+    pub dialer_stop_flag: AtomicBool,
 }
 
 impl ReplicationState {
@@ -317,6 +320,7 @@ impl ReplicationState {
             repl_state: AtomicU8::new(repl_state_code::MASTER),
             repl_child_pid: AtomicI32::new(0),
             repl_bgsave_job: Mutex::new(None),
+            dialer_stop_flag: AtomicBool::new(false),
         }
     }
 
@@ -374,9 +378,10 @@ impl ReplicationState {
     }
 
     /// Switch this server out of replica mode (`REPLICAOF NO ONE`). Resets
-    /// `replica_of` to `None` and `repl_state` to MASTER. Disconnecting the
-    /// upstream master link, if any, is Wave C's job.
+    /// `replica_of` to `None` and `repl_state` to MASTER. Signals the running
+    /// dialer thread to exit via `dialer_stop_flag`.
     pub fn become_master(&self) {
+        self.dialer_stop_flag.store(true, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = None,
             Err(p) => *p.into_inner() = None,
@@ -386,9 +391,10 @@ impl ReplicationState {
     }
 
     /// Configure this server as a replica of `(host, port)` and move the
-    /// top-level state to `REPLICA_CONNECTING`. Wave C consumes this transition
-    /// to dial the master and drive the handshake.
+    /// top-level state to `REPLICA_CONNECTING`. Clears the dialer stop flag so
+    /// a freshly-spawned dialer thread is not immediately told to quit.
     pub fn become_replica_of(&self, host: RedisString, port: u16) {
+        self.dialer_stop_flag.store(false, Ordering::SeqCst);
         match self.replica_of.lock() {
             Ok(mut g) => *g = Some((host, port)),
             Err(p) => *p.into_inner() = Some((host, port)),

@@ -12,3 +12,4 @@ redis-core = { workspace = true }
 redis-ds = { workspace = true }
 mlua = { workspace = true }
 libc = { workspace = true }
+serde_json = { workspace = true }

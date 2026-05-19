@@ -1080,6 +1080,8 @@ pub fn object_kind_name(kind: &ObjectKind) -> &'static [u8] {
         ObjectKind::ZSet(_) => b"zset",
         ObjectKind::Stream(_) => b"stream",
         ObjectKind::Module => b"none",
+        ObjectKind::Json(_) => b"ReJSON-RL",
+        ObjectKind::Bloom(_) => b"MBbloom--",
     }
 }
 
@@ -1203,7 +1205,9 @@ pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ObjectKind::Set(_)    => b"set",
             ObjectKind::ZSet(_)   => b"zset",
             ObjectKind::Stream(_) => b"stream",
-            ObjectKind::Module    => b"none", // TODO(port): return module type name
+            ObjectKind::Module    => b"none",
+            ObjectKind::Json(_)   => b"ReJSON-RL",
+            ObjectKind::Bloom(_)  => b"MBbloom--",
         },
     };
     ctx.reply_simple_string(type_name)

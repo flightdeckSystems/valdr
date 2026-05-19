@@ -123,6 +123,11 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         }
     }
 
+    if let Some(reply) = enforce_replica_readonly_gate(ctx, name) {
+        ctx.client_mut().reply_buf.extend_from_slice(&reply);
+        return Ok(());
+    }
+
     if let Some(reply) = enforce_maxmemory_gate(ctx, name) {
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
         return Ok(());
@@ -265,6 +270,36 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
     };
     ascii_eq_ignore_case(sub.as_bytes(), b"WHOAMI")
         || ascii_eq_ignore_case(sub.as_bytes(), b"HELP")
+}
+
+/// Reject write commands from regular clients when we are operating as a
+/// replica (`repl_state == REPLICA_ONLINE`).
+///
+/// Commands that arrive on the master-to-replica stream are applied via
+/// `apply_command_locally` in the dialer thread, which sets `client.is_replica
+/// = true` before calling `dispatch_command_name`. Those calls are therefore
+/// exempt — the `is_replica` flag already causes `propagate_write_to_replicas`
+/// to be skipped, and here we only block clients whose `is_replica` is false
+/// (i.e. normal user connections).
+///
+/// `REPLICAOF` itself is always allowed so the operator can promote the server.
+fn enforce_replica_readonly_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+    use redis_core::replication::{global_replication_state, repl_state_code};
+    let repl = global_replication_state();
+    if repl.repl_state.load(std::sync::atomic::Ordering::Relaxed) != repl_state_code::REPLICA_ONLINE
+    {
+        return None;
+    }
+    if ctx.client_ref().is_replica {
+        return None;
+    }
+    if ascii_eq_ignore_case(name, b"REPLICAOF") || ascii_eq_ignore_case(name, b"SLAVEOF") {
+        return None;
+    }
+    if !command_has_write_flag(name) {
+        return None;
+    }
+    Some(b"-READONLY You can't write against a read only replica.\r\n".to_vec())
 }
 
 /// Pre-handler maxmemory enforcement.
@@ -620,6 +655,32 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"SYNC", handler: crate::replication::sync_command },
     DispatchEntry { name: b"REPLCONF", handler: crate::replication::replconf_command },
     DispatchEntry { name: b"WAIT", handler: crate::replication::wait_command },
+    // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
+    DispatchEntry { name: b"BF.RESERVE", handler: crate::bloom::bf_reserve_command },
+    DispatchEntry { name: b"BF.ADD",     handler: crate::bloom::bf_add_command },
+    DispatchEntry { name: b"BF.MADD",    handler: crate::bloom::bf_madd_command },
+    DispatchEntry { name: b"BF.EXISTS",  handler: crate::bloom::bf_exists_command },
+    DispatchEntry { name: b"BF.MEXISTS", handler: crate::bloom::bf_mexists_command },
+    DispatchEntry { name: b"BF.INSERT",  handler: crate::bloom::bf_insert_command },
+    DispatchEntry { name: b"BF.INFO",    handler: crate::bloom::bf_info_command },
+    // ── RedisJSON (Overnight 1) ────────────────────────────────────────────
+    DispatchEntry { name: b"JSON.SET",       handler: crate::json::json_set_command },
+    DispatchEntry { name: b"JSON.GET",       handler: crate::json::json_get_command },
+    DispatchEntry { name: b"JSON.DEL",       handler: crate::json::json_del_command },
+    DispatchEntry { name: b"JSON.FORGET",    handler: crate::json::json_del_command },
+    DispatchEntry { name: b"JSON.TYPE",      handler: crate::json::json_type_command },
+    DispatchEntry { name: b"JSON.NUMINCRBY", handler: crate::json::json_numincrby_command },
+    DispatchEntry { name: b"JSON.NUMMULTBY", handler: crate::json::json_nummultby_command },
+    DispatchEntry { name: b"JSON.STRAPPEND", handler: crate::json::json_strappend_command },
+    DispatchEntry { name: b"JSON.STRLEN",    handler: crate::json::json_strlen_command },
+    DispatchEntry { name: b"JSON.OBJKEYS",   handler: crate::json::json_objkeys_command },
+    DispatchEntry { name: b"JSON.OBJLEN",    handler: crate::json::json_objlen_command },
+    DispatchEntry { name: b"JSON.ARRAPPEND", handler: crate::json::json_arrappend_command },
+    DispatchEntry { name: b"JSON.ARRLEN",    handler: crate::json::json_arrlen_command },
+    DispatchEntry { name: b"JSON.ARRINSERT", handler: crate::json::json_arrinsert_command },
+    DispatchEntry { name: b"JSON.ARRPOP",    handler: crate::json::json_arrpop_command },
+    DispatchEntry { name: b"JSON.CLEAR",     handler: crate::json::json_clear_command },
+    DispatchEntry { name: b"JSON.MGET",      handler: crate::json::json_mget_command },
 ];
 
 #[cfg(test)]

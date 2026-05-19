@@ -75,6 +75,8 @@ pub fn approximate_object_bytes(kind: &ObjectKind) -> u64 {
         },
         ObjectKind::Stream(_) => 64,
         ObjectKind::Module => 0,
+        ObjectKind::Json(v) => v.to_string().len() as u64,
+        ObjectKind::Bloom(bf) => bf.bits.len() as u64,
     }
 }
 

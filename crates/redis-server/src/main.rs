@@ -276,6 +276,13 @@ fn main() {
 
     let db = Arc::new(Mutex::new(RedisDb::new(0)));
 
+    redis_commands::replica_dialer::install_dialer_resources(
+        Arc::clone(&db),
+        Arc::clone(&server),
+        args.port,
+        args.dir.clone(),
+    );
+
     if !args.rdb_disabled {
         let rdb_path = redis_core::rdb::rdb_path(
             &live_config.rdb_dir(),

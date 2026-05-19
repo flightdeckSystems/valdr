@@ -344,6 +344,37 @@ pub enum StreamEncoding {
     Inline(InlineStream),
 }
 
+/// Bloom filter data: a compact probabilistic set membership structure.
+///
+/// Implements a standard Bloom filter with the Kirsch-Mitzenmacher double-hashing
+/// technique. Items are never removed; existence tests may return false positives
+/// at the configured error rate, but never false negatives (a missing item is
+/// always absent).
+#[derive(Debug, Clone)]
+pub struct BloomFilter {
+    /// Bit array packed as bytes (`bits[i/8] >> (i%8) & 1`).
+    pub bits: Vec<u8>,
+    /// Number of hash functions k.
+    pub n_hashes: u32,
+    /// Maximum number of items before error rate degrades.
+    pub capacity: u64,
+    /// Number of items added so far.
+    pub item_count: u64,
+    /// Target false-positive error rate (e.g. 0.01 = 1%).
+    pub error_rate: f64,
+    /// Expansion factor for future scaling layers (stored; scaling not yet implemented).
+    pub expansion: u32,
+    /// When true, the filter does not scale; insertions beyond capacity degrade error rate.
+    pub nonscaling: bool,
+}
+
+impl BloomFilter {
+    /// Total number of bits in the filter.
+    pub fn bit_count(&self) -> u64 {
+        self.bits.len() as u64 * 8
+    }
+}
+
 /// The discriminated union of all Redis value types + encodings.
 #[derive(Debug, Clone)]
 pub enum ObjectKind {
@@ -356,6 +387,15 @@ pub enum ObjectKind {
     /// Phase 10: module-defined types.
     // TODO(architect): replace with redis_modules::ModuleValue when Phase 10 lands
     Module,
+    /// RedisJSON: native JSON document type.
+    ///
+    /// Stores an arbitrary JSON value (`serde_json::Value`) as the sole object
+    /// encoding. JSONPath queries evaluate against this value at command time.
+    /// No secondary index or encoded form is maintained — mutations deserialize,
+    /// modify, and re-serialize in place.
+    Json(serde_json::Value),
+    /// RedisBloom: native Bloom filter type (BF.* commands).
+    Bloom(BloomFilter),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -702,6 +742,48 @@ impl RedisObject {
         }
     }
 
+    /// Create a Bloom filter object wrapping an existing `BloomFilter`.
+    pub fn new_bloom_from_filter(bf: BloomFilter) -> Self {
+        Self::bare(ObjectKind::Bloom(bf))
+    }
+
+    /// Create a JSON-encoded object from a `serde_json::Value`.
+    pub fn new_json(v: serde_json::Value) -> Self {
+        Self::bare(ObjectKind::Json(v))
+    }
+
+    /// Borrow the inner `serde_json::Value` for a JSON-encoded object.
+    pub fn json(&self) -> Option<&serde_json::Value> {
+        match &self.kind {
+            ObjectKind::Json(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner `serde_json::Value` for a JSON-encoded object.
+    pub fn json_mut(&mut self) -> Option<&mut serde_json::Value> {
+        match &mut self.kind {
+            ObjectKind::Json(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrow the inner `BloomFilter` if this object holds one.
+    pub fn bloom(&self) -> Option<&BloomFilter> {
+        match &self.kind {
+            ObjectKind::Bloom(bf) => Some(bf),
+            _ => None,
+        }
+    }
+
+    /// Mutably borrow the inner `BloomFilter` if this object holds one.
+    pub fn bloom_mut(&mut self) -> Option<&mut BloomFilter> {
+        match &mut self.kind {
+            ObjectKind::Bloom(bf) => Some(bf),
+            _ => None,
+        }
+    }
+
     // ── Back-compat shims for the architect stub ──────────────────────────
 
     /// Construct a `RedisObject::String(StringEncoding::Raw(...))` from a `RedisString`.
@@ -732,6 +814,8 @@ impl RedisObject {
             ObjectKind::ZSet(_) => "zset",
             ObjectKind::Stream(_) => "stream",
             ObjectKind::Module => "module",
+            ObjectKind::Json(_) => "ReJSON-RL",
+            ObjectKind::Bloom(_) => "MBbloom--",
         }
     }
 
@@ -745,6 +829,8 @@ impl RedisObject {
             ObjectKind::ZSet(_) => ObjectType::ZSet,
             ObjectKind::Stream(_) => ObjectType::Stream,
             ObjectKind::Module => ObjectType::Module,
+            ObjectKind::Json(_) => ObjectType::Module,
+            ObjectKind::Bloom(_) => ObjectType::Module,
         }
     }
 
@@ -778,6 +864,8 @@ impl RedisObject {
             ObjectKind::Hash(HashEncoding::Inline(h)) => hash_inline_observed_encoding(h),
             ObjectKind::Stream(StreamEncoding::Inline(_)) => "stream",
             ObjectKind::Module => "unknown",
+            ObjectKind::Json(_) => "json",
+            ObjectKind::Bloom(_) => "bloom",
         }
     }
 
@@ -1909,6 +1997,12 @@ pub fn object_compute_size(
                     .sum::<usize>()
         }
         ObjectKind::Stream(_) | ObjectKind::Module => std::mem::size_of::<RedisObject>(),
+        ObjectKind::Json(v) => {
+            std::mem::size_of::<RedisObject>() + v.to_string().len()
+        }
+        ObjectKind::Bloom(bf) => {
+            std::mem::size_of::<RedisObject>() + bf.bits.len()
+        }
     }
 }
 
@@ -2100,6 +2194,8 @@ pub enum Flat<'a> {
     ZSet(&'a ZSetEncoding),
     Stream,
     Module,
+    Json,
+    Bloom,
 }
 
 impl RedisObject {
@@ -2113,6 +2209,8 @@ impl RedisObject {
             ObjectKind::ZSet(e)   => Flat::ZSet(e),
             ObjectKind::Stream(_) => Flat::Stream,
             ObjectKind::Module    => Flat::Module,
+            ObjectKind::Json(_)   => Flat::Json,
+            ObjectKind::Bloom(_)  => Flat::Bloom,
         }
     }
 
@@ -2122,6 +2220,8 @@ impl RedisObject {
     pub fn is_set(&self)    -> bool { matches!(self.kind, ObjectKind::Set(_)) }
     pub fn is_zset(&self)   -> bool { matches!(self.kind, ObjectKind::ZSet(_)) }
     pub fn is_stream(&self) -> bool { matches!(self.kind, ObjectKind::Stream(_)) }
+    pub fn is_json(&self)   -> bool { matches!(self.kind, ObjectKind::Json(_)) }
+    pub fn is_bloom(&self)  -> bool { matches!(self.kind, ObjectKind::Bloom(_)) }
 
     /// Return the raw byte string if the object is `String(Raw|Embstr)`.
     /// `None` for Int-encoded strings or non-strings.
