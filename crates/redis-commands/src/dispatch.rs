@@ -73,6 +73,15 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     dispatch_command_name(ctx, name.as_bytes())
 }
 
+/// Returns `true` when the named command carries the `WRITE` flag in the
+/// generated command registry.
+fn command_has_write_flag(name: &[u8]) -> bool {
+    COMMANDS.iter().any(|spec| {
+        ascii_eq_ignore_case(spec.name.as_bytes(), name)
+            && spec.flags.contains(&CommandFlag::WRITE)
+    })
+}
+
 /// Returns `true` when the named command carries the `NO_AUTH` flag in the
 /// generated command registry, meaning it must be executable before the
 /// client has authenticated.
@@ -132,6 +141,14 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         client_id,
         client_name,
     );
+
+    if result.is_ok() && command_has_write_flag(name) {
+        if let Some(aof) = crate::aof::aof_writer() {
+            if let Err(e) = aof.append(&argv_snapshot) {
+                eprintln!("redis-server: AOF append failed: {}", e);
+            }
+        }
+    }
 
     result
 }
@@ -535,6 +552,7 @@ pub static HANDLERS: &[DispatchEntry] = &[
     // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
     DispatchEntry { name: b"SAVE", handler: crate::persist::save_command },
     DispatchEntry { name: b"BGSAVE", handler: crate::persist::bgsave_command },
+    DispatchEntry { name: b"BGREWRITEAOF", handler: crate::persist::bgrewriteaof_command },
     // ── GEO (Session 1B) ───────────────────────────────────────────────────
     DispatchEntry { name: b"GEOADD", handler: crate::geo::geoadd_command },
     DispatchEntry { name: b"GEODIST", handler: crate::geo::geodist_command },

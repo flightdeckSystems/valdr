@@ -1,6 +1,7 @@
 //! Runtime transport: the live `Connection` enum used by the redis-server binary.
 //!
-//! Wave A pilot abstraction. Owns a real OS handle (currently only `TcpStream`)
+//! Wave A pilot abstraction. Owns a real OS handle (currently `TcpStream` for
+//! plain TCP and `rustls::StreamOwned<ServerConnection, TcpStream>` for TLS)
 //! and presents a small read/write/close API to the event loop in
 //! `redis-server::main`.
 //!
@@ -23,14 +24,19 @@
 use std::io;
 use std::net::{SocketAddr, TcpStream};
 
+use rustls::StreamOwned;
+
 /// Live connection used by the running redis-server binary.
 ///
-/// Variants are added as backends land. The Wave A pilot only ships `Tcp`;
-/// `Unix` and `Tls` arrive in Phase 5+.
+/// `Tcp` is the plain blocking TCP variant used by default. `Tls` wraps a
+/// `rustls::StreamOwned<ServerConnection, TcpStream>` behind a `Box` to keep
+/// the enum size constant regardless of the rustls state machine size.
 pub enum Connection {
     /// Plain blocking TCP connection.
     Tcp(TcpStream),
-    // TODO(architect): Unix, Tls variants — Phase 5+ when those backends land.
+    /// TLS connection backed by rustls. The inner stream owns both the rustls
+    /// `ServerConnection` state machine and the underlying `TcpStream`.
+    Tls(Box<StreamOwned<rustls::ServerConnection, TcpStream>>),
 }
 
 impl Connection {
@@ -41,6 +47,7 @@ impl Connection {
         use io::Read;
         match self {
             Connection::Tcp(s) => s.read(buf),
+            Connection::Tls(s) => s.read(buf),
         }
     }
 
@@ -49,6 +56,7 @@ impl Connection {
         use io::Write;
         match self {
             Connection::Tcp(s) => s.write_all(buf),
+            Connection::Tls(s) => s.write_all(buf),
         }
     }
 
@@ -64,6 +72,19 @@ impl Connection {
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         match self {
             Connection::Tcp(s) => s.peer_addr(),
+            Connection::Tls(s) => s.get_ref().peer_addr(),
+        }
+    }
+
+    /// Attempt to clone the underlying `TcpStream` for use by the writer thread.
+    ///
+    /// For `Tls` connections the writer thread cannot share the rustls state
+    /// machine, so `None` is returned — the caller must use a different
+    /// write-path arrangement (e.g., channel-only writes through the read loop).
+    pub fn try_clone_tcp(&self) -> Option<TcpStream> {
+        match self {
+            Connection::Tcp(s) => s.try_clone().ok(),
+            Connection::Tls(_) => None,
         }
     }
 }
@@ -75,19 +96,23 @@ impl std::fmt::Debug for Connection {
                 Ok(addr) => write!(f, "Connection::Tcp({})", addr),
                 Err(_) => write!(f, "Connection::Tcp(<closed>)"),
             },
+            Connection::Tls(s) => match s.get_ref().peer_addr() {
+                Ok(addr) => write!(f, "Connection::Tls({})", addr),
+                Err(_) => write!(f, "Connection::Tls(<closed>)"),
+            },
         }
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
-//   source:        architect packet (Wave A — runtime TCP transport)
+//   source:        Session 2B (TLS support) — extends Wave A TCP transport
 //   target_crate:  redis-core
 //   confidence:    high
-//   todos:         2
+//   todos:         1
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         Minimal blocking-I/O Connection enum. Wraps TcpStream only;
-//                  Unix/Tls deferred. Coexists with the C-ported connection.rs
-//                  vtable module until backends are unified in Phase 5+.
+//   notes:         Adds Tls variant backed by rustls::StreamOwned. The Box
+//                  keeps the enum size from ballooning. try_clone_tcp() lets
+//                  main.rs decide the write-path per connection type.
 // ──────────────────────────────────────────────────────────────────────────

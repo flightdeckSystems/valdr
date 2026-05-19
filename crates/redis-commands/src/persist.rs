@@ -20,6 +20,7 @@
 //! The `unsafe` block that wraps `fork + _exit` is the single unsafe surface in
 //! this crate: documented below with a SAFETY comment.
 
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -29,6 +30,8 @@ use redis_core::db::RedisDb;
 use redis_core::rdb::{rdb_path, save_rdb};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult};
+
+use crate::aof::{aof_writer, write_aof_rewrite};
 
 /// `SAVE` — synchronous RDB save.
 ///
@@ -134,6 +137,95 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         });
 
     ctx.reply_simple_string(b"Background saving started")
+}
+
+/// `BGREWRITEAOF` — background AOF rewrite.
+///
+/// On Unix, forks a child that walks the DB and writes a compacted AOF to a
+/// temp file, then atomically renames it over the existing AOF. The parent
+/// returns `+Background append only file rewriting started` immediately.
+///
+/// When AOF is not enabled the command still succeeds but is a no-op (the
+/// canonical Valkey behaviour when appendonly=no).
+pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"bgrewriteaof"));
+    }
+
+    let writer_arc = match aof_writer() {
+        Some(w) => w,
+        None => {
+            return ctx.reply_simple_string(b"Background append only file rewriting started");
+        }
+    };
+
+    let snapshot = snapshot_db(ctx.db());
+    let aof_path = writer_arc.path.clone();
+
+    #[cfg(unix)]
+    {
+        let pid = unsafe {
+            let p = libc::fork();
+            if p == 0 {
+                let tmp_path = {
+                    let mut t = aof_path.clone();
+                    let mut name = t.file_name().unwrap_or_default().to_os_string();
+                    name.push(".rewrite.tmp");
+                    t.set_file_name(name);
+                    t
+                };
+                let exit_code = match do_aof_rewrite(&snapshot, &tmp_path, &aof_path) {
+                    Ok(()) => 0i32,
+                    Err(_) => 1i32,
+                };
+                libc::_exit(exit_code);
+            }
+            p
+        };
+
+        if pid > 0 {
+            return ctx.reply_simple_string(b"Background append only file rewriting started");
+        }
+
+        eprintln!("redis-server: BGREWRITEAOF fork() failed, falling back to thread");
+    }
+
+    let _ = thread::Builder::new()
+        .name("bgrewriteaof".to_string())
+        .spawn(move || {
+            let tmp_path = {
+                let mut t = aof_path.clone();
+                let mut name = t.file_name().unwrap_or_default().to_os_string();
+                name.push(".rewrite.tmp");
+                t.set_file_name(name);
+                t
+            };
+            if let Err(e) = do_aof_rewrite(&snapshot, &tmp_path, &aof_path) {
+                eprintln!("redis-server: BGREWRITEAOF failed: {}", e);
+            }
+        });
+
+    ctx.reply_simple_string(b"Background append only file rewriting started")
+}
+
+/// Write a complete AOF rewrite for `snapshot` to `tmp_path`, then atomically
+/// rename it over `final_path`.
+fn do_aof_rewrite(
+    snapshot: &[(redis_types::RedisString, redis_core::RedisObject)],
+    tmp_path: &PathBuf,
+    final_path: &PathBuf,
+) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(tmp_path)?;
+    let mut buf = BufWriter::new(file);
+    let tmp_db = RedisDb::from_snapshot(snapshot.to_vec());
+    write_aof_rewrite(&tmp_db, &mut buf)?;
+    buf.flush()?;
+    std::fs::rename(tmp_path, final_path)?;
+    Ok(())
 }
 
 /// Snapshot the entries of `db` into an owned `Vec` for the thread-based

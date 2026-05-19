@@ -19,10 +19,12 @@ use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rustls::StreamOwned;
 
 #[cfg(unix)]
 use libc;
@@ -51,6 +53,9 @@ struct CliArgs {
     rdb_disabled: bool,
     dir: String,
     dbfilename: String,
+    appendonly: bool,
+    appendfilename: String,
+    appendfsync: u8,
 }
 
 impl Default for CliArgs {
@@ -62,6 +67,9 @@ impl Default for CliArgs {
             rdb_disabled: false,
             dir: redis_core::live_config::DEFAULT_RDB_DIR.to_string(),
             dbfilename: redis_core::live_config::DEFAULT_RDB_FILENAME.to_string(),
+            appendonly: false,
+            appendfilename: redis_core::live_config::DEFAULT_AOF_FILENAME.to_string(),
+            appendfsync: redis_commands::aof::FSYNC_EVERYSEC,
         }
     }
 }
@@ -95,6 +103,20 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
             }
             "--rdb-disabled" => {
                 out.rdb_disabled = true;
+            }
+            "--appendonly" => {
+                let v = it.next().ok_or_else(|| "--appendonly requires yes/no".to_string())?;
+                out.appendonly = v == "yes";
+            }
+            "--appendfilename" => {
+                let v = it.next().ok_or_else(|| "--appendfilename requires a value".to_string())?;
+                out.appendfilename = v;
+            }
+            "--appendfsync" => {
+                let v = it.next().ok_or_else(|| "--appendfsync requires always/everysec/no".to_string())?;
+                if let Some(p) = redis_commands::aof::parse_fsync_policy(v.as_bytes()) {
+                    out.appendfsync = p;
+                }
             }
             "--help" | "-h" => {
                 println!("Usage: redis-server [<config-file>] [--port N] [--bind addr] [--rdb-disabled]");
@@ -149,6 +171,19 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             "dbfilename" => {
                 if !value.is_empty() {
                     args.dbfilename = value.to_string();
+                }
+            }
+            "appendonly" => {
+                args.appendonly = value == "yes";
+            }
+            "appendfilename" => {
+                if !value.is_empty() {
+                    args.appendfilename = value.to_string();
+                }
+            }
+            "appendfsync" => {
+                if let Some(p) = redis_commands::aof::parse_fsync_policy(value.as_bytes()) {
+                    args.appendfsync = p;
                 }
             }
             _ => {}
@@ -218,9 +253,13 @@ fn main() {
     server_metrics().set_tcp_port(args.port);
 
     let live_config = Arc::new(redis_core::live_config::LiveConfig::new());
+    let live_config_for_hook = Arc::clone(&live_config);
     live_config.set_maxclients(args.maxclients);
     live_config.set_rdb_dir(args.dir.clone());
     live_config.set_rdb_filename(args.dbfilename.clone());
+    live_config.set_appendonly(args.appendonly);
+    live_config.set_appendfilename(args.appendfilename.clone());
+    live_config.set_appendfsync(args.appendfsync);
     redis_core::object::install_live_config(Arc::clone(&live_config));
     redis_commands::install_live_config_handle(Arc::clone(&live_config));
     redis_core::acl::install_acl_state();
@@ -256,6 +295,32 @@ fn main() {
         }
     }
 
+    if args.appendonly {
+        let aof_path = std::path::Path::new(&args.dir).join(&args.appendfilename);
+        if aof_path.exists() {
+            match db.lock() {
+                Ok(mut guard) => {
+                    match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
+                        Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
+                        Err(e) => eprintln!("redis-server: AOF replay failed ({}): {}", aof_path.display(), e),
+                    }
+                }
+                Err(p) => {
+                    let mut guard = p.into_inner();
+                    match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
+                        Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
+                        Err(e) => eprintln!("redis-server: AOF replay failed ({}): {}", aof_path.display(), e),
+                    }
+                }
+            }
+        }
+        match redis_commands::aof::AofWriter::open(&aof_path, args.appendfsync) {
+            Ok(w) => redis_commands::aof::install_aof_writer(Arc::new(w)),
+            Err(e) => eprintln!("redis-server: failed to open AOF {}: {}", aof_path.display(), e),
+        }
+        redis_commands::aof::spawn_fsync_thread();
+    }
+
     let next_client_id = Arc::new(AtomicU64::new(1));
     let registry = Arc::new(Mutex::new(PubSubRegistry::new()));
     redis_core::db::install_global_notify_handle(
@@ -268,6 +333,70 @@ fn main() {
     let _ = spawn_active_expire_thread(Arc::clone(&db), active_expire_cfg, Some(metrics_arc));
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
+
+    let db_for_tls = Arc::clone(&db);
+    let registry_for_tls = Arc::clone(&registry);
+    let server_for_tls = Arc::clone(&server);
+    let next_id_for_tls = Arc::clone(&next_client_id);
+    let shutdown_for_tls = Arc::clone(&shutdown);
+    let bind_ip_for_hook = bind_ip;
+    redis_core::tls::install_tls_start_hook(Box::new(move |port| {
+        if port == 0 {
+            return;
+        }
+        let cert = match live_config_for_hook.tls_cert_file() {
+            Some(p) => p,
+            None => {
+                eprintln!("redis-server: CONFIG SET tls-port requires tls-cert-file to be set first");
+                live_config_for_hook.set_tls_port(0);
+                return;
+            }
+        };
+        let key = match live_config_for_hook.tls_key_file() {
+            Some(p) => p,
+            None => {
+                eprintln!("redis-server: CONFIG SET tls-port requires tls-key-file to be set first");
+                live_config_for_hook.set_tls_port(0);
+                return;
+            }
+        };
+        let ca = live_config_for_hook.tls_ca_cert_file();
+        let require_client_cert = live_config_for_hook.tls_auth_clients() == 1;
+        let tls_cfg = match redis_core::tls::TlsConfig::from_paths(
+            &cert,
+            &key,
+            ca.as_deref(),
+            require_client_cert,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("redis-server: failed to load TLS config: {}", e);
+                live_config_for_hook.set_tls_port(0);
+                return;
+            }
+        };
+        let tls_addr = SocketAddr::new(bind_ip_for_hook, port);
+        let tls_listener = match TcpListener::bind(tls_addr) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("redis-server: TLS bind {} failed: {}", tls_addr, e);
+                live_config_for_hook.set_tls_port(0);
+                return;
+            }
+        };
+        eprintln!("redis-server: TLS listener on {}", tls_addr);
+        let db2 = Arc::clone(&db_for_tls);
+        let reg2 = Arc::clone(&registry_for_tls);
+        let srv2 = Arc::clone(&server_for_tls);
+        let id2 = Arc::clone(&next_id_for_tls);
+        let shut2 = Arc::clone(&shutdown_for_tls);
+        let _ = thread::Builder::new()
+            .name("tls-accept".to_string())
+            .spawn(move || {
+                serve_tls(tls_listener, tls_cfg, shut2, db2, id2, reg2, srv2);
+            });
+    }));
+
     serve(listener, shutdown, db, next_client_id, registry, server, args.port);
 }
 
@@ -431,8 +560,77 @@ fn serve(
     }
 }
 
+/// Accept loop for the TLS listener.
+///
+/// Mirrors `serve` but wraps each accepted `TcpStream` in a rustls
+/// `ServerConnection` before handing off to `handle_connection_tls`. The
+/// plain TCP accept loop is unaffected by this code path.
+fn serve_tls(
+    listener: TcpListener,
+    tls_cfg: redis_core::tls::TlsConfig,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    next_client_id: Arc<AtomicU64>,
+    registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
+) {
+    for incoming in listener.incoming() {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        match incoming {
+            Ok(stream) => {
+                let metrics = server_metrics();
+                let current = metrics.connected_clients.load(Ordering::Relaxed);
+                let limit = redis_commands::connection::get_max_clients();
+                if current >= limit {
+                    metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                    drop(stream);
+                    continue;
+                }
+                if let Err(e) = stream.set_nodelay(true) {
+                    eprintln!("redis-server: tls set_nodelay failed: {}", e);
+                }
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|_| "<unknown>".to_string());
+                let tls_conn = match rustls::ServerConnection::new(
+                    Arc::clone(&tls_cfg.server_config),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("redis-server: tls ServerConnection::new failed for {}: {}", peer, e);
+                        continue;
+                    }
+                };
+                let tls_stream = Box::new(StreamOwned::new(tls_conn, stream));
+                let conn = Connection::Tls(tls_stream);
+                let shutdown2 = Arc::clone(&shutdown);
+                let db2 = Arc::clone(&db);
+                let registry2 = Arc::clone(&registry);
+                let server2 = Arc::clone(&server);
+                let id = next_client_id.fetch_add(1, Ordering::Relaxed);
+                metrics.on_connect();
+                metrics.total_connections_received.fetch_add(1, Ordering::Relaxed);
+                let _ = thread::Builder::new()
+                    .name(format!("tls-client-{}", peer))
+                    .spawn(move || {
+                        handle_connection_tls(conn, shutdown2, db2, id, peer, registry2, server2);
+                    });
+            }
+            Err(e) => {
+                eprintln!("redis-server: tls accept failed: {}", e);
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Spawn a writer thread that drains an `mpsc::Receiver<Vec<u8>>` and writes
-/// each payload to the connection. Returns the matching sender that the read
+/// each payload to the TCP stream. Returns the matching sender that the read
 /// loop and the pub/sub registry both hold.
 fn spawn_writer(
     mut writer: TcpStream,
@@ -452,9 +650,11 @@ fn spawn_writer(
     tx
 }
 
-/// Per-connection event loop. Reads from the socket, feeds the incremental
-/// parser, dispatches each completed command, then ships replies through the
-/// outbound mpsc so the writer thread owns all socket writes.
+/// Per-connection event loop for plain TCP connections.
+///
+/// Reads from the socket, feeds the incremental parser, dispatches each
+/// completed command, then ships replies through the outbound mpsc so the
+/// dedicated writer thread owns all socket writes.
 fn handle_connection(
     stream: TcpStream,
     shutdown: Arc<AtomicBool>,
@@ -483,6 +683,51 @@ fn handle_connection(
     client.id = id;
     client.addr = Some(peer_addr);
     client.authenticated_user = determine_initial_user();
+
+    run_client_loop(&mut client, &outbound, shutdown, db, registry, server);
+}
+
+/// Per-connection event loop for TLS connections.
+///
+/// Unlike the plain TCP path, TLS state is owned by a single `StreamOwned`
+/// and cannot be cloned. Replies are written synchronously from the read loop
+/// thread; pub/sub payloads delivered via the outbound channel are drained
+/// inline via `try_recv` between commands.
+fn handle_connection_tls(
+    conn: Connection,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    id: u64,
+    peer_addr: String,
+    registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
+) {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    if let Ok(mut guard) = registry.lock() {
+        guard.register_sender(id, tx.clone());
+    }
+
+    let mut client = Client::with_connection(conn);
+    client.id = id;
+    client.addr = Some(peer_addr.clone());
+    client.authenticated_user = determine_initial_user();
+
+    run_client_loop_tls(&mut client, tx, rx, peer_addr, shutdown, db, registry, server);
+}
+
+/// Shared read-dispatch-write loop for plain TCP connections.
+///
+/// Parameterised over the outbound sender so both `handle_connection` (plain
+/// TCP) can share the same loop body without code duplication.
+fn run_client_loop(
+    client: &mut Client,
+    outbound: &Sender<Vec<u8>>,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
+) {
     let mut read_buf = [0u8; 16 * 1024];
 
     loop {
@@ -510,18 +755,18 @@ fn handle_connection(
             match parsed {
                 Ok(Some((argv, consumed))) => {
                     client.query_buf.drain(..consumed);
-                    process_command(&mut client, argv, &db, &registry, &server);
+                    process_command(client, argv, &db, &registry, &server);
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    queue_error_reply(&mut client, &err);
-                    let _ = flush_reply(&mut client, &outbound);
+                    queue_error_reply(client, &err);
+                    let _ = flush_reply(client, outbound);
                     disconnect = true;
                     break;
                 }
             }
 
-            if !flush_reply(&mut client, &outbound) {
+            if !flush_reply(client, outbound) {
                 disconnect = true;
                 break;
             }
@@ -536,7 +781,7 @@ fn handle_connection(
             break;
         }
 
-        if !flush_reply(&mut client, &outbound) {
+        if !flush_reply(client, outbound) {
             break;
         }
 
@@ -545,9 +790,129 @@ fn handle_connection(
         }
     }
 
+    let id = client.id;
     let _ = pubsub::drop_client_from_registry(&registry, id);
     client.clear_blocked_on_keys();
-    drop(outbound);
+    server_metrics().on_disconnect();
+}
+
+/// Read-dispatch-write loop for TLS connections.
+///
+/// Because `rustls::StreamOwned` is not `Clone`, writes go through
+/// `conn.write_all` on the same thread. The `rx` channel carries pub/sub
+/// payloads from foreign threads; they are drained inline via `try_recv`
+/// after each command so subscribers connected over TLS still receive
+/// published messages.
+fn run_client_loop_tls(
+    client: &mut Client,
+    outbound_tx: Sender<Vec<u8>>,
+    outbound_rx: Receiver<Vec<u8>>,
+    peer_addr: String,
+    shutdown: Arc<AtomicBool>,
+    db: Arc<Mutex<RedisDb>>,
+    registry: Arc<Mutex<PubSubRegistry>>,
+    server: Arc<redis_core::RedisServer>,
+) {
+    let mut read_buf = [0u8; 16 * 1024];
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
+        while let Ok(payload) = outbound_rx.try_recv() {
+            let conn = match client.conn.as_mut() {
+                Some(c) => c,
+                None => break,
+            };
+            if conn.write_all(&payload).is_err() {
+                break;
+            }
+        }
+
+        let conn = match client.conn.as_mut() {
+            Some(c) => c,
+            None => break,
+        };
+
+        let n = match conn.read(&mut read_buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+
+        client.query_buf.extend_from_slice(&read_buf[..n]);
+
+        let mut disconnect = false;
+        loop {
+            let parsed = parse_inline_or_multibulk(&client.query_buf);
+            match parsed {
+                Ok(Some((argv, consumed))) => {
+                    client.query_buf.drain(..consumed);
+                    process_command(client, argv, &db, &registry, &server);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    queue_error_reply(client, &err);
+                    let reply = std::mem::take(&mut client.reply_buf);
+                    if !reply.is_empty() {
+                        if let Some(c) = client.conn.as_mut() {
+                            let _ = c.write_all(&reply);
+                        }
+                    }
+                    disconnect = true;
+                    break;
+                }
+            }
+
+            let reply = std::mem::take(&mut client.reply_buf);
+            if !reply.is_empty() {
+                match client.conn.as_mut() {
+                    Some(c) => {
+                        if c.write_all(&reply).is_err() {
+                            disconnect = true;
+                            break;
+                        }
+                    }
+                    None => {
+                        disconnect = true;
+                        break;
+                    }
+                }
+            }
+
+            while let Ok(payload) = outbound_rx.try_recv() {
+                match client.conn.as_mut() {
+                    Some(c) => {
+                        if c.write_all(&payload).is_err() {
+                            disconnect = true;
+                            break;
+                        }
+                    }
+                    None => {
+                        disconnect = true;
+                        break;
+                    }
+                }
+            }
+
+            if disconnect || client.should_close {
+                disconnect = true;
+                break;
+            }
+        }
+
+        if disconnect || client.should_close {
+            break;
+        }
+    }
+
+    let _ = peer_addr;
+    let id = client.id;
+    let _ = pubsub::drop_client_from_registry(&registry, id);
+    client.clear_blocked_on_keys();
+    drop(outbound_tx);
     server_metrics().on_disconnect();
 }
 

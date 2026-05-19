@@ -142,18 +142,20 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"config|get"));
         }
-        let mut items: Vec<RespFrame> = Vec::new();
+        let mut pairs: Vec<(RespFrame, RespFrame)> = Vec::new();
         for i in 2..ctx.arg_count() {
             let pat = ctx.arg_owned(i)?;
             let pat_bytes = pat.as_bytes();
             for (name, value) in config_pairs_with_dynamic(&live_config) {
                 if glob_match_ascii_ci(pat_bytes, name.as_bytes()) {
-                    items.push(RespFrame::bulk(RedisString::from_bytes(name.as_bytes())));
-                    items.push(RespFrame::bulk(RedisString::from_bytes(value.as_bytes())));
+                    pairs.push((
+                        RespFrame::bulk(RedisString::from_bytes(name.as_bytes())),
+                        RespFrame::bulk(RedisString::from_bytes(value.as_bytes())),
+                    ));
                 }
             }
         }
-        return ctx.reply_frame(&RespFrame::array(items));
+        return ctx.reply_frame(&RespFrame::Map(pairs));
     }
     if ascii_eq_ignore_case(sub_bytes, b"SET") {
         if ctx.arg_count() < 3 {
@@ -195,6 +197,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("requirepass", ""),
         ("appendonly", "no"),
         ("appendfsync", "everysec"),
+        ("appendfilename", "appendonly.aof"),
         ("save", ""),
         ("dir", "./"),
         ("dbfilename", "dump.rdb"),
@@ -233,6 +236,11 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("hz", "10"),
         ("lfu-log-factor", "10"),
         ("lfu-decay-time", "1"),
+        ("tls-port", "0"),
+        ("tls-cert-file", ""),
+        ("tls-key-file", ""),
+        ("tls-ca-cert-file", ""),
+        ("tls-auth-clients", "no"),
     ]
 }
 
@@ -267,6 +275,27 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_dbfilename = cfg.rdb_filename();
     let live_lfu_log_factor = cfg.lfu_log_factor().to_string();
     let live_lfu_decay_time = cfg.lfu_decay_time().to_string();
+    let live_tls_port = cfg.tls_port().to_string();
+    let live_tls_cert = cfg
+        .tls_cert_file()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let live_tls_key = cfg
+        .tls_key_file()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let live_tls_ca = cfg
+        .tls_ca_cert_file()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let live_tls_auth_clients = match cfg.tls_auth_clients() {
+        1 => "yes".to_string(),
+        2 => "optional".to_string(),
+        _ => "no".to_string(),
+    };
+    let live_appendonly = if cfg.appendonly() { "yes".to_string() } else { "no".to_string() };
+    let live_appendfsync = crate::aof::fsync_policy_str(cfg.appendfsync()).to_string();
+    let live_appendfilename = cfg.appendfilename();
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -292,6 +321,14 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "dbfilename" => Some(live_dbfilename.clone()),
             "lfu-log-factor" => Some(live_lfu_log_factor.clone()),
             "lfu-decay-time" => Some(live_lfu_decay_time.clone()),
+            "tls-port" => Some(live_tls_port.clone()),
+            "tls-cert-file" => Some(live_tls_cert.clone()),
+            "tls-key-file" => Some(live_tls_key.clone()),
+            "tls-ca-cert-file" => Some(live_tls_ca.clone()),
+            "tls-auth-clients" => Some(live_tls_auth_clients.clone()),
+            "appendonly" => Some(live_appendonly.clone()),
+            "appendfsync" => Some(live_appendfsync.clone()),
+            "appendfilename" => Some(live_appendfilename.clone()),
             _ => None,
         };
         out.push((
@@ -423,6 +460,75 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"lfu-decay-time" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_lfu_decay_time(n.min(u32::MAX as usize) as u32);
+            }
+        }
+        b"tls-cert-file" => {
+            if value.is_empty() {
+                cfg.set_tls_cert_file(None);
+            } else if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_tls_cert_file(Some(std::path::PathBuf::from(s)));
+            }
+        }
+        b"tls-key-file" => {
+            if value.is_empty() {
+                cfg.set_tls_key_file(None);
+            } else if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_tls_key_file(Some(std::path::PathBuf::from(s)));
+            }
+        }
+        b"tls-ca-cert-file" => {
+            if value.is_empty() {
+                cfg.set_tls_ca_cert_file(None);
+            } else if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_tls_ca_cert_file(Some(std::path::PathBuf::from(s)));
+            }
+        }
+        b"tls-auth-clients" => {
+            let mode = match value {
+                b"yes" => 1u8,
+                b"optional" => 2u8,
+                _ => 0u8,
+            };
+            cfg.set_tls_auth_clients(mode);
+        }
+        b"tls-port" => {
+            if let Some(n) = parse_usize_strict(value) {
+                let port = n.min(u16::MAX as usize) as u16;
+                cfg.set_tls_port(port);
+                redis_core::tls::notify_tls_port_set(port);
+            }
+        }
+        b"appendonly" => {
+            let enabled = value == b"yes";
+            let was_enabled = cfg.appendonly();
+            cfg.set_appendonly(enabled);
+            if enabled && !was_enabled {
+                let dir = cfg.rdb_dir();
+                let filename = cfg.appendfilename();
+                let path = std::path::Path::new(&dir).join(&filename);
+                let policy = cfg.appendfsync();
+                match crate::aof::AofWriter::open(&path, policy) {
+                    Ok(w) => crate::aof::install_aof_writer(std::sync::Arc::new(w)),
+                    Err(e) => eprintln!("redis-server: failed to open AOF {}: {}", path.display(), e),
+                }
+            } else if !enabled && was_enabled {
+                if let Some(w) = crate::aof::aof_writer() {
+                    let _ = w.flush();
+                }
+                crate::aof::remove_aof_writer();
+            }
+        }
+        b"appendfilename" => {
+            if let Ok(s) = std::str::from_utf8(value) {
+                cfg.set_appendfilename(s.to_string());
+            }
+        }
+        b"appendfsync" => {
+            if let Some(policy) = crate::aof::parse_fsync_policy(value) {
+                cfg.set_appendfsync(policy);
+                if let Some(w) = crate::aof::aof_writer() {
+                    w.fsync_policy.store(policy, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         _ => {}
@@ -735,28 +841,45 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::syntax(b"Syntax error in HELLO"));
         }
     }
-    if proto == 3 {
-        return Err(RedisError::runtime(b"NOPROTO RESP3 not yet supported"));
-    }
     ctx.client_mut().resp_proto = proto;
     let id = ctx.client_ref().id();
+    if let Some(reg) = ctx.pubsub.as_ref() {
+        if let Ok(mut guard) = reg.lock() {
+            guard.set_resp_proto(id, proto);
+        }
+    }
     let id_bytes = format_u64_decimal(id);
-    let mut items: Vec<RespFrame> = Vec::with_capacity(14);
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"server")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"redis")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"version")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"7.0.0")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"proto")));
-    items.push(RespFrame::Integer(proto as i64));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"id")));
-    items.push(RespFrame::bulk(RedisString::from_vec(id_bytes)));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"mode")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"standalone")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"role")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"master")));
-    items.push(RespFrame::bulk(RedisString::from_bytes(b"modules")));
-    items.push(RespFrame::array(Vec::new()));
-    ctx.reply_frame(&RespFrame::array(items))
+    let pairs: Vec<(RespFrame, RespFrame)> = vec![
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"server")),
+            RespFrame::bulk(RedisString::from_bytes(b"redis")),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"version")),
+            RespFrame::bulk(RedisString::from_bytes(b"7.0.0")),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"proto")),
+            RespFrame::Integer(proto as i64),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"id")),
+            RespFrame::bulk(RedisString::from_vec(id_bytes)),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"mode")),
+            RespFrame::bulk(RedisString::from_bytes(b"standalone")),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"role")),
+            RespFrame::bulk(RedisString::from_bytes(b"master")),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_bytes(b"modules")),
+            RespFrame::array(Vec::new()),
+        ),
+    ];
+    ctx.reply_frame(&RespFrame::Map(pairs))
 }
 
 /// `CLIENT <subcommand> [args]`.

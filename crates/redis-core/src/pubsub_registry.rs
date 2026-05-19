@@ -22,6 +22,11 @@ pub struct PubSubRegistry {
     channels: HashMap<RedisString, HashSet<ClientId>>,
     patterns: HashMap<RedisString, HashSet<ClientId>>,
     senders: HashMap<ClientId, Sender<Vec<u8>>>,
+    /// Per-client RESP protocol version negotiated by `HELLO` (2 or 3).
+    /// Looked up by PUBLISH / keyspace-notify paths so message frames can be
+    /// emitted as RESP3 push frames (`>`) for subscribers that asked for it.
+    /// Defaults to 2 for clients that never called `HELLO 3`.
+    resp_protos: HashMap<ClientId, i32>,
 }
 
 impl Default for PubSubRegistry {
@@ -37,6 +42,7 @@ impl PubSubRegistry {
             channels: HashMap::new(),
             patterns: HashMap::new(),
             senders: HashMap::new(),
+            resp_protos: HashMap::new(),
         }
     }
 
@@ -51,6 +57,7 @@ impl PubSubRegistry {
     /// `client_id`. Called when a connection closes.
     pub fn drop_client(&mut self, client_id: ClientId) {
         self.senders.remove(&client_id);
+        self.resp_protos.remove(&client_id);
         self.channels.retain(|_, subs| {
             subs.remove(&client_id);
             !subs.is_empty()
@@ -59,6 +66,22 @@ impl PubSubRegistry {
             subs.remove(&client_id);
             !subs.is_empty()
         });
+    }
+
+    /// Record (or update) the RESP protocol version for `client_id`. Called
+    /// from the HELLO command handler when the client successfully negotiates
+    /// RESP3 (and during accept-loop setup so RESP2 is the default).
+    pub fn set_resp_proto(&mut self, client_id: ClientId, proto: i32) {
+        self.resp_protos.insert(client_id, proto);
+    }
+
+    /// Look up `client_id`'s negotiated RESP protocol version. Returns `2`
+    /// for clients that have not run `HELLO 3` (or that aren't tracked).
+    pub fn resp_proto(&self, client_id: ClientId) -> i32 {
+        match self.resp_protos.get(&client_id) {
+            Some(p) => *p,
+            None => 2,
+        }
     }
 
     /// Add `client_id` to the subscriber set for `channel`. Returns `true`

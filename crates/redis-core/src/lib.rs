@@ -38,6 +38,7 @@ pub mod pubsub_registry;
 pub mod server;
 pub mod strtod;
 pub mod timeout;
+pub mod tls;
 pub mod transport;
 pub mod unix;
 pub mod util;

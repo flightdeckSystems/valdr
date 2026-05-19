@@ -446,7 +446,7 @@ pub fn hgetall_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => Vec::new(),
         Some(h) => h.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     };
-    ctx.reply_array_header(pairs.len() * 2)?;
+    ctx.reply_map_header(pairs.len())?;
     for (f, v) in pairs {
         ctx.reply_bulk_string(f)?;
         ctx.reply_bulk_string(v)?;

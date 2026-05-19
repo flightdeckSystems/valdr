@@ -18,10 +18,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use redis_core::command_context::CommandContext;
+use redis_core::command_context::{
+    encode_pubsub_message_resp2, encode_pubsub_message_resp3, encode_pubsub_pmessage_resp2,
+    encode_pubsub_pmessage_resp3, CommandContext,
+};
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::util::string_match_len;
-use redis_protocol::{encode_resp2, RespFrame};
+use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisString};
 
 /// Distinguishes global pub/sub channels from shard-level (cluster) channels.
@@ -87,38 +90,6 @@ fn registry_handle(
     }
 }
 
-/// Encode a `*3 message channel payload` push frame.
-fn encode_message_frame(channel: &RedisString, message: &RedisString) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 + channel.len() + message.len());
-    encode_resp2(
-        &RespFrame::array(vec![
-            RespFrame::bulk(RedisString::from_static(b"message")),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
-
-/// Encode a `*4 pmessage pattern channel payload` push frame.
-fn encode_pmessage_frame(
-    pattern: &RedisString,
-    channel: &RedisString,
-    message: &RedisString,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(32 + pattern.len() + channel.len() + message.len());
-    encode_resp2(
-        &RespFrame::array(vec![
-            RespFrame::bulk(RedisString::from_static(b"pmessage")),
-            RespFrame::bulk(pattern.clone()),
-            RespFrame::bulk(channel.clone()),
-            RespFrame::bulk(message.clone()),
-        ]),
-        &mut buf,
-    );
-    buf
-}
 
 /// SUBSCRIBE channel [channel ...]
 pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
@@ -139,11 +110,16 @@ pub fn subscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ctx.client.subscribed_channels.insert(channel.clone());
         }
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"subscribe")),
             RespFrame::bulk(channel),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
     }
     Ok(())
@@ -163,11 +139,16 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
     if targets.is_empty() {
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"unsubscribe")),
             RespFrame::Bulk(None),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
         return Ok(());
     }
@@ -182,11 +163,16 @@ pub fn unsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ctx.client.subscribed_channels.remove(&channel);
         }
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"unsubscribe")),
             RespFrame::bulk(channel),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
     }
     Ok(())
@@ -211,11 +197,16 @@ pub fn psubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             ctx.client.subscribed_patterns.insert(pattern.clone());
         }
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"psubscribe")),
             RespFrame::bulk(pattern),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
     }
     Ok(())
@@ -235,11 +226,16 @@ pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> 
     };
     if targets.is_empty() {
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"punsubscribe")),
             RespFrame::Bulk(None),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
         return Ok(());
     }
@@ -254,11 +250,16 @@ pub fn punsubscribe_command(ctx: &mut CommandContext) -> Result<(), RedisError> 
             ctx.client.subscribed_patterns.remove(&pattern);
         }
         let count = ctx.client.pubsub_subscription_count() as i64;
-        let frame = RespFrame::array(vec![
+        let items = vec![
             RespFrame::bulk(RedisString::from_static(b"punsubscribe")),
             RespFrame::bulk(pattern),
             RespFrame::Integer(count),
-        ]);
+        ];
+        let frame = if ctx.client.resp_proto == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::array(items)
+        };
         ctx.client.write_frame(&frame);
     }
     Ok(())
@@ -283,19 +284,31 @@ pub fn publish_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
 
     let mut receivers: i64 = 0;
-    let message_frame = encode_message_frame(&channel, &message);
+    let resp2_message = encode_pubsub_message_resp2(&channel, &message);
+    let resp3_message = encode_pubsub_message_resp3(&channel, &message);
     let guard = registry
         .lock()
         .map_err(|_| RedisError::runtime(b"ERR pubsub mutex poisoned"))?;
     for sub in channel_subs {
-        if guard.send_to(sub, message_frame.clone()) {
+        let bytes = if guard.resp_proto(sub) == 3 {
+            resp3_message.clone()
+        } else {
+            resp2_message.clone()
+        };
+        if guard.send_to(sub, bytes) {
             receivers += 1;
         }
     }
     for (pattern, subs) in pattern_pairs {
-        let pmessage = encode_pmessage_frame(&pattern, &channel, &message);
+        let resp2_pmessage = encode_pubsub_pmessage_resp2(&pattern, &channel, &message);
+        let resp3_pmessage = encode_pubsub_pmessage_resp3(&pattern, &channel, &message);
         for sub in subs {
-            if guard.send_to(sub, pmessage.clone()) {
+            let bytes = if guard.resp_proto(sub) == 3 {
+                resp3_pmessage.clone()
+            } else {
+                resp2_pmessage.clone()
+            };
+            if guard.send_to(sub, bytes) {
                 receivers += 1;
             }
         }

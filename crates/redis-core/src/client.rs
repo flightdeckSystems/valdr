@@ -317,8 +317,14 @@ impl Client {
     }
 
     /// Append an encoded RESP frame to the pending-reply buffer.
+    ///
+    /// Encoding follows the client's negotiated `resp_proto`: RESP3 emits
+    /// the dedicated native frame shapes (`%`, `~`, `,`, `_`, `#`, `>`, …)
+    /// while RESP2 degrades the RESP3-only variants to their nearest RESP2
+    /// equivalent. The RESP2 wire bytes for the legacy frame variants are
+    /// identical regardless of `resp_proto`.
     pub fn write_frame(&mut self, frame: &RespFrame) {
-        redis_protocol::encode_resp2(frame, &mut self.reply_buf);
+        redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
     }
 
     /// Drain the reply buffer; caller (I/O layer) writes to the socket.

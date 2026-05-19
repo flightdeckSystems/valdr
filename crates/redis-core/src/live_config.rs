@@ -19,7 +19,8 @@
 //! hooks, AUTH, keyspace-notifications wiring, maxmemory eviction) will
 //! ride on.
 
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use redis_types::RedisString;
@@ -127,6 +128,22 @@ pub struct LiveConfig {
     /// Minutes between LFU counter decay ticks (`lfu-decay-time` config key).
     /// Default 1.
     pub lfu_decay_time: AtomicU32,
+    /// TLS listener port (`tls-port` config key). 0 = disabled.
+    pub tls_port: AtomicU16,
+    /// Path to the PEM certificate chain for the TLS listener.
+    pub tls_cert_file: Mutex<Option<PathBuf>>,
+    /// Path to the PEM private key for the TLS listener.
+    pub tls_key_file: Mutex<Option<PathBuf>>,
+    /// Path to the PEM CA bundle used for mTLS client verification.
+    pub tls_ca_cert_file: Mutex<Option<PathBuf>>,
+    /// mTLS client-auth policy: 0 = no, 1 = yes (require cert), 2 = optional.
+    pub tls_auth_clients: AtomicU8,
+    /// Whether AOF persistence is enabled (`appendonly` config key).
+    pub appendonly: AtomicBool,
+    /// AOF filename relative to `rdb_dir` (`appendfilename` config key).
+    pub appendfilename: Mutex<String>,
+    /// fsync policy: 0=no, 1=everysec, 2=always (`appendfsync` config key).
+    pub appendfsync: AtomicU8,
 }
 
 /// Default `maxclients` (matches upstream server.c).
@@ -174,6 +191,9 @@ pub const DEFAULT_ZSET_MAX_LISTPACK_ENTRIES: usize = 128;
 /// Default `zset-max-listpack-value`.
 pub const DEFAULT_ZSET_MAX_LISTPACK_VALUE: usize = 64;
 
+/// Default AOF filename.
+pub const DEFAULT_AOF_FILENAME: &str = "appendonly.aof";
+
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
@@ -199,6 +219,14 @@ impl Default for LiveConfig {
             last_save_unix: AtomicI64::new(0),
             lfu_log_factor: AtomicU32::new(DEFAULT_LFU_LOG_FACTOR),
             lfu_decay_time: AtomicU32::new(DEFAULT_LFU_DECAY_TIME),
+            tls_port: AtomicU16::new(0),
+            tls_cert_file: Mutex::new(None),
+            tls_key_file: Mutex::new(None),
+            tls_ca_cert_file: Mutex::new(None),
+            tls_auth_clients: AtomicU8::new(0),
+            appendonly: AtomicBool::new(false),
+            appendfilename: Mutex::new(DEFAULT_AOF_FILENAME.to_string()),
+            appendfsync: AtomicU8::new(1),
         }
     }
 }
@@ -422,6 +450,111 @@ impl LiveConfig {
 
     pub fn set_lfu_decay_time(&self, minutes: u32) {
         self.lfu_decay_time.store(minutes, Ordering::Relaxed);
+    }
+
+    /// Current TLS listener port. Returns 0 when TLS is disabled.
+    pub fn tls_port(&self) -> u16 {
+        self.tls_port.load(Ordering::Relaxed)
+    }
+
+    /// Update the TLS listener port. 0 disables TLS.
+    pub fn set_tls_port(&self, port: u16) {
+        self.tls_port.store(port, Ordering::Relaxed);
+    }
+
+    /// Snapshot the TLS certificate file path.
+    pub fn tls_cert_file(&self) -> Option<PathBuf> {
+        match self.tls_cert_file.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the TLS certificate file path.
+    pub fn set_tls_cert_file(&self, path: Option<PathBuf>) {
+        match self.tls_cert_file.lock() {
+            Ok(mut g) => *g = path,
+            Err(p) => *p.into_inner() = path,
+        }
+    }
+
+    /// Snapshot the TLS private key file path.
+    pub fn tls_key_file(&self) -> Option<PathBuf> {
+        match self.tls_key_file.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the TLS private key file path.
+    pub fn set_tls_key_file(&self, path: Option<PathBuf>) {
+        match self.tls_key_file.lock() {
+            Ok(mut g) => *g = path,
+            Err(p) => *p.into_inner() = path,
+        }
+    }
+
+    /// Snapshot the TLS CA certificate file path used for mTLS.
+    pub fn tls_ca_cert_file(&self) -> Option<PathBuf> {
+        match self.tls_ca_cert_file.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the TLS CA certificate file path.
+    pub fn set_tls_ca_cert_file(&self, path: Option<PathBuf>) {
+        match self.tls_ca_cert_file.lock() {
+            Ok(mut g) => *g = path,
+            Err(p) => *p.into_inner() = path,
+        }
+    }
+
+    /// mTLS client-auth policy: 0 = no (default), 1 = yes (require cert),
+    /// 2 = optional.
+    pub fn tls_auth_clients(&self) -> u8 {
+        self.tls_auth_clients.load(Ordering::Relaxed)
+    }
+
+    /// Update the mTLS client-auth policy.
+    pub fn set_tls_auth_clients(&self, mode: u8) {
+        self.tls_auth_clients.store(mode, Ordering::Relaxed);
+    }
+
+    /// Whether AOF persistence is currently enabled.
+    pub fn appendonly(&self) -> bool {
+        self.appendonly.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable AOF persistence.
+    pub fn set_appendonly(&self, enabled: bool) {
+        self.appendonly.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Return the current AOF filename.
+    pub fn appendfilename(&self) -> String {
+        match self.appendfilename.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// Update the AOF filename.
+    pub fn set_appendfilename(&self, name: String) {
+        match self.appendfilename.lock() {
+            Ok(mut g) => *g = name,
+            Err(p) => *p.into_inner() = name,
+        }
+    }
+
+    /// Return the fsync policy code (0=no, 1=everysec, 2=always).
+    pub fn appendfsync(&self) -> u8 {
+        self.appendfsync.load(Ordering::Relaxed)
+    }
+
+    /// Update the fsync policy.
+    pub fn set_appendfsync(&self, policy: u8) {
+        self.appendfsync.store(policy, Ordering::Relaxed);
     }
 
     /// Snapshot of encoding thresholds — convenience for the encoding

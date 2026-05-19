@@ -9,7 +9,11 @@ pub mod frame;
 pub mod parser;
 pub mod request;
 
-pub use frame::{RespFrame, encode_resp2};
+pub use frame::{
+    encode_big_number, encode_boolean, encode_double, encode_for_proto, encode_map_header,
+    encode_null_resp3, encode_push_header, encode_resp2, encode_resp3, encode_set_header,
+    encode_verbatim_string, format_double_text, RespFrame,
+};
 pub use parser::{ParserCallbacks, ParserCursor};
 pub use request::parse_inline_or_multibulk;
 

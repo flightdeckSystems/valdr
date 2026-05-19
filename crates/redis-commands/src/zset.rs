@@ -361,7 +361,7 @@ pub fn zscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(z) => z.score(&member),
     };
     match score {
-        Some(s) => ctx.reply_bulk(&format_score(s)),
+        Some(s) => ctx.reply_double(s),
         None => ctx.reply_null_bulk(),
     }
 }
@@ -384,7 +384,7 @@ pub fn zmscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_array_header(scores.len())?;
     for s in scores {
         match s {
-            Some(v) => ctx.reply_bulk(&format_score(v))?,
+            Some(v) => ctx.reply_double(v)?,
             None => ctx.reply_null_bulk()?,
         }
     }

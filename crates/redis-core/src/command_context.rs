@@ -309,14 +309,22 @@ impl<'a> CommandContext<'a> {
 
     /// Push or array header — RESP3 push frame in client RESP3 mode,
     /// fall back to RESP2 array header otherwise.
-    ///
-    /// STUB — Phase B emits an array header regardless of protocol mode.
-    /// Full RESP3 push-frame support lands when networking is ported.
     pub fn reply_push_or_array_header<L: ReplyArrayLen>(
         &mut self,
         len: L,
     ) -> RedisResult<()> {
-        self.reply_array_header_i64(len.into_reply_len())
+        let n = len.into_reply_len();
+        if self.client.resp_proto == 3 {
+            let mut buf = Vec::new();
+            buf.push(b'>');
+            use std::io::Write;
+            let _ = write!(buf, "{}", n);
+            buf.extend_from_slice(b"\r\n");
+            self.client.reply_buf.extend_from_slice(&buf);
+            Ok(())
+        } else {
+            self.reply_array_header_i64(n)
+        }
     }
 
     fn reply_array_header_i64(&mut self, len: i64) -> RedisResult<()> {
@@ -326,6 +334,86 @@ impl<'a> CommandContext<'a> {
         let _ = write!(buf, "{}", len);
         buf.extend_from_slice(b"\r\n");
         self.client.reply_buf.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    /// Reply with a map header for `n_pairs` key/value pairs.
+    ///
+    /// RESP3 clients receive `%N\r\n`; RESP2 clients receive an equivalent
+    /// flat alternating array header (`*2N\r\n`). Caller must then emit
+    /// exactly `2 * n_pairs` frames in alternating key/value order; both
+    /// wire shapes are well-formed RESP under either protocol.
+    pub fn reply_map_header<L: ReplyArrayLen>(&mut self, n_pairs: L) -> RedisResult<()> {
+        use std::io::Write;
+        let n = n_pairs.into_reply_len();
+        let mut buf = Vec::new();
+        if self.client.resp_proto == 3 {
+            buf.push(b'%');
+            let _ = write!(buf, "{}", n);
+        } else {
+            buf.push(b'*');
+            let _ = write!(buf, "{}", n.saturating_mul(2));
+        }
+        buf.extend_from_slice(b"\r\n");
+        self.client.reply_buf.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    /// Reply with a set header for `n` items.
+    ///
+    /// RESP3 clients receive `~N\r\n`; RESP2 clients receive `*N\r\n` (the
+    /// semantic distinction between array and set is RESP3-only).
+    pub fn reply_set_header<L: ReplyArrayLen>(&mut self, n: L) -> RedisResult<()> {
+        use std::io::Write;
+        let n = n.into_reply_len();
+        let mut buf = Vec::new();
+        if self.client.resp_proto == 3 {
+            buf.push(b'~');
+        } else {
+            buf.push(b'*');
+        }
+        let _ = write!(buf, "{}", n);
+        buf.extend_from_slice(b"\r\n");
+        self.client.reply_buf.extend_from_slice(&buf);
+        Ok(())
+    }
+
+    /// Reply with a RESP3 double. RESP2 clients receive a bulk string of the
+    /// canonical textual representation (matches `format_score` in the zset
+    /// command surface).
+    pub fn reply_double(&mut self, d: f64) -> RedisResult<()> {
+        self.client.write_frame(&RespFrame::Double(d));
+        Ok(())
+    }
+
+    /// Reply with a RESP3 boolean. RESP2 clients receive an integer reply of
+    /// `:1\r\n` (true) or `:0\r\n` (false).
+    pub fn reply_boolean(&mut self, b: bool) -> RedisResult<()> {
+        self.client.write_frame(&RespFrame::Boolean(b));
+        Ok(())
+    }
+
+    /// Reply with a RESP3 null. RESP2 clients receive `$-1\r\n`.
+    pub fn reply_resp3_null(&mut self) -> RedisResult<()> {
+        self.client.write_frame(&RespFrame::Null);
+        Ok(())
+    }
+
+    /// Reply with a RESP3 big number. RESP2 clients receive a bulk string of
+    /// the same digits.
+    pub fn reply_big_number(&mut self, digits: &[u8]) -> RedisResult<()> {
+        self.client
+            .write_frame(&RespFrame::BigNumber(RedisString::from_bytes(digits)));
+        Ok(())
+    }
+
+    /// Reply with a RESP3 verbatim string. RESP2 clients receive a bulk
+    /// string of the payload bytes (no format tag).
+    pub fn reply_verbatim_string(&mut self, format: &[u8; 3], bytes: &[u8]) -> RedisResult<()> {
+        self.client.write_frame(&RespFrame::VerbatimString {
+            format: *format,
+            data: RedisString::from_bytes(bytes),
+        });
         Ok(())
     }
 
@@ -458,26 +546,20 @@ impl<'a> CommandContext<'a> {
     }
 }
 
-/// Encode a `*3 message channel payload` push frame and ship it to every
+/// Encode a `message channel payload` push frame and ship it to every
 /// subscriber that matches `channel` (exact or pattern). Used by the
 /// `notify_keyspace_event` helper.
+///
+/// RESP3 subscribers receive a `>` push frame prefixed with the `pubsub`
+/// discriminator. RESP2 subscribers receive the legacy `*3` / `*4` array
+/// emission unchanged.
 fn publish_keyspace_message(
     registry: &Arc<Mutex<PubSubRegistry>>,
     channel: &RedisString,
     message: &RedisString,
 ) {
-    let frame_bytes = {
-        let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
-        encode_resp2(
-            &RespFrame::array(vec![
-                RespFrame::bulk(RedisString::from_static(b"message")),
-                RespFrame::bulk(channel.clone()),
-                RespFrame::bulk(message.clone()),
-            ]),
-            &mut buf,
-        );
-        buf
-    };
+    let resp2_message = encode_pubsub_message_resp2(channel, message);
+    let resp3_message = encode_pubsub_message_resp3(channel, message);
     let (channel_subs, pattern_pairs) = {
         let guard = match registry.lock() {
             Ok(g) => g,
@@ -492,27 +574,97 @@ fn publish_keyspace_message(
         Err(p) => p.into_inner(),
     };
     for sub in channel_subs {
-        guard.send_to(sub, frame_bytes.clone());
+        let bytes = if guard.resp_proto(sub) == 3 {
+            resp3_message.clone()
+        } else {
+            resp2_message.clone()
+        };
+        guard.send_to(sub, bytes);
     }
     for (pattern, subs) in pattern_pairs {
-        let pmessage_bytes = {
-            let mut buf =
-                Vec::with_capacity(64 + channel.as_bytes().len() + message.as_bytes().len());
-            encode_resp2(
-                &RespFrame::array(vec![
-                    RespFrame::bulk(RedisString::from_static(b"pmessage")),
-                    RespFrame::bulk(pattern.clone()),
-                    RespFrame::bulk(channel.clone()),
-                    RespFrame::bulk(message.clone()),
-                ]),
-                &mut buf,
-            );
-            buf
-        };
+        let resp2_pmessage = encode_pubsub_pmessage_resp2(&pattern, channel, message);
+        let resp3_pmessage = encode_pubsub_pmessage_resp3(&pattern, channel, message);
         for sub in subs {
-            guard.send_to(sub, pmessage_bytes.clone());
+            let bytes = if guard.resp_proto(sub) == 3 {
+                resp3_pmessage.clone()
+            } else {
+                resp2_pmessage.clone()
+            };
+            guard.send_to(sub, bytes);
         }
     }
+}
+
+/// Encode a RESP2 `*3 message channel payload` array.
+pub fn encode_pubsub_message_resp2(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32 + channel.as_bytes().len() + message.as_bytes().len());
+    encode_resp2(
+        &RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"message")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP3 `>4 pubsub message channel payload` push frame.
+pub fn encode_pubsub_message_resp3(channel: &RedisString, message: &RedisString) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(48 + channel.as_bytes().len() + message.as_bytes().len());
+    redis_protocol::encode_resp3(
+        &RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"pubsub")),
+            RespFrame::bulk(RedisString::from_static(b"message")),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP2 `*4 pmessage pattern channel payload` array.
+pub fn encode_pubsub_pmessage_resp2(
+    pattern: &RedisString,
+    channel: &RedisString,
+    message: &RedisString,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        48 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
+    );
+    encode_resp2(
+        &RespFrame::array(vec![
+            RespFrame::bulk(RedisString::from_static(b"pmessage")),
+            RespFrame::bulk(pattern.clone()),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
+}
+
+/// Encode a RESP3 `>5 pubsub pmessage pattern channel payload` push frame.
+pub fn encode_pubsub_pmessage_resp3(
+    pattern: &RedisString,
+    channel: &RedisString,
+    message: &RedisString,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        64 + pattern.as_bytes().len() + channel.as_bytes().len() + message.as_bytes().len(),
+    );
+    redis_protocol::encode_resp3(
+        &RespFrame::Push(vec![
+            RespFrame::bulk(RedisString::from_static(b"pubsub")),
+            RespFrame::bulk(RedisString::from_static(b"pmessage")),
+            RespFrame::bulk(pattern.clone()),
+            RespFrame::bulk(channel.clone()),
+            RespFrame::bulk(message.clone()),
+        ]),
+        &mut buf,
+    );
+    buf
 }
 
 fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {

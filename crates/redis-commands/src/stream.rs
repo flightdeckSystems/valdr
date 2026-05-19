@@ -875,7 +875,7 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
             let entries_added = stream.entries_added as i64;
             let first = stream.entries.first().cloned();
             let last = stream.entries.last().cloned();
-            ctx.reply_array_header(14usize)?;
+            ctx.reply_map_header(8usize)?;
             ctx.reply_bulk(b"length")?;
             ctx.reply_integer(length)?;
             ctx.reply_bulk(b"radix-tree-keys")?;
@@ -2121,7 +2121,7 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
     group_views.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     ctx.reply_array_header(group_views.len())?;
     for (name, consumers, pending, last_id, entries_read, lag) in &group_views {
-        ctx.reply_array_header(12usize)?;
+        ctx.reply_map_header(6usize)?;
         ctx.reply_bulk(b"name")?;
         ctx.reply_bulk_string(name.clone())?;
         ctx.reply_bulk(b"consumers")?;
@@ -2165,7 +2165,7 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     for (name, pending, seen, active) in &snapshot {
         let idle = (now - *seen).max(0);
         let inactive = (now - *active).max(0);
-        ctx.reply_array_header(8usize)?;
+        ctx.reply_map_header(4usize)?;
         ctx.reply_bulk(b"name")?;
         ctx.reply_bulk_string(name.clone())?;
         ctx.reply_bulk(b"pending")?;
