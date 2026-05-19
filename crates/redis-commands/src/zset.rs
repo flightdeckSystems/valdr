@@ -1270,9 +1270,15 @@ fn parse_zalgebra_opts(
 }
 
 /// Combine two scores per the requested aggregation mode.
+///
+/// Mirrors Redis's `C99` double arithmetic: `+inf + -inf` yields 0.0,
+/// matching the behavior documented in `t_zset.c:zunionInterDiffGenericCommand`.
 fn combine_scores(existing: f64, new: f64, mode: Aggregate) -> f64 {
     match mode {
-        Aggregate::Sum => existing + new,
+        Aggregate::Sum => {
+            let r = existing + new;
+            if r.is_nan() { 0.0 } else { r }
+        }
         Aggregate::Min => existing.min(new),
         Aggregate::Max => existing.max(new),
     }

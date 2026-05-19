@@ -667,7 +667,19 @@ fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
                             };
                             waiter.action.timeout_reply_bytes_with_count(count)
                         }
-                        other => other.timeout_reply_bytes().to_vec(),
+                        other => {
+                            if waiter.resp_proto == 3 {
+                                match other {
+                                    redis_core::blocked_keys::BlockedAction::ZSetPop { .. }
+                                    | redis_core::blocked_keys::BlockedAction::Pop { .. } => {
+                                        b"_\r\n".to_vec()
+                                    }
+                                    _ => other.timeout_reply_bytes().to_vec(),
+                                }
+                            } else {
+                                other.timeout_reply_bytes().to_vec()
+                            }
+                        }
                     };
                     let _ = waiter.sender.send(reply);
                 }
@@ -942,6 +954,9 @@ fn run_client_loop(
             match parsed {
                 Ok(Some((argv, consumed))) => {
                     client.query_buf.drain(..consumed);
+                    if argv.is_empty() {
+                        continue;
+                    }
                     process_command(client, argv, &db, &registry, &server);
                 }
                 Ok(None) => break,
@@ -1041,6 +1056,9 @@ fn run_client_loop_tls(
             match parsed {
                 Ok(Some((argv, consumed))) => {
                     client.query_buf.drain(..consumed);
+                    if argv.is_empty() {
+                        continue;
+                    }
                     process_command(client, argv, &db, &registry, &server);
                 }
                 Ok(None) => break,

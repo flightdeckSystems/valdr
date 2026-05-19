@@ -59,16 +59,13 @@ pub fn parse_inline_or_multibulk(
 fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisError> {
     let mut pos: usize = 1;
 
-    let (argc, after_argc) = match read_signed_line(buf, pos)? {
+    let (argc, after_argc) = match read_multibulk_count(buf, pos)? {
         Some(v) => v,
         None => return Ok(None),
     };
     pos = after_argc;
 
     if argc <= 0 {
-        if argc < -1 {
-            return Err(RedisError::runtime(b"Protocol error: invalid multibulk length"));
-        }
         return Ok(Some((Vec::new(), pos)));
     }
     if argc > PROTO_REQ_MULTIBULK_MAX_LEN {
@@ -82,13 +79,13 @@ fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, Redi
             return Ok(None);
         }
         if buf[pos] != b'$' {
-            return Err(RedisError::runtime(
-                b"Protocol error: expected '$', got something else",
-            ));
+            let got = buf[pos];
+            let msg = format!("Protocol error: expected '$', got '{}'", got as char);
+            return Err(RedisError::runtime(msg));
         }
         pos += 1;
 
-        let (bulklen, after_len) = match read_signed_line(buf, pos)? {
+        let (bulklen, after_len) = match read_bulk_length(buf, pos)? {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -110,7 +107,7 @@ fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, Redi
         }
         if &buf[payload_end..frame_end] != b"\r\n" {
             return Err(RedisError::runtime(
-                b"Protocol error: bulk payload not terminated by CRLF",
+                b"Protocol error: invalid CRLF in request",
             ));
         }
 
@@ -148,11 +145,44 @@ fn parse_inline(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, RedisEr
     Ok(Some((argv, newline + 1)))
 }
 
-/// Read an ASCII signed decimal integer terminated by `\r\n` starting at `pos`.
+/// Read a multibulk array count (`*N`) terminated by `\r\n` starting at `pos`.
 ///
-/// Returns `Ok(Some((value, new_pos)))` where `new_pos` is the byte index after
-/// the trailing CRLF; returns `Ok(None)` if the CRLF has not yet arrived.
-fn read_signed_line(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, RedisError> {
+/// Returns `Ok(Some((value, new_pos)))` on success, `Ok(None)` if incomplete,
+/// or `Err` with `"Protocol error: invalid multibulk length"` when the integer
+/// field contains non-digit bytes — matching Valkey's `string2ll` failure path
+/// that sets `READ_FLAGS_ERROR_INVALID_MULTIBULK_LEN`.
+///
+/// C: `parseMultibulk` — `string2ll` on the `*` count field.
+fn read_multibulk_count(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, RedisError> {
+    read_resp_integer(buf, pos, b"Protocol error: invalid multibulk length")
+}
+
+/// Read a bulk-string length (`$N`) terminated by `\r\n` starting at `pos`.
+///
+/// Returns `Ok(Some((value, new_pos)))` on success, `Ok(None)` if incomplete,
+/// or `Err` with `"Protocol error: invalid bulk length"` when the integer
+/// field contains non-digit bytes — matching Valkey's `string2ll` failure path
+/// that sets `READ_FLAGS_ERROR_MBULK_INVALID_BULK_LEN`.
+///
+/// C: `parseMultibulk` — `string2ll` on the `$` length field.
+fn read_bulk_length(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, RedisError> {
+    read_resp_integer(buf, pos, b"Protocol error: invalid bulk length")
+}
+
+/// Shared RESP integer-line reader used by both [`read_multibulk_count`] and
+/// [`read_bulk_length`].
+///
+/// Locates the `\r\n` terminator, validates the `\r\n` sequence, and delegates
+/// digit parsing to `parse_i64_ascii`. `err_msg` is the context-specific error
+/// text emitted when the digit field is invalid — this lets callers produce the
+/// exact Valkey wire text.
+///
+/// C: common `string2ll` + CRLF check pattern in `parseMultibulk`.
+fn read_resp_integer(
+    buf: &[u8],
+    pos: usize,
+    err_msg: &'static [u8],
+) -> Result<Option<(i64, usize)>, RedisError> {
     if pos >= buf.len() {
         return Ok(None);
     }
@@ -165,16 +195,22 @@ fn read_signed_line(buf: &[u8], pos: usize) -> Result<Option<(i64, usize)>, Redi
         return Ok(None);
     }
     if buf[cr_idx + 1] != b'\n' {
-        return Err(RedisError::runtime(b"Protocol error: expected LF after CR"));
+        return Err(RedisError::runtime(b"Protocol error: invalid CRLF in request"));
     }
-    let value = parse_i64_ascii(&buf[pos..cr_idx])?;
+    let value = parse_i64_ascii(&buf[pos..cr_idx], err_msg)?;
     Ok(Some((value, cr_idx + 2)))
 }
 
-/// Parse an ASCII decimal `i64` from `bytes`. Empty input is an error.
-fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
+/// Parse an ASCII signed decimal `i64` from `bytes`.
+///
+/// Returns `Err` with the caller-supplied `err_msg` when the field is empty
+/// or contains non-digit bytes. This lets each call site emit the Valkey-exact
+/// error text for its context (multibulk count vs. bulk length).
+///
+/// C: `string2ll()` from `util.c`, restricted to the RESP integer field cases.
+fn parse_i64_ascii(bytes: &[u8], err_msg: &'static [u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
-        return Err(RedisError::runtime(b"Protocol error: empty integer field"));
+        return Err(RedisError::runtime(err_msg));
     }
     let (negative, digits) = if bytes[0] == b'-' {
         (true, &bytes[1..])
@@ -184,39 +220,49 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
         (false, bytes)
     };
     if digits.is_empty() {
-        return Err(RedisError::runtime(b"Protocol error: empty integer field"));
+        return Err(RedisError::runtime(err_msg));
     }
     let mut acc: i64 = 0;
     for &b in digits {
         let d = match b {
             b'0'..=b'9' => (b - b'0') as i64,
-            _ => {
-                return Err(RedisError::runtime(
-                    b"Protocol error: non-digit in integer field",
-                ));
-            }
+            _ => return Err(RedisError::runtime(err_msg)),
         };
         acc = acc
             .checked_mul(10)
             .and_then(|v| v.checked_add(d))
-            .ok_or_else(|| RedisError::runtime(b"Protocol error: integer overflow"))?;
+            .ok_or_else(|| RedisError::runtime(err_msg))?;
     }
     Ok(if negative { -acc } else { acc })
 }
 
 /// Split an inline command line into argv tokens.
 ///
-/// Handles double-quoted strings with `\x`-escapes the same way the C
-/// `splitArgs` helper does. For Wave A the simple whitespace-split branch is
-/// sufficient (no quoted-string support); proper escape handling lands when
-/// `sds::sdssplitargs` is ported.
+/// Ports Valkey's `sdsnsplitargs` / `sdsparsearg` from `sds.c`. Handles:
 ///
-/// TODO(architect): port the full `sdssplitargs` escape handling. Until then
-/// quoted-arg inline commands (rare in practice) will be tokenised by
-/// whitespace only.
+/// - Bare (unquoted) tokens terminated by ASCII whitespace.
+/// - Double-quoted strings (`"…"`) with `\n`, `\r`, `\t`, `\b`, `\a`,
+///   `\\`, `\"`, and `\xHH` escape sequences.
+/// - Single-quoted strings (`'…'`) with `\'` as the only escape.
+/// - Adjacent quoted/unquoted segments are concatenated into one token,
+///   e.g. `"foo"bar` → `foobar` (Valkey behaviour).
+///
+/// Returns `Err` with `"Protocol error: unbalanced quotes in request"` when
+/// quotes are not properly closed or when a closed-quote is immediately
+/// followed by a non-space character (e.g. `"foo"bar` is actually NOT an
+/// error in Valkey — adjacent is allowed, but `"foo"'bar` transitions work
+/// because after `"` closes, the outer loop either hits whitespace and ends
+/// the token, OR hits another quote character and opens a new quote context).
+///
+/// Matches Valkey's `sdsnsplitargs_internal` returning `NULL` on parse failure,
+/// which maps to `READ_FLAGS_ERROR_UNBALANCED_QUOTES` →
+/// `"Protocol error: unbalanced quotes in request"`.
+///
+/// C: `sds.c:sdsnsplitargs_internal` + `sdsparsearg`.
 fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
     let mut argv: Vec<RedisString> = Vec::new();
     let mut i = 0;
+
     while i < line.len() {
         while i < line.len() && is_inline_whitespace(line[i]) {
             i += 1;
@@ -224,17 +270,95 @@ fn split_inline_tokens(line: &[u8]) -> Result<Vec<RedisString>, RedisError> {
         if i >= line.len() {
             break;
         }
-        let start = i;
-        while i < line.len() && !is_inline_whitespace(line[i]) {
-            i += 1;
+
+        let mut token: Vec<u8> = Vec::new();
+        loop {
+            if i >= line.len() {
+                break;
+            }
+            match line[i] {
+                b'"' => {
+                    i += 1;
+                    loop {
+                        if i >= line.len() {
+                            return Err(RedisError::runtime(
+                                b"Protocol error: unbalanced quotes in request",
+                            ));
+                        }
+                        match line[i] {
+                            b'"' => {
+                                i += 1;
+                                break;
+                            }
+                            b'\\' if i + 1 < line.len() => {
+                                i += 1;
+                                match line[i] {
+                                    b'n' => { token.push(b'\n'); i += 1; }
+                                    b'r' => { token.push(b'\r'); i += 1; }
+                                    b't' => { token.push(b'\t'); i += 1; }
+                                    b'b' => { token.push(0x08); i += 1; }
+                                    b'a' => { token.push(0x07); i += 1; }
+                                    b'x' if i + 2 < line.len()
+                                        && is_hex(line[i + 1])
+                                        && is_hex(line[i + 2]) =>
+                                    {
+                                        token.push(
+                                            (hex_val(line[i + 1]) << 4) | hex_val(line[i + 2]),
+                                        );
+                                        i += 3;
+                                    }
+                                    other => { token.push(other); i += 1; }
+                                }
+                            }
+                            other => { token.push(other); i += 1; }
+                        }
+                    }
+                }
+                b'\'' => {
+                    i += 1;
+                    loop {
+                        if i >= line.len() {
+                            return Err(RedisError::runtime(
+                                b"Protocol error: unbalanced quotes in request",
+                            ));
+                        }
+                        match line[i] {
+                            b'\'' => {
+                                i += 1;
+                                break;
+                            }
+                            b'\\' if i + 1 < line.len() && line[i + 1] == b'\'' => {
+                                token.push(b'\'');
+                                i += 2;
+                            }
+                            other => { token.push(other); i += 1; }
+                        }
+                    }
+                }
+                b if is_inline_whitespace(b) => break,
+                other => { token.push(other); i += 1; }
+            }
         }
-        argv.push(RedisString::from_bytes(&line[start..i]));
+        argv.push(RedisString::from_bytes(&token));
     }
     Ok(argv)
 }
 
 fn is_inline_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t')
+}
+
+fn is_hex(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+}
+
+fn hex_val(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
