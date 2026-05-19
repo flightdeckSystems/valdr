@@ -702,6 +702,7 @@ fn park_xread_block(
                 keys: vec![key.clone()],
                 action: BlockedAction::Stream { id_after: *id_after },
                 deadline_ms,
+                resp_proto: ctx.client_ref().resp_proto,
             };
             idx.add(waiter);
         }

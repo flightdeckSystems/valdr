@@ -272,6 +272,7 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             numreplicas,
         },
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
+        resp_proto: ctx.client_ref().resp_proto,
     };
     {
         let mut idx = match blocked_keys_index().lock() {

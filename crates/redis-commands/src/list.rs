@@ -1246,6 +1246,7 @@ fn park_blocked_client(
         keys,
         action,
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
+        resp_proto: ctx.client_ref().resp_proto,
     };
     {
         let mut idx = match blocked_keys_index().lock() {

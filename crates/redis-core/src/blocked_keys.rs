@@ -105,6 +105,7 @@ pub struct BlockedWaiter {
     pub keys: Vec<RedisString>,
     pub action: BlockedAction,
     pub deadline_ms: i64,
+    pub resp_proto: i32,
 }
 
 /// Server-wide blocked-keys index.
@@ -374,6 +375,7 @@ mod tests {
             keys,
             action: BlockedAction::Pop { side: BlockedSide::Head, count: 0 },
             deadline_ms: deadline,
+            resp_proto: 2,
         }
     }
 

@@ -343,7 +343,7 @@ pub fn zadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     if incr {
         match incr_reply {
-            Some(Some(score)) => ctx.reply_bulk(&format_score(score)),
+            Some(Some(score)) => ctx.reply_double(score),
             _ => ctx.reply_null_bulk(),
         }
     } else if ch {
@@ -442,7 +442,7 @@ pub fn zincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     zset.upsert(member, new_score);
     ctx.notify_keyspace_event(NOTIFY_ZSET, b"zincrby", &key);
     schedule_or_wake_zset(ctx, &key);
-    ctx.reply_bulk(&format_score(new_score))
+    ctx.reply_double(new_score)
 }
 
 /// ZREM key member [member ...]
@@ -525,7 +525,7 @@ fn rank_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> RedisResul
         (Some((rank, score)), true) => {
             ctx.reply_array_header(2usize)?;
             ctx.reply_integer(rank)?;
-            ctx.reply_bulk(&format_score(score))
+            ctx.reply_double(score)
         }
     }
 }
@@ -871,6 +871,7 @@ fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redis
         }
     }
 
+    let resp3 = ctx.client_ref().resp_proto == 3;
     match count_arg {
         None => {
             if popped.is_empty() {
@@ -883,13 +884,22 @@ fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redis
                 .next()
                 .expect("popped non-empty");
             ctx.reply_bulk_string(member)?;
-            ctx.reply_bulk(&format_score(score))
+            ctx.reply_double(score)
         }
         Some(_) => {
-            ctx.reply_array_header(popped.len() * 2)?;
-            for (score, member) in popped {
-                ctx.reply_bulk_string(member)?;
-                ctx.reply_bulk(&format_score(score))?;
+            if resp3 {
+                ctx.reply_array_header(popped.len())?;
+                for (score, member) in popped {
+                    ctx.reply_array_header(2usize)?;
+                    ctx.reply_bulk_string(member)?;
+                    ctx.reply_double(score)?;
+                }
+            } else {
+                ctx.reply_array_header(popped.len() * 2)?;
+                for (score, member) in popped {
+                    ctx.reply_bulk_string(member)?;
+                    ctx.reply_double(score)?;
+                }
             }
             Ok(())
         }
@@ -1229,7 +1239,8 @@ fn parse_zalgebra_opts(
                 return Err(RedisError::syntax(b"syntax error"));
             }
             for (j, slot) in weights.iter_mut().enumerate() {
-                *slot = parse_score(ctx.arg(idx + 1 + j)?.as_bytes())?;
+                *slot = parse_score(ctx.arg(idx + 1 + j)?.as_bytes())
+                    .map_err(|_| RedisError::runtime(b"ERR weight value is not a float"))?;
             }
             idx += 1 + numkeys;
         } else if bytes.eq_ignore_ascii_case(b"AGGREGATE") {
@@ -1278,7 +1289,7 @@ fn zunion_inner(
     for (i, src) in sources.into_iter().enumerate() {
         let w = opts.weights[i];
         for (m, s) in src {
-            let weighted = s * w;
+            let weighted = if w == 0.0 { 0.0 } else { s * w };
             acc.entry(m)
                 .and_modify(|cur| *cur = combine_scores(*cur, weighted, opts.aggregate))
                 .or_insert(weighted);
@@ -1392,17 +1403,31 @@ fn store_zset(
 }
 
 /// Emit a zset-algebra result as a wire array, with or without scores.
+///
+/// In RESP3 with WITHSCORES, emits a nested `*N [ *2 [member, double] ... ]`
+/// structure matching real Redis/Valkey's RESP3 shape. In RESP2 (or without
+/// WITHSCORES), emits a flat alternating `*2N [m1, s1, m2, s2, ...]` array.
 fn emit_zalgebra_reply(
     ctx: &mut CommandContext,
     entries: Vec<(RedisString, f64)>,
     withscores: bool,
 ) -> RedisResult<()> {
-    let header = if withscores { entries.len() * 2 } else { entries.len() };
-    ctx.reply_array_header(header)?;
-    for (m, s) in entries {
-        ctx.reply_bulk_string(m)?;
-        if withscores {
-            ctx.reply_bulk(&format_score(s))?;
+    let resp3 = withscores && ctx.client_ref().resp_proto == 3;
+    if resp3 {
+        ctx.reply_array_header(entries.len())?;
+        for (m, s) in entries {
+            ctx.reply_array_header(2usize)?;
+            ctx.reply_bulk_string(m)?;
+            ctx.reply_double(s)?;
+        }
+    } else {
+        let header = if withscores { entries.len() * 2 } else { entries.len() };
+        ctx.reply_array_header(header)?;
+        for (m, s) in entries {
+            ctx.reply_bulk_string(m)?;
+            if withscores {
+                ctx.reply_bulk(&format_score(s))?;
+            }
         }
     }
     Ok(())
@@ -1421,7 +1446,9 @@ fn algebra_store_inner(
     let dst = ctx.arg_owned(1usize)?;
     let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        let cmd_lower = core::str::from_utf8(cmd).unwrap_or("cmd").to_ascii_lowercase();
+        let msg = format!("ERR at least 1 input key is needed for '{}' command", cmd_lower);
+        return Err(RedisError::runtime(msg.as_bytes()));
     }
     let numkeys = numkeys as usize;
     if argc < 3 + numkeys {
@@ -1454,7 +1481,9 @@ fn algebra_inner(
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        let cmd_lower = core::str::from_utf8(cmd).unwrap_or("cmd").to_ascii_lowercase();
+        let msg = format!("ERR at least 1 input key is needed for '{}' command", cmd_lower);
+        return Err(RedisError::runtime(msg.as_bytes()));
     }
     let numkeys = numkeys as usize;
     if argc < 2 + numkeys {
@@ -1495,7 +1524,7 @@ pub fn zdiffstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let dst = ctx.arg_owned(1usize)?;
     let numkeys = parse_strict_i64(ctx.arg(2)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zdiffstore' command"));
     }
     let numkeys = numkeys as usize;
     if argc != 3 + numkeys {
@@ -1526,7 +1555,7 @@ pub fn zdiff_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zdiff' command"));
     }
     let numkeys = numkeys as usize;
     if argc < 2 + numkeys {
@@ -1555,7 +1584,7 @@ pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        return Err(RedisError::runtime(b"ERR at least 1 input key is needed for 'zintercard' command"));
     }
     let numkeys = numkeys as usize;
     if argc < 2 + numkeys {
@@ -1568,7 +1597,8 @@ pub fn zintercard_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if !opt.as_bytes().eq_ignore_ascii_case(b"LIMIT") {
             return Err(RedisError::syntax(b"syntax error"));
         }
-        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())?;
+        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())
+            .map_err(|_| RedisError::runtime(b"ERR LIMIT value is not a valid integer"))?;
         if n < 0 {
             return Err(RedisError::runtime(b"ERR LIMIT can't be negative"));
         }
@@ -1810,9 +1840,10 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc < 4 {
         return Err(RedisError::wrong_number_of_args(b"zmpop"));
     }
-    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())?;
+    let numkeys = parse_strict_i64(ctx.arg(1)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR numkeys value is not an integer or out of range"))?;
     if numkeys <= 0 {
-        return Err(RedisError::runtime(b"ERR at least 1 input key is needed"));
+        return Err(RedisError::runtime(b"ERR numkeys should be greater than 0"));
     }
     let numkeys = numkeys as usize;
     if argc < 3 + numkeys {
@@ -1833,7 +1864,8 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if !opt.as_bytes().eq_ignore_ascii_case(b"COUNT") {
             return Err(RedisError::syntax(b"syntax error"));
         }
-        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())?;
+        let n = parse_strict_i64(ctx.arg(trailing_start + 1)?.as_bytes())
+            .map_err(|_| RedisError::runtime(b"ERR count value is not an integer or out of range"))?;
         if n < 1 {
             return Err(RedisError::runtime(b"ERR count should be greater than 0"));
         }
@@ -1887,7 +1919,7 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         for (s, m) in popped {
             ctx.reply_array_header(2usize)?;
             ctx.reply_bulk_string(m)?;
-            ctx.reply_bulk(&format_score(s))?;
+            ctx.reply_double(s)?;
         }
         return Ok(());
     }
@@ -2059,10 +2091,28 @@ fn zset_pop_many(
     out
 }
 
+/// Append an f64 score in the appropriate wire format for `resp_proto`.
+///
+/// RESP2: `$N\r\n<text>\r\n` (bulk string).
+/// RESP3: `,<text>\r\n` (double).
+fn append_score_frame(buf: &mut Vec<u8>, score: f64, resp_proto: i32) {
+    let text = redis_protocol::frame::format_double_text(score);
+    if resp_proto == 3 {
+        buf.push(b',');
+        buf.extend_from_slice(&text);
+        buf.extend_from_slice(b"\r\n");
+    } else {
+        buf.push(b'$');
+        buf.extend_from_slice(text.len().to_string().as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(&text);
+        buf.extend_from_slice(b"\r\n");
+    }
+}
+
 /// Encode a `*3 [key, member, score]` BZPOPMIN/BZPOPMAX reply.
-fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64) -> Vec<u8> {
-    let score_bytes = format_score(score);
-    let mut buf = Vec::with_capacity(64 + key.len() + member.len() + score_bytes.len());
+fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64, resp_proto: i32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(64 + key.len() + member.len());
     buf.extend_from_slice(b"*3\r\n$");
     buf.extend_from_slice(key.len().to_string().as_bytes());
     buf.extend_from_slice(b"\r\n");
@@ -2071,16 +2121,13 @@ fn encode_bzpop_reply(key: &RedisString, member: &RedisString, score: f64) -> Ve
     buf.extend_from_slice(member.len().to_string().as_bytes());
     buf.extend_from_slice(b"\r\n");
     buf.extend_from_slice(member.as_bytes());
-    buf.extend_from_slice(b"\r\n$");
-    buf.extend_from_slice(score_bytes.len().to_string().as_bytes());
     buf.extend_from_slice(b"\r\n");
-    buf.extend_from_slice(&score_bytes);
-    buf.extend_from_slice(b"\r\n");
+    append_score_frame(&mut buf, score, resp_proto);
     buf
 }
 
 /// Encode a `*2 [key, *N [[m1,s1],[m2,s2],...]]` BZMPOP wake reply.
-fn encode_bzmpop_reply(key: &RedisString, pairs: &[(RedisString, f64)]) -> Vec<u8> {
+fn encode_bzmpop_reply(key: &RedisString, pairs: &[(RedisString, f64)], resp_proto: i32) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::with_capacity(64);
     buf.extend_from_slice(b"*2\r\n$");
     buf.extend_from_slice(key.len().to_string().as_bytes());
@@ -2090,16 +2137,12 @@ fn encode_bzmpop_reply(key: &RedisString, pairs: &[(RedisString, f64)]) -> Vec<u
     buf.extend_from_slice(pairs.len().to_string().as_bytes());
     buf.extend_from_slice(b"\r\n");
     for (member, score) in pairs {
-        let score_bytes = format_score(*score);
         buf.extend_from_slice(b"*2\r\n$");
         buf.extend_from_slice(member.len().to_string().as_bytes());
         buf.extend_from_slice(b"\r\n");
         buf.extend_from_slice(member.as_bytes());
-        buf.extend_from_slice(b"\r\n$");
-        buf.extend_from_slice(score_bytes.len().to_string().as_bytes());
         buf.extend_from_slice(b"\r\n");
-        buf.extend_from_slice(&score_bytes);
-        buf.extend_from_slice(b"\r\n");
+        append_score_frame(&mut buf, *score, resp_proto);
     }
     buf
 }
@@ -2124,7 +2167,7 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
             Some(p) => p,
             None => return,
         };
-        let reply = encode_bzpop_reply(key, &pair.0, pair.1);
+        let reply = encode_bzpop_reply(key, &pair.0, pair.1, waiter.resp_proto);
         if waiter.sender.send(reply).is_err() {
             match db.lookup_key_write(key) {
                 Some(obj) => {
@@ -2146,7 +2189,7 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
         if pairs.is_empty() {
             return;
         }
-        let reply = encode_bzmpop_reply(key, &pairs);
+        let reply = encode_bzmpop_reply(key, &pairs, waiter.resp_proto);
         if waiter.sender.send(reply).is_err() {
             match db.lookup_key_write(key) {
                 Some(obj) => {
@@ -2263,6 +2306,7 @@ fn park_zset_blocked_client(
         keys: keys.clone(),
         action: BlockedAction::ZSetPop { reverse, count },
         deadline_ms: deadline_from_timeout_secs(timeout_secs),
+        resp_proto: ctx.client_ref().resp_proto,
     };
     {
         let mut idx = match blocked_keys_index().lock() {
@@ -2318,7 +2362,7 @@ fn bzpop_generic(ctx: &mut CommandContext, reverse: bool) -> RedisResult<()> {
         ctx.reply_array_header(3usize)?;
         ctx.reply_bulk_string(key.clone())?;
         ctx.reply_bulk_string(pair.0)?;
-        return ctx.reply_bulk(&format_score(pair.1));
+        return ctx.reply_double(pair.1);
     }
     park_zset_blocked_client(ctx, keys, reverse, 0, timeout_secs)
 }
@@ -2417,7 +2461,7 @@ pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         for (member, score) in pairs {
             ctx.reply_array_header(2usize)?;
             ctx.reply_bulk_string(member)?;
-            ctx.reply_bulk(&format_score(score))?;
+            ctx.reply_double(score)?;
         }
         return Ok(());
     }
