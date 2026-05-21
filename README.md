@@ -114,8 +114,9 @@ pipeline 100, 64-byte payload):
 | LRANGE_300 (300-elem range)    | 36.7k req/s     | 52.4k req/s     | **143%** ⚡ |
 
 Per-op latency p99 is mostly competitive (within 2× of upstream) even
-when throughput is not — the gap on simple ops is dominated by per-command
-mutex acquisition, which amortizes away on commands that do real work.
+when throughput is not. The gap on simple ops is mostly the connection-serving
+path and shared-state ownership model; the cost amortizes away on commands
+that do real work.
 
 A newer profile-matrix benchmark makes the architecture cliff clearer and gives
 the harness a performance objective it can optimize. The first tuning passes
@@ -135,7 +136,14 @@ The optimization log moved deep-pipeline GET from about 221k req/s to about
 957k req/s. See [`docs/BENCHMARKS.md`][bench] for full methodology, each
 iteration's table, and the optimization roadmap.
 
+The remaining throughput gap is architectural. The current server is still a
+blocking thread-per-connection runtime sharing DB state through
+`Arc<Mutex<RedisDb>>`; upstream Valkey's tiny-command pipeline advantage comes
+from event-loop ownership and batching. The proposed next performance milestone
+is documented in [`docs/RUNTIME_OWNERSHIP_PLAN.md`][runtime].
+
 [bench]: docs/BENCHMARKS.md
+[runtime]: docs/RUNTIME_OWNERSHIP_PLAN.md
 
 ## Supported surface
 

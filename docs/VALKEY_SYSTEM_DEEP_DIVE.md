@@ -743,7 +743,10 @@ Classify failures before dispatching agents:
 
 8. Decide the production runtime direction before making performance claims.
    Thread-per-connection is useful for progress but not obviously the final
-   architecture.
+   architecture. The post-benchmark decision is captured in
+   [`RUNTIME_OWNERSHIP_PLAN.md`](RUNTIME_OWNERSHIP_PLAN.md): the remaining
+   simple-command gap is a runtime-owner/event-loop problem, not a small
+   per-command Rust hot-path bug.
 
 ## Product-Oriented Reading
 

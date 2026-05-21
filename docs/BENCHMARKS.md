@@ -145,6 +145,27 @@ event-loop batching still wins the tiny-command/deep-pipeline case. That is the
 evidence we would want before considering the larger event-loop or shard-owned
 DB architecture.
 
+### Runtime ownership decision
+
+We did not land a same-day "iteration 6" runtime rewrite. That is intentional.
+After iteration 5, the remaining gap is no longer a small hot-path cleanup; it
+is the server ownership model. The current binary still accepts connections
+with blocking std threads and shares each logical DB through
+`Arc<Mutex<RedisDb>>`. Upstream Valkey executes normal commands from a tight
+event loop.
+
+A quick patch here would likely be one of two bad things:
+
+- a command-specific fast path for benchmark commands, bypassing the normal
+  Redis semantics; or
+- a half-runtime that improves one benchmark mode while breaking pub/sub,
+  blocking commands, replication, or transactions.
+
+The production-shaped version is documented in
+[`docs/RUNTIME_OWNERSHIP_PLAN.md`](RUNTIME_OWNERSHIP_PLAN.md). The short
+version: if valkey-rs continues, the next real performance milestone should be
+a runtime-owner packet family, not another micro-optimization.
+
 ## Reading this honestly
 
 **Where we're still slow (most simple commands, ~18-37% of upstream throughput under pipeline):**
@@ -175,16 +196,22 @@ event from GC pressure or a lock-contention spike).
 
 Roadmap to closer-to-parity throughput, in rough effort order:
 
-1. **Shard the lock per key range** (or per-shard hash) — the easiest
-   2-4× win for simple ops, since most ops touch a single key.
-2. **`io_uring` on Linux** — replace blocking-thread I/O with the kernel
-   submission queue. Big win on pipelined throughput.
-3. **Read replicas of the keyspace via RwLock or DashMap** — `GET`-heavy
-   workloads currently pay write-lock cost.
-4. **Per-thread connection affinity** — pin a connection to a thread
-   that owns a slice of the keyspace. The Garnet approach.
-5. **Profile-guided optimization** — flamegraphs on the GET hot path,
-   evaluate `jemalloc`/`mimalloc`.
+1. **Runtime ownership rewrite** — move normal command execution to a
+   runtime owner/event loop so clients and DB state are not coordinated through
+   one `Arc<Mutex<RedisDb>>` per DB. This is the real #5, and it needs its own
+   packet graph.
+2. **Command metadata cleanup** — avoid repeated generated-command scans in
+   dispatch and make read/write/denyoom/noauth flags available from the
+   dispatch entry. This transfers into any runtime model.
+3. **Profile-guided optimization** — flamegraphs on the GET hot path,
+   evaluate `jemalloc`/`mimalloc`, and keep updating the profile matrix after
+   each patch.
+4. **Connection scalability** — after runtime ownership is chosen, evaluate
+   `mio`, Tokio, or `io_uring` for socket readiness and write batching.
+5. **Sharding** — only after the faithful single-owner semantics are stable.
+   Sharding can help independent-key throughput, but Redis transactions,
+   scripts, blocking commands, and replication ordering make it a product
+   decision rather than a small optimization.
 
 These are post-alpha work; the perf gap is acceptable for the use cases
 we're targeting now (single-node Valkey-compatible cache where wire
