@@ -17,9 +17,14 @@ The no-regret optimizations already landed:
 - batch client-info snapshots, reuse argv storage, use monotonic timing, and
   hold the DB0 lock across safe read batches;
 - cache generated command metadata in dispatch and avoid argv snapshots unless
-  slowlog, AOF, or replication need them.
+  slowlog, AOF, or replication need them;
+- skip standalone write-propagation work when AOF is off, no replicas are
+  connected, and no replication backlog is active;
+- fold handler and metadata lookup into one runtime dispatch table.
 
-Those moved deep-pipeline GET from roughly 221k req/s to roughly 2.06M req/s.
+Those moved deep-pipeline GET from roughly 221k req/s to roughly 2.13M req/s,
+and moved deep-pipeline SET from roughly 190k req/s in the alpha baseline to
+roughly 1.64M req/s.
 That is a real improvement, and it also exposes the remaining architecture
 gap: valkey-rs still has blocking per-client threads sharing
 `Arc<Mutex<RedisDb>>`, while upstream Valkey drains many sockets and executes

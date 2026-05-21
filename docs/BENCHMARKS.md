@@ -94,30 +94,30 @@ like upstream Valkey." The profile matrix runs the same binary at pipeline 1,
 16, and 100.
 
 **Hardware:** Apple M3 Max, macOS Darwin 24.3.0 (arm64)
-**valkey-rs revision:** `e8d347e`, after the TCP-loop and dispatch hot-path
-optimizations described below
+**valkey-rs revision:** `b21a533`, after the TCP-loop, dispatch hot-path, and
+standalone write-propagation optimizations described below
 
 | Profile | Command | upstream Valkey (req/s) | valkey-rs (req/s) | ratio | upstream p99 (ms) | valkey-rs p99 (ms) |
 |---|---|---:|---:|---:|---:|---:|
-| core-p1 | PING_MBULK | 163,934 | 139,276 | 0.85× | 0.599 | 0.247 |
-| core-p1 | SET | 170,068 | 138,122 | 0.81× | 0.399 | 0.319 |
-| core-p1 | GET | 187,970 | 137,741 | 0.73× | 0.335 | 0.279 |
-| core-p1 | INCR | 159,744 | 133,333 | 0.83× | 0.375 | 0.287 |
-| core-p16 | PING_MBULK | 2,352,941 | 1,785,714 | 0.76× | 0.503 | 1.279 |
-| core-p16 | SET | 1,680,672 | 816,326 | 0.49× | 0.655 | 5.823 |
-| core-p16 | GET | 2,083,333 | 1,298,701 | 0.62× | 0.583 | 3.007 |
-| core-p16 | INCR | 2,150,538 | 892,857 | 0.42× | 0.551 | 3.391 |
-| core-p100 | PING_MBULK | 5,128,205 | 2,702,703 | 0.53× | 1.127 | 7.231 |
-| core-p100 | SET | 2,500,000 | 1,075,269 | 0.43× | 2.271 | 5.055 |
-| core-p100 | GET | 3,278,689 | 2,061,856 | 0.63× | 1.807 | 2.591 |
-| core-p100 | INCR | 3,225,806 | 1,257,862 | 0.39× | 1.943 | 5.439 |
-| range-heavy-p16 | LRANGE_100 | 152,207 | 181,159 | **1.19×** | 6.495 | 10.111 |
-| range-heavy-p16 | LRANGE_300 | 38,551 | 64,935 | **1.68×** | 13.503 | 22.783 |
+| core-p1 | PING_MBULK | 188,679 | 147,493 | 0.78× | 0.671 | 0.311 |
+| core-p1 | SET | 200,803 | 156,250 | 0.78× | 0.383 | 0.391 |
+| core-p1 | GET | 201,613 | 156,250 | 0.77× | 0.343 | 0.239 |
+| core-p1 | INCR | 204,082 | 153,374 | 0.75× | 0.367 | 0.247 |
+| core-p16 | PING_MBULK | 2,816,901 | 1,724,138 | 0.61× | 0.359 | 1.647 |
+| core-p16 | SET | 1,724,138 | 1,117,318 | 0.65× | 0.527 | 2.111 |
+| core-p16 | GET | 2,127,660 | 1,315,790 | 0.62× | 0.455 | 2.895 |
+| core-p16 | INCR | 2,325,581 | 1,176,471 | 0.51× | 0.447 | 2.079 |
+| core-p100 | PING_MBULK | 5,128,205 | 2,777,778 | 0.54× | 1.095 | 4.015 |
+| core-p100 | SET | 2,469,136 | 1,639,344 | 0.66× | 2.239 | 3.135 |
+| core-p100 | GET | 3,278,689 | 2,127,660 | 0.65× | 1.759 | 3.263 |
+| core-p100 | INCR | 3,448,276 | 1,754,386 | 0.51× | 1.623 | 2.959 |
+| range-heavy-p16 | LRANGE_100 | 177,936 | 190,114 | **1.07×** | 5.311 | 8.383 |
+| range-heavy-p16 | LRANGE_300 | 41,051 | 63,211 | **1.54×** | 13.119 | 23.935 |
 
 The profile-matrix summary from this run:
 
 ```text
-median 0.63x, min 0.39x, max 1.68x; GET p1 0.73x; GET p100 0.63x
+median 0.66x, min 0.51x, max 1.54x; GET p1 0.77x; GET p100 0.65x
 ```
 
 The read I would trust: this is not primarily "Rust data structures cannot do
@@ -161,6 +161,13 @@ sample. The harness gate for that packet should be strict: oracle smoke, RDB/AOF
 tests if touched, replication tests if backlog semantics change, and this same
 profiled hotspot runner.
 
+That packet landed in `b21a533`: the dispatcher now skips replication stream
+encoding when the server is a standalone primary with no active backlog, no
+replicas, and no replication BGSAVE job, matching upstream's "do not propagate
+when there is nowhere to propagate" shape. The same patch also folds handler
+and metadata lookup into one runtime dispatch table, removing the second
+per-command binary search.
+
 ### Harness-driven optimization log
 
 The profile matrix turned the vague "simple commands are slow" complaint into a
@@ -177,10 +184,11 @@ same profile matrix and kept the table current after each pass.
 | 4 | Avoid duplicate command-name lowercase | median 0.17x, min 0.08x, max 1.24x | 498,753 req/s (0.15x) | 447,427 req/s (0.09x) | 47,984 req/s (1.24x) |
 | 5 | Architecture-first hot path packet: batch client-info snapshots, reuse argv storage, `Instant` timing, batch DB0 lock | median 0.33x, min 0.18x, max 1.62x | 956,938 req/s (0.28x) | 909,091 req/s (0.18x) | 66,490 req/s (1.62x) |
 | 6 | Dispatch metadata cache + lazy argv snapshot for slowlog/AOF/replication | median 0.63x, min 0.39x, max 1.68x | 2,061,856 req/s (0.63x) | 2,702,703 req/s (0.53x) | 64,935 req/s (1.68x) |
+| 7 | Standalone no-replica propagation skip + unified runtime dispatch table | median 0.66x, min 0.51x, max 1.54x | 2,127,660 req/s (0.65x) | 2,777,778 req/s (0.54x) | 63,211 req/s (1.54x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
-221k req/s to about 2.06M req/s. The exact LRANGE number bounces because it is
+221k req/s to about 2.13M req/s. The exact LRANGE number bounces because it is
 already doing enough response work that the TCP-loop patches are not the main
 determinant.
 
@@ -232,10 +240,10 @@ a runtime-owner packet family, not another micro-optimization.
 
 ## Reading this honestly
 
-**Where we're still slower (simple commands, ~39-76% of upstream throughput under pipeline):**
+**Where we're still slower (simple commands, ~51-78% of upstream throughput under pipeline):**
 The profile matrix refines the diagnosis. The deep-pipeline gap is real, but
-pipeline-1 simple ops are roughly 0.73-0.85x upstream and deep-pipeline GET is
-now about 0.63x. That makes "per-command Rust overhead" much less convincing
+pipeline-1 simple ops are roughly 0.75-0.78x upstream and deep-pipeline GET is
+now about 0.65x. That makes "per-command Rust overhead" much less convincing
 as the primary explanation than it was at baseline. The remaining gap is
 mostly write-command bookkeeping, tail latency under contention, and the fact
 that upstream Valkey's single event loop still drains and writes pipelined
@@ -266,10 +274,11 @@ Roadmap to closer-to-parity throughput, in rough effort order:
    runtime owner/event loop so clients and DB state are not coordinated through
    one `Arc<Mutex<RedisDb>>` per DB. This is the real #5, and it needs its own
    packet graph.
-2. **Handler lookup and write-propagation fast paths** — command metadata is
-   now cached, but handler lookup still linearly scans `HANDLERS`, and write
-   commands still pay AOF/replication-path checks. These are smaller than the
-   runtime rewrite and should be gated by the same oracle + profile matrix.
+2. **Hasher/allocation pass on command execution** — after `b21a533`, handler
+   metadata lookup and idle replication propagation are no longer the obvious
+   low-hanging fruit. The next small packet should use sampled stacks to reduce
+   allocator churn and default-hasher work without bypassing the normal command
+   path.
 3. **Profile-guided optimization** — flamegraphs on the GET/SET/INCR hot path,
    evaluate `jemalloc`/`mimalloc`, and keep updating the profile matrix after
    each patch.

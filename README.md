@@ -124,18 +124,20 @@ focused on the plain-TCP loop and then on the per-command hot path: batch
 replies, drain the query buffer once per read batch, direct-write ordinary
 request/reply traffic, batch client-info snapshots, reuse argv storage, use
 monotonic timing, hold the DB0 lock across safe read batches, cache generated
-command metadata, and avoid argv snapshots unless slowlog/AOF/replication need
-them.
+command metadata, avoid argv snapshots unless slowlog/AOF/replication need
+them, skip idle standalone replication propagation, and fold handler/metadata
+lookup into one runtime dispatch table.
 
 | Profile | Command | upstream Valkey | valkey-rs | ratio |
 |---|---|---:|---:|---:|
-| 50 clients, pipeline 1 | GET | 188k req/s | 138k req/s | 0.73× |
-| 50 clients, pipeline 16 | GET | 2.08M req/s | 1.30M req/s | 0.62× |
-| 50 clients, pipeline 100 | GET | 3.28M req/s | 2.06M req/s | 0.63× |
-| 50 clients, pipeline 16 | LRANGE_300 | 38.6k req/s | 64.9k req/s | **1.68×** |
+| 50 clients, pipeline 1 | GET | 202k req/s | 156k req/s | 0.77× |
+| 50 clients, pipeline 16 | GET | 2.13M req/s | 1.32M req/s | 0.62× |
+| 50 clients, pipeline 100 | GET | 3.28M req/s | 2.13M req/s | 0.65× |
+| 50 clients, pipeline 100 | SET | 2.47M req/s | 1.64M req/s | 0.66× |
+| 50 clients, pipeline 16 | LRANGE_300 | 41.1k req/s | 63.2k req/s | **1.54×** |
 
 The optimization log moved deep-pipeline GET from about 221k req/s to about
-2.06M req/s. See [`docs/BENCHMARKS.md`][bench] for full methodology, each
+2.13M req/s. See [`docs/BENCHMARKS.md`][bench] for full methodology, each
 iteration's table, and the optimization roadmap.
 
 The remaining throughput gap is architectural. The current server is still a
