@@ -12,6 +12,8 @@
 //!    a Rust function. Commands with no handler yet are intentionally absent;
 //!    callers receive an `unknown command` error.
 
+use std::cmp::Ordering;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use redis_core::acl::{category as acl_category, global_acl_state};
@@ -32,6 +34,22 @@ pub struct DispatchEntry {
     /// Handler function pointer.
     pub handler: Handler,
 }
+
+/// Command metadata used by the hot dispatch path.
+///
+/// The generated `COMMANDS` registry is still the source of truth. We compress
+/// the handful of fields dispatch needs into this small value so each command
+/// does one generated-registry scan instead of separate scans for WRITE,
+/// NO_AUTH, DENYOOM, and ACL categories.
+#[derive(Clone, Copy, Debug, Default)]
+struct CommandMetadata {
+    write: bool,
+    no_auth: bool,
+    denyoom: bool,
+    acl_categories: u64,
+}
+
+static COMMAND_METADATA_TABLE: OnceLock<Vec<(&'static [u8], CommandMetadata)>> = OnceLock::new();
 
 /// Look up the handler for `name` (case-insensitive ASCII).
 ///
@@ -76,35 +94,6 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     dispatch_command_name(ctx, name.as_bytes())
 }
 
-/// Returns `true` when the named command carries the `WRITE` flag in the
-/// generated command registry.
-fn command_has_write_flag(name: &[u8]) -> bool {
-    COMMANDS.iter().any(|spec| {
-        ascii_eq_ignore_case(spec.name.as_bytes(), name)
-            && spec.flags.contains(&CommandFlag::WRITE)
-    })
-}
-
-/// Returns `true` when the named command carries the `NO_AUTH` flag in the
-/// generated command registry, meaning it must be executable before the
-/// client has authenticated.
-fn command_has_no_auth_flag(name: &[u8]) -> bool {
-    COMMANDS.iter().any(|spec| {
-        ascii_eq_ignore_case(spec.name.as_bytes(), name)
-            && spec.flags.contains(&CommandFlag::NO_AUTH)
-    })
-}
-
-/// Returns `true` when the named command carries the `DENYOOM` flag in the
-/// generated command registry, meaning it must be rejected when the server
-/// is over its `maxmemory` budget and eviction cannot recover.
-fn command_has_denyoom_flag(name: &[u8]) -> bool {
-    COMMANDS.iter().any(|spec| {
-        ascii_eq_ignore_case(spec.name.as_bytes(), name)
-            && spec.flags.contains(&CommandFlag::DENYOOM)
-    })
-}
-
 /// Dispatch using an externally-supplied command name.
 ///
 /// Skips the MULTI-queueing pre-check. Used by `EXEC` to drain each queued
@@ -115,99 +104,169 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         Some(e) => e,
         None => return Err(unknown_command_error(name)),
     };
+    let metadata = command_metadata(name);
 
-    if !command_has_no_auth_flag(name) {
-        if let Some(noauth_reply) = enforce_acl_gate(ctx, name) {
+    if !metadata.no_auth {
+        if let Some(noauth_reply) = enforce_acl_gate(ctx, name, metadata.acl_categories) {
             ctx.client_mut().reply_buf.extend_from_slice(&noauth_reply);
             return Ok(());
         }
     }
 
-    if let Some(reply) = enforce_replica_readonly_gate(ctx, name) {
+    if let Some(reply) = enforce_replica_readonly_gate(ctx, name, metadata.write) {
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
         return Ok(());
     }
 
-    if let Some(reply) = enforce_maxmemory_gate(ctx, name) {
+    if let Some(reply) = enforce_maxmemory_gate(ctx, metadata.denyoom) {
         ctx.client_mut().reply_buf.extend_from_slice(&reply);
         return Ok(());
     }
-
-    let argv_snapshot: Vec<RedisString> = (0..ctx.arg_count())
-        .filter_map(|i| ctx.client_ref().arg(i).cloned())
-        .collect();
-    let client_id = ctx.client_ref().id();
-    let client_name = ctx.client_ref().name.clone();
 
     let start = Instant::now();
     let result = (entry.handler)(ctx);
     let elapsed_micros = start.elapsed().as_micros() as u64;
 
-    crate::slowlog_cmd::record_slowlog_entry(
-        &argv_snapshot,
-        elapsed_micros,
-        client_id,
-        client_name,
-    );
+    let should_record_slowlog = {
+        let cfg = ctx.live_config();
+        let threshold = cfg.slowlog_threshold_micros();
+        threshold >= 0 && cfg.slowlog_max_len() > 0 && elapsed_micros >= threshold as u64
+    };
 
-    if result.is_ok() && command_has_write_flag(name) {
-        if let Some(aof) = crate::aof::aof_writer() {
-            if let Err(e) = aof.append(&argv_snapshot) {
+    let aof = if result.is_ok() && metadata.write {
+        crate::aof::aof_writer()
+    } else {
+        None
+    };
+    let should_propagate = result.is_ok() && metadata.write && !ctx.client_ref().is_replica;
+
+    let mut argv_snapshot: Option<Vec<RedisString>> = None;
+    if should_record_slowlog || aof.is_some() || should_propagate {
+        argv_snapshot = Some(snapshot_argv(ctx));
+    }
+
+    if should_record_slowlog {
+        if let Some(argv) = argv_snapshot.as_ref() {
+            crate::slowlog_cmd::record_slowlog_entry(
+                argv,
+                elapsed_micros,
+                ctx.client_ref().id(),
+                ctx.client_ref().name.clone(),
+            );
+        }
+    }
+
+    if let Some(aof) = aof {
+        if let Some(argv) = argv_snapshot.as_ref() {
+            if let Err(e) = aof.append(argv) {
                 eprintln!("redis-server: AOF append failed: {}", e);
             }
         }
-        if !ctx.client_ref().is_replica {
-            propagate_write_to_replicas(&argv_snapshot);
+    }
+    if should_propagate {
+        if let Some(argv) = argv_snapshot.as_ref() {
+            propagate_write_to_replicas(argv);
         }
     }
 
     result
 }
 
-/// Return the combined ACL category bitmask for a named command.
+fn snapshot_argv(ctx: &CommandContext<'_>) -> Vec<RedisString> {
+    (0..ctx.arg_count())
+        .filter_map(|i| ctx.client_ref().arg(i).cloned())
+        .collect()
+}
+
+/// Return the combined hot-path metadata for a named command.
 ///
-/// Uses the generated `COMMANDS` registry which records the `acl_categories`
-/// from Valkey's command JSON definitions. Multiple entries can share the same
-/// name (sub-command inheritance); the bitmask is OR-ed across all of them.
-fn command_acl_categories(name: &[u8]) -> u64 {
-    let mut bits: u64 = 0;
-    for spec in COMMANDS.iter() {
-        if ascii_eq_ignore_case(spec.name.as_bytes(), name) {
-            for &cat in spec.acl_categories {
-                bits |= match cat {
-                    crate::generated::AclCategory::KEYSPACE    => acl_category::KEYSPACE,
-                    crate::generated::AclCategory::READ        => acl_category::READ,
-                    crate::generated::AclCategory::WRITE       => acl_category::WRITE,
-                    crate::generated::AclCategory::SET         => acl_category::SET,
-                    crate::generated::AclCategory::SORTEDSET   => acl_category::SORTEDSET,
-                    crate::generated::AclCategory::LIST        => acl_category::LIST,
-                    crate::generated::AclCategory::HASH        => acl_category::HASH,
-                    crate::generated::AclCategory::STRING      => acl_category::STRING,
-                    crate::generated::AclCategory::BITMAP      => acl_category::BITMAP,
-                    crate::generated::AclCategory::HYPERLOGLOG => acl_category::HYPERLOGLOG,
-                    crate::generated::AclCategory::GEO         => acl_category::GEO,
-                    crate::generated::AclCategory::STREAM      => acl_category::STREAM,
-                    crate::generated::AclCategory::PUBSUB      => acl_category::PUBSUB,
-                    crate::generated::AclCategory::ADMIN       => acl_category::ADMIN,
-                    crate::generated::AclCategory::FAST        => acl_category::FAST,
-                    crate::generated::AclCategory::SLOW        => acl_category::SLOW,
-                    crate::generated::AclCategory::BLOCKING    => acl_category::BLOCKING,
-                    crate::generated::AclCategory::DANGEROUS   => acl_category::DANGEROUS,
-                    crate::generated::AclCategory::CONNECTION  => acl_category::CONNECTION,
-                    crate::generated::AclCategory::TRANSACTION => acl_category::TRANSACTION,
-                    crate::generated::AclCategory::SCRIPTING   => acl_category::SCRIPTING,
-                };
+/// Multiple generated specs can share the same command name for subcommand
+/// inheritance. Dispatch keeps the same OR-style behavior the previous helper
+/// functions used, but computes all fields in one pass.
+fn command_metadata(name: &[u8]) -> CommandMetadata {
+    let table = command_metadata_table();
+    table
+        .binary_search_by(|(entry_name, _)| ascii_casecmp(entry_name, name))
+        .map(|idx| table[idx].1)
+        .unwrap_or_default()
+}
+
+fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
+    COMMAND_METADATA_TABLE.get_or_init(|| {
+        let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
+        for spec in COMMANDS.iter() {
+            match rows
+                .iter_mut()
+                .find(|(name, _)| ascii_eq_ignore_case(name, spec.name.as_bytes()))
+            {
+                Some((_, metadata)) => metadata.include(spec.flags, spec.acl_categories),
+                None => {
+                    let mut metadata = CommandMetadata::default();
+                    metadata.include(spec.flags, spec.acl_categories);
+                    rows.push((spec.name.as_bytes(), metadata));
+                }
             }
         }
+        rows.sort_by(|(left, _), (right, _)| ascii_casecmp(left, right));
+        rows
+    })
+}
+
+impl CommandMetadata {
+    fn include(
+        &mut self,
+        flags: &[CommandFlag],
+        acl_categories: &[crate::generated::AclCategory],
+    ) {
+        for flag in flags {
+            match flag {
+                CommandFlag::WRITE => self.write = true,
+                CommandFlag::NO_AUTH => self.no_auth = true,
+                CommandFlag::DENYOOM => self.denyoom = true,
+                _ => {}
+            }
+        }
+        for &cat in acl_categories {
+            self.acl_categories |= acl_category_bits(cat);
+        }
     }
-    bits
+}
+
+fn acl_category_bits(cat: crate::generated::AclCategory) -> u64 {
+    match cat {
+        crate::generated::AclCategory::KEYSPACE    => acl_category::KEYSPACE,
+        crate::generated::AclCategory::READ        => acl_category::READ,
+        crate::generated::AclCategory::WRITE       => acl_category::WRITE,
+        crate::generated::AclCategory::SET         => acl_category::SET,
+        crate::generated::AclCategory::SORTEDSET   => acl_category::SORTEDSET,
+        crate::generated::AclCategory::LIST        => acl_category::LIST,
+        crate::generated::AclCategory::HASH        => acl_category::HASH,
+        crate::generated::AclCategory::STRING      => acl_category::STRING,
+        crate::generated::AclCategory::BITMAP      => acl_category::BITMAP,
+        crate::generated::AclCategory::HYPERLOGLOG => acl_category::HYPERLOGLOG,
+        crate::generated::AclCategory::GEO         => acl_category::GEO,
+        crate::generated::AclCategory::STREAM      => acl_category::STREAM,
+        crate::generated::AclCategory::PUBSUB      => acl_category::PUBSUB,
+        crate::generated::AclCategory::ADMIN       => acl_category::ADMIN,
+        crate::generated::AclCategory::FAST        => acl_category::FAST,
+        crate::generated::AclCategory::SLOW        => acl_category::SLOW,
+        crate::generated::AclCategory::BLOCKING    => acl_category::BLOCKING,
+        crate::generated::AclCategory::DANGEROUS   => acl_category::DANGEROUS,
+        crate::generated::AclCategory::CONNECTION  => acl_category::CONNECTION,
+        crate::generated::AclCategory::TRANSACTION => acl_category::TRANSACTION,
+        crate::generated::AclCategory::SCRIPTING   => acl_category::SCRIPTING,
+    }
 }
 
 /// ACL gate: check that the current client is authenticated and allowed to run `name`.
 ///
 /// Returns `Some(reply_bytes)` to short-circuit dispatch with the encoded error.
 /// Returns `None` when the command should proceed.
-fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+fn enforce_acl_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    cmd_categories: u64,
+) -> Option<Vec<u8>> {
     let default_name = RedisString::from_bytes(b"default");
     let user_name = ctx
         .client_ref()
@@ -240,7 +299,6 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let cmd_categories = command_acl_categories(name);
     if user.can_execute_command(name, cmd_categories) {
         return None;
     }
@@ -283,7 +341,11 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
 /// (i.e. normal user connections).
 ///
 /// `REPLICAOF` itself is always allowed so the operator can promote the server.
-fn enforce_replica_readonly_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+fn enforce_replica_readonly_gate(
+    ctx: &CommandContext<'_>,
+    name: &[u8],
+    is_write_command: bool,
+) -> Option<Vec<u8>> {
     use redis_core::replication::{global_replication_state, repl_state_code};
     let repl = global_replication_state();
     if repl.repl_state.load(std::sync::atomic::Ordering::Relaxed) != repl_state_code::REPLICA_ONLINE
@@ -296,7 +358,7 @@ fn enforce_replica_readonly_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Optio
     if ascii_eq_ignore_case(name, b"REPLICAOF") || ascii_eq_ignore_case(name, b"SLAVEOF") {
         return None;
     }
-    if !command_has_write_flag(name) {
+    if !is_write_command {
         return None;
     }
     Some(b"-READONLY You can't write against a read only replica.\r\n".to_vec())
@@ -309,7 +371,7 @@ fn enforce_replica_readonly_gate(ctx: &CommandContext<'_>, name: &[u8]) -> Optio
 /// either cannot or refuses to recover memory. Returns `None` when dispatch
 /// should proceed (either we were under the limit, or eviction trimmed the
 /// keyspace back under it, or the command is exempt from DENYOOM).
-fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<Vec<u8>> {
+fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, is_denyoom_command: bool) -> Option<Vec<u8>> {
     let maxmem = ctx.live_config().maxmemory();
     if maxmem == 0 {
         return None;
@@ -318,7 +380,7 @@ fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, name: &[u8]) -> Option<V
     if used <= maxmem {
         return None;
     }
-    if !command_has_denyoom_flag(name) {
+    if !is_denyoom_command {
         return None;
     }
     let policy = ctx.live_config().maxmemory_policy();
@@ -385,6 +447,16 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b.iter()).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+}
+
+fn ascii_casecmp(a: &[u8], b: &[u8]) -> Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        match ascii_lower(*x).cmp(&ascii_lower(*y)) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 fn ascii_lower(b: u8) -> u8 {
@@ -704,6 +776,36 @@ mod tests {
     #[test]
     fn unknown_command_is_none() {
         assert!(lookup_command(b"NOTACOMMAND").is_none());
+    }
+
+    #[test]
+    fn generated_metadata_table_is_sorted_for_binary_search() {
+        let table = command_metadata_table();
+        for pair in table.windows(2) {
+            assert!(
+                ascii_casecmp(pair[0].0, pair[1].0)
+                    != Ordering::Greater,
+                "{} should sort before {}",
+                std::str::from_utf8(pair[0].0).unwrap_or("<bytes>"),
+                std::str::from_utf8(pair[1].0).unwrap_or("<bytes>")
+            );
+        }
+    }
+
+    #[test]
+    fn command_metadata_extracts_hot_path_flags() {
+        let set = command_metadata(b"set");
+        assert!(set.write);
+        assert!(set.denyoom);
+        assert!(set.acl_categories & acl_category::WRITE != 0);
+
+        let get = command_metadata(b"GET");
+        assert!(!get.write);
+        assert!(get.acl_categories & acl_category::READ != 0);
+
+        let auth = command_metadata(b"AUTH");
+        assert!(auth.no_auth);
+        assert!(auth.acl_categories & acl_category::CONNECTION != 0);
     }
 
     #[test]
