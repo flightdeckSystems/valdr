@@ -1,0 +1,200 @@
+[class: byte_exact]
+[description: Runtime-owner canary corpus — exercises the per-client/per-DB semantics most likely to regress when normal command execution moves from per-client threads + Arc<Mutex<RedisDb>> to a single RuntimeOwner (see harness/architecture/decisions/runtime-ownership.md). Covers transaction queuing and ordered EXEC results, MULTI error semantics that must not abort the batch, WATCH/UNWATCH/EXEC/DISCARD lifecycle, lazy expiration on direct access and inside EXEC, SELECTed-DB persistence across commands and across MULTI, pub/sub introspection non-interference with normal commands, non-hanging blocking-pop variants (data already present), WAIT with zero replicas required, and CLIENT name lifecycle including RESET. The runner spawns one connection per script, so cross-client cases (WATCH invalidation by another client, real pub/sub delivery, BLPOP wakeup from a different client) are NOT expressible here; those belong in a separate multi-connection runner. Every line below must remain byte-for-byte compatible with upstream Valkey at the pinned commit.]
+[suite: smoke,runtime-owner]
+
+# ── A. Reset state ──────────────────────────────────────────────────────────
+SELECT 0
+FLUSHALL
+
+# ── B. Transaction ordering: queued replies arrive in order, EXEC array
+#       preserves command sequence, and post-EXEC state reflects all queued
+#       writes. This is the single most load-bearing runtime-owner invariant:
+#       under the future owner loop, dispatch of a MULTI batch must remain
+#       atomic from the perspective of this client.
+MULTI
+SET tx_a 1
+SET tx_b 2
+INCR tx_a
+INCRBY tx_b 10
+GET tx_a
+GET tx_b
+EXEC
+GET tx_a
+GET tx_b
+EXISTS tx_a tx_b
+
+# ── C. EXEC must surface per-command runtime errors WITHOUT aborting the
+#       batch. LPUSH-on-a-string triggers WRONGTYPE at execute time, not at
+#       queue time; the SET preceding it must still take effect.
+SET err_k value
+DEL err_k
+MULTI
+SET err_k value
+LPUSH err_k bad
+GET err_k
+EXEC
+TYPE err_k
+
+# ── D. WATCH lifecycle: WATCH followed by UNWATCH leaves no residue. A
+#       subsequent MULTI/EXEC must run normally.
+SET w_k initial
+WATCH w_k
+UNWATCH
+MULTI
+SET w_k changed
+EXEC
+GET w_k
+
+# ── E. DISCARD must clear WATCH state on the current connection.
+SET w_k2 v1
+WATCH w_k2
+MULTI
+SET w_k2 v2
+DISCARD
+GET w_k2
+MULTI
+SET w_k2 v3
+EXEC
+GET w_k2
+
+# ── F. WATCH on a key that THIS client modifies inside MULTI does NOT
+#       invalidate the transaction (only foreign writes do; not expressible
+#       single-connection — call out in docs).
+SET self_w v0
+WATCH self_w
+MULTI
+SET self_w v1
+EXEC
+GET self_w
+
+# ── G. EXEC / DISCARD outside MULTI must return errors; UNWATCH outside
+#       MULTI is a benign no-op.
+EXEC
+DISCARD
+UNWATCH
+
+# ── H. Nested MULTI must error WITHOUT aborting the outer transaction;
+#       commands queued after the nested error still run at EXEC time.
+MULTI
+MULTI
+SET nest_k v
+EXEC
+GET nest_k
+
+# ── I. Lazy expiration on direct access: a key with a past PEXPIREAT must
+#       read as missing on GET / EXISTS, and TTL must report key-missing.
+SET exp_k value
+PEXPIREAT exp_k 1
+GET exp_k
+EXISTS exp_k
+TTL exp_k
+PTTL exp_k
+
+# ── J. Lazy expiration inside EXEC: a PEXPIREAT applied OUTSIDE the
+#       transaction must be visible to commands queued AFTER it and dispatched
+#       inside EXEC. Under runtime ownership, EXEC dispatch must consult the
+#       latest DB state for each queued command.
+SET tx_exp_k stale
+PEXPIREAT tx_exp_k 1
+MULTI
+EXISTS tx_exp_k
+GET tx_exp_k
+TYPE tx_exp_k
+EXEC
+
+# ── K. Expiration applied INSIDE MULTI must affect later commands in the
+#       same EXEC array. Tests intra-batch effect visibility.
+SET inner_exp v_initial
+MULTI
+PEXPIREAT inner_exp 1
+EXISTS inner_exp
+GET inner_exp
+TTL inner_exp
+EXEC
+
+# ── L. Pub/sub introspection must not interfere with normal commands.
+#       PUBLISH with no subscribers returns :0; PUBSUB CHANNELS / NUMSUB /
+#       NUMPAT report empty state; surrounding GET/SET remain consistent.
+SET pub_guard before
+PUBLISH ch_canary hello
+PUBSUB CHANNELS
+PUBSUB CHANNELS *
+PUBSUB NUMSUB
+PUBSUB NUMSUB ch_canary ch_other
+PUBSUB NUMPAT
+GET pub_guard
+SET pub_guard after
+GET pub_guard
+
+# ── M. Selected DB is per-connection and persists across commands. Writes
+#       to a different DB must NOT leak into the original DB, and switching
+#       back must observe the original DB's contents.
+SELECT 1
+SET sel_k db1_value
+EXISTS sel_k
+SELECT 0
+EXISTS sel_k
+SET sel_k db0_value
+GET sel_k
+SELECT 1
+GET sel_k
+SELECT 0
+GET sel_k
+
+# ── N. SELECT issued inside MULTI is queued and applied at EXEC time. The
+#       write that follows the queued SELECT must land in the newly selected
+#       DB, and the connection's DB after EXEC must reflect the LAST SELECT
+#       that ran during EXEC.
+SELECT 0
+SET cross_db_guard from_db0
+MULTI
+SELECT 1
+SET cross_db_guard from_db1
+SELECT 0
+GET cross_db_guard
+EXEC
+GET cross_db_guard
+SELECT 1
+GET cross_db_guard
+SELECT 0
+FLUSHALL
+
+# ── O. Non-hanging blocking pops: BLPOP / BRPOP / BLMOVE / BLMPOP must
+#       return immediately when data is already present. This is the only
+#       safe blocking-command shape for a single-connection corpus; real
+#       wakeup tests need a multi-connection runner.
+RPUSH blq a b c
+BLPOP blq 0
+BLPOP blq 0
+LRANGE blq 0 -1
+RPUSH blq2 x y
+BRPOP blq2 0
+BLMOVE blq blq3 LEFT RIGHT 0
+LRANGE blq 0 -1
+LRANGE blq3 0 -1
+RPUSH blq4 m1 m2
+BLMPOP 0 1 blq4 LEFT COUNT 2
+LRANGE blq4 0 -1
+
+# ── P. WAIT with zero replicas required returns immediately. Asserts the
+#       owner loop does not unconditionally block waiting for replication
+#       progress on a fresh standalone server.
+WAIT 0 0
+
+# ── Q. CLIENT name survives across commands; RESET clears it and returns
+#       the connection to DB 0. (Final CLIENT GETNAME asserts the cleared
+#       state; we then set a name again to confirm post-RESET writability.)
+CLIENT SETNAME canary
+CLIENT GETNAME
+RESET
+CLIENT GETNAME
+CLIENT SETNAME canary2
+CLIENT GETNAME
+
+# ── R. Cleanup — empty both touched DBs and confirm.
+SELECT 0
+FLUSHALL
+DBSIZE
+SELECT 1
+DBSIZE
+SELECT 0
