@@ -19,8 +19,8 @@ pub type ClientId = u64;
 ///
 /// STUB — full command dispatch lives in Phase 3. Until then this is a function
 /// pointer alias matching the salvaged multi.rs `CommandFn` shape.
-pub type CommandFn = fn(&mut crate::command_context::CommandContext)
-    -> Result<(), redis_types::RedisError>;
+pub type CommandFn =
+    fn(&mut crate::command_context::CommandContext) -> Result<(), redis_types::RedisError>;
 
 /// A single command queued inside a MULTI block.
 ///
@@ -337,6 +337,98 @@ impl Client {
         redis_protocol::encode_for_proto(frame, self.resp_proto, &mut self.reply_buf);
     }
 
+    fn append_prefixed_line(&mut self, prefix: u8, bytes: &[u8]) {
+        self.reply_buf.reserve(bytes.len() + 3);
+        self.reply_buf.push(prefix);
+        self.reply_buf.extend_from_slice(bytes);
+        self.reply_buf.extend_from_slice(b"\r\n");
+    }
+
+    fn append_len_header_usize(&mut self, prefix: u8, len: usize) {
+        use std::io::Write;
+        self.reply_buf.push(prefix);
+        let _ = write!(self.reply_buf, "{}", len);
+        self.reply_buf.extend_from_slice(b"\r\n");
+    }
+
+    fn append_len_header_i64(&mut self, prefix: u8, len: i64) {
+        use std::io::Write;
+        self.reply_buf.push(prefix);
+        let _ = write!(self.reply_buf, "{}", len);
+        self.reply_buf.extend_from_slice(b"\r\n");
+    }
+
+    /// Append a RESP simple-string reply without constructing a `RespFrame`.
+    pub fn write_simple_string(&mut self, bytes: &[u8]) {
+        self.append_prefixed_line(b'+', bytes);
+    }
+
+    /// Append a RESP error reply without constructing a `RespFrame`.
+    pub fn write_error(&mut self, bytes: &[u8]) {
+        self.append_prefixed_line(b'-', bytes);
+    }
+
+    /// Append a RESP integer reply without constructing a `RespFrame`.
+    pub fn write_integer(&mut self, n: i64) {
+        self.append_len_header_i64(b':', n);
+    }
+
+    /// Append a RESP bulk-string reply without constructing a `RespFrame`.
+    pub fn write_bulk(&mut self, bytes: &[u8]) {
+        self.append_len_header_usize(b'$', bytes.len());
+        self.reply_buf.extend_from_slice(bytes);
+        self.reply_buf.extend_from_slice(b"\r\n");
+    }
+
+    /// Append a RESP bulk-string reply from a `RedisString` without cloning it.
+    pub fn write_bulk_string(&mut self, s: &RedisString) {
+        self.write_bulk(s.as_bytes());
+    }
+
+    /// Append the protocol-appropriate null bulk reply.
+    pub fn write_null_bulk(&mut self) {
+        if self.resp_proto == 3 {
+            self.reply_buf.extend_from_slice(b"_\r\n");
+        } else {
+            self.reply_buf.extend_from_slice(b"$-1\r\n");
+        }
+    }
+
+    /// Append the protocol-appropriate null array reply.
+    pub fn write_null_array(&mut self) {
+        if self.resp_proto == 3 {
+            self.reply_buf.extend_from_slice(b"_\r\n");
+        } else {
+            self.reply_buf.extend_from_slice(b"*-1\r\n");
+        }
+    }
+
+    /// Append a RESP array header.
+    pub fn write_array_header(&mut self, len: i64) {
+        self.append_len_header_i64(b'*', len);
+    }
+
+    /// Append a RESP push header for RESP3 clients, or an array header for RESP2.
+    pub fn write_push_or_array_header(&mut self, len: i64) {
+        let prefix = if self.resp_proto == 3 { b'>' } else { b'*' };
+        self.append_len_header_i64(prefix, len);
+    }
+
+    /// Append a RESP map header for RESP3 clients, or a flat array header for RESP2.
+    pub fn write_map_header(&mut self, n_pairs: i64) {
+        if self.resp_proto == 3 {
+            self.append_len_header_i64(b'%', n_pairs);
+        } else {
+            self.append_len_header_i64(b'*', n_pairs.saturating_mul(2));
+        }
+    }
+
+    /// Append a RESP set header for RESP3 clients, or an array header for RESP2.
+    pub fn write_set_header(&mut self, len: i64) {
+        let prefix = if self.resp_proto == 3 { b'~' } else { b'*' };
+        self.append_len_header_i64(prefix, len);
+    }
+
     /// Drain the reply buffer; caller (I/O layer) writes to the socket.
     pub fn drain_reply(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.reply_buf)
@@ -457,17 +549,37 @@ impl Client {
         None
     }
 
-    pub fn flag_multi(&self) -> bool { self.flags.multi }
-    pub fn flag_dirty_cas(&self) -> bool { self.flags.dirty_cas }
-    pub fn flag_dirty_exec(&self) -> bool { self.flags.dirty_exec }
-    pub fn flag_deny_blocking(&self) -> bool { self.flags.deny_blocking }
-    pub fn flag_blocked(&self) -> bool { self.flags.blocked }
-    pub fn is_aof_client(&self) -> bool { self.flags.aof_client }
+    pub fn flag_multi(&self) -> bool {
+        self.flags.multi
+    }
+    pub fn flag_dirty_cas(&self) -> bool {
+        self.flags.dirty_cas
+    }
+    pub fn flag_dirty_exec(&self) -> bool {
+        self.flags.dirty_exec
+    }
+    pub fn flag_deny_blocking(&self) -> bool {
+        self.flags.deny_blocking
+    }
+    pub fn flag_blocked(&self) -> bool {
+        self.flags.blocked
+    }
+    pub fn is_aof_client(&self) -> bool {
+        self.flags.aof_client
+    }
 
-    pub fn set_flag_multi(&mut self, v: bool) { self.flags.multi = v; }
-    pub fn set_flag_dirty_cas(&mut self, v: bool) { self.flags.dirty_cas = v; }
-    pub fn set_flag_dirty_exec(&mut self, v: bool) { self.flags.dirty_exec = v; }
-    pub fn set_flag_deny_blocking(&mut self, v: bool) { self.flags.deny_blocking = v; }
+    pub fn set_flag_multi(&mut self, v: bool) {
+        self.flags.multi = v;
+    }
+    pub fn set_flag_dirty_cas(&mut self, v: bool) {
+        self.flags.dirty_cas = v;
+    }
+    pub fn set_flag_dirty_exec(&mut self, v: bool) {
+        self.flags.dirty_exec = v;
+    }
+    pub fn set_flag_deny_blocking(&mut self, v: bool) {
+        self.flags.deny_blocking = v;
+    }
 
     /// Install commands[index].argv/argc/argv_len/cmd as the client's current
     /// command. STUB — Phase B placeholder.
@@ -505,6 +617,34 @@ mod tests {
         let bytes = c.drain_reply();
         assert_eq!(bytes, b"+OK\r\n:42\r\n");
         assert!(c.drain_reply().is_empty());
+    }
+
+    #[test]
+    fn direct_resp_helpers_match_hot_reply_shapes() {
+        let mut c = Client::new(1);
+        c.write_simple_string(b"OK");
+        c.write_integer(42);
+        c.write_bulk(b"value");
+        c.write_null_bulk();
+        c.write_array_header(2);
+        c.write_bulk(b"a");
+        c.write_bulk(b"b");
+        assert_eq!(
+            c.drain_reply(),
+            b"+OK\r\n:42\r\n$5\r\nvalue\r\n$-1\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+        );
+    }
+
+    #[test]
+    fn direct_resp_helpers_keep_resp3_null_and_header_shapes() {
+        let mut c = Client::new(1);
+        c.resp_proto = 3;
+        c.write_null_bulk();
+        c.write_null_array();
+        c.write_push_or_array_header(1);
+        c.write_map_header(2);
+        c.write_set_header(3);
+        assert_eq!(c.drain_reply(), b"_\r\n_\r\n>1\r\n%2\r\n~3\r\n");
     }
 
     #[test]

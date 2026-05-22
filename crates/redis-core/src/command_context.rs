@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use crate::client::Client;
 use crate::db::RedisDb;
 use crate::live_config::LiveConfig;
-use crate::notify::{
-    NOTIFY_KEYEVENT, NOTIFY_KEYSPACE,
-};
+use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
 use crate::object::RedisObject;
 use crate::pubsub_registry::PubSubRegistry;
 use crate::server::RedisServer;
@@ -111,13 +109,19 @@ pub trait ReplyArrayLen {
 }
 
 impl ReplyArrayLen for i64 {
-    fn into_reply_len(self) -> i64 { self }
+    fn into_reply_len(self) -> i64 {
+        self
+    }
 }
 impl ReplyArrayLen for usize {
-    fn into_reply_len(self) -> i64 { self as i64 }
+    fn into_reply_len(self) -> i64 {
+        self as i64
+    }
 }
 impl ReplyArrayLen for i32 {
-    fn into_reply_len(self) -> i64 { self as i64 }
+    fn into_reply_len(self) -> i64 {
+        self as i64
+    }
 }
 
 /// Flexible argv-index trait. Translated code mixes `usize`, `i32`, and
@@ -127,7 +131,9 @@ pub trait ArgIndex {
 }
 
 impl ArgIndex for usize {
-    fn into_arg_index(self) -> RedisResult<usize> { Ok(self) }
+    fn into_arg_index(self) -> RedisResult<usize> {
+        Ok(self)
+    }
 }
 impl ArgIndex for i64 {
     fn into_arg_index(self) -> RedisResult<usize> {
@@ -222,29 +228,27 @@ impl<'a> CommandContext<'a> {
     // ── Reply writers ─────────────────────────────────────────────
 
     pub fn reply_simple_string(&mut self, bytes: &[u8]) -> RedisResult<()> {
-        self.client
-            .write_frame(&RespFrame::Simple(RedisString::from_bytes(bytes)));
+        self.client.write_simple_string(bytes);
         Ok(())
     }
 
     pub fn reply_bulk(&mut self, bytes: &[u8]) -> RedisResult<()> {
-        self.client
-            .write_frame(&RespFrame::Bulk(Some(RedisString::from_bytes(bytes))));
+        self.client.write_bulk(bytes);
         Ok(())
     }
 
     pub fn reply_bulk_string(&mut self, s: RedisString) -> RedisResult<()> {
-        self.client.write_frame(&RespFrame::Bulk(Some(s)));
+        self.client.write_bulk_string(&s);
         Ok(())
     }
 
     pub fn reply_null_bulk(&mut self) -> RedisResult<()> {
-        self.client.write_frame(&RespFrame::Bulk(None));
+        self.client.write_null_bulk();
         Ok(())
     }
 
     pub fn reply_integer(&mut self, n: i64) -> RedisResult<()> {
-        self.client.write_frame(&RespFrame::Integer(n));
+        self.client.write_integer(n);
         Ok(())
     }
 
@@ -253,7 +257,7 @@ impl<'a> CommandContext<'a> {
     }
 
     pub fn reply_null_array(&mut self) -> RedisResult<()> {
-        self.client.write_frame(&RespFrame::Array(None));
+        self.client.write_null_array();
         Ok(())
     }
 
@@ -268,8 +272,8 @@ impl<'a> CommandContext<'a> {
     /// are dispatched through [`ReplyErrorArg`]. The error becomes a `-...`
     /// RESP error line; this does not return `Err`.
     pub fn reply_error<E: ReplyErrorArg>(&mut self, err: E) -> RedisResult<()> {
-        self.client
-            .write_frame(&RespFrame::Error(err.into_reply_error_payload()));
+        let payload = err.into_reply_error_payload();
+        self.client.write_error(payload.as_bytes());
         Ok(())
     }
 
@@ -309,31 +313,14 @@ impl<'a> CommandContext<'a> {
 
     /// Push or array header — RESP3 push frame in client RESP3 mode,
     /// fall back to RESP2 array header otherwise.
-    pub fn reply_push_or_array_header<L: ReplyArrayLen>(
-        &mut self,
-        len: L,
-    ) -> RedisResult<()> {
+    pub fn reply_push_or_array_header<L: ReplyArrayLen>(&mut self, len: L) -> RedisResult<()> {
         let n = len.into_reply_len();
-        if self.client.resp_proto == 3 {
-            let mut buf = Vec::new();
-            buf.push(b'>');
-            use std::io::Write;
-            let _ = write!(buf, "{}", n);
-            buf.extend_from_slice(b"\r\n");
-            self.client.reply_buf.extend_from_slice(&buf);
-            Ok(())
-        } else {
-            self.reply_array_header_i64(n)
-        }
+        self.client.write_push_or_array_header(n);
+        Ok(())
     }
 
     fn reply_array_header_i64(&mut self, len: i64) -> RedisResult<()> {
-        let mut buf = Vec::new();
-        buf.push(b'*');
-        use std::io::Write;
-        let _ = write!(buf, "{}", len);
-        buf.extend_from_slice(b"\r\n");
-        self.client.reply_buf.extend_from_slice(&buf);
+        self.client.write_array_header(len);
         Ok(())
     }
 
@@ -344,18 +331,8 @@ impl<'a> CommandContext<'a> {
     /// exactly `2 * n_pairs` frames in alternating key/value order; both
     /// wire shapes are well-formed RESP under either protocol.
     pub fn reply_map_header<L: ReplyArrayLen>(&mut self, n_pairs: L) -> RedisResult<()> {
-        use std::io::Write;
         let n = n_pairs.into_reply_len();
-        let mut buf = Vec::new();
-        if self.client.resp_proto == 3 {
-            buf.push(b'%');
-            let _ = write!(buf, "{}", n);
-        } else {
-            buf.push(b'*');
-            let _ = write!(buf, "{}", n.saturating_mul(2));
-        }
-        buf.extend_from_slice(b"\r\n");
-        self.client.reply_buf.extend_from_slice(&buf);
+        self.client.write_map_header(n);
         Ok(())
     }
 
@@ -364,17 +341,8 @@ impl<'a> CommandContext<'a> {
     /// RESP3 clients receive `~N\r\n`; RESP2 clients receive `*N\r\n` (the
     /// semantic distinction between array and set is RESP3-only).
     pub fn reply_set_header<L: ReplyArrayLen>(&mut self, n: L) -> RedisResult<()> {
-        use std::io::Write;
         let n = n.into_reply_len();
-        let mut buf = Vec::new();
-        if self.client.resp_proto == 3 {
-            buf.push(b'~');
-        } else {
-            buf.push(b'*');
-        }
-        let _ = write!(buf, "{}", n);
-        buf.extend_from_slice(b"\r\n");
-        self.client.reply_buf.extend_from_slice(&buf);
+        self.client.write_set_header(n);
         Ok(())
     }
 
@@ -471,12 +439,7 @@ impl<'a> CommandContext<'a> {
     /// Publishes to `__keyspace@<db>__:<key>` and/or `__keyevent@<db>__:<event>`
     /// channels via the shared pub/sub registry; ignores callers that have no
     /// pubsub handle attached (unit tests).
-    pub fn notify_keyspace_event(
-        &self,
-        event_type: i32,
-        event: &[u8],
-        key: &RedisString,
-    ) {
+    pub fn notify_keyspace_event(&self, event_type: i32, event: &[u8], key: &RedisString) {
         let flags = self.live_config().notify_keyspace_events_flags() as i32;
         if flags & event_type == 0 {
             return;
@@ -700,7 +663,7 @@ fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn ctx_with_args(args: &[&[u8]]) -> (Client, ) {
+    fn ctx_with_args(args: &[&[u8]]) -> (Client,) {
         let mut c = Client::new(1);
         c.set_args(args.iter().map(|s| RedisString::from_bytes(s)).collect());
         (c,)
@@ -761,9 +724,9 @@ mod tests {
         }
 
         let server = Arc::new(RedisServer::default());
-        server
-            .live_config
-            .set_notify_keyspace_events_flags((NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_STRING) as u32);
+        server.live_config.set_notify_keyspace_events_flags(
+            (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_STRING) as u32,
+        );
 
         let mut c = Client::new(1);
         c.set_args(vec![RedisString::from_bytes(b"SET")]);
@@ -782,10 +745,18 @@ mod tests {
         while let Ok(bytes) = rx.try_recv() {
             received.push(bytes);
         }
-        assert_eq!(received.len(), 2, "expected one keyspace and one keyevent frame");
+        assert_eq!(
+            received.len(),
+            2,
+            "expected one keyspace and one keyevent frame"
+        );
         let joined: Vec<u8> = received.concat();
-        assert!(joined.windows(b"__keyspace@0__:foo".len()).any(|w| w == b"__keyspace@0__:foo"));
-        assert!(joined.windows(b"__keyevent@0__:set".len()).any(|w| w == b"__keyevent@0__:set"));
+        assert!(joined
+            .windows(b"__keyspace@0__:foo".len())
+            .any(|w| w == b"__keyspace@0__:foo"));
+        assert!(joined
+            .windows(b"__keyevent@0__:set".len())
+            .any(|w| w == b"__keyevent@0__:set"));
     }
 
     #[test]
@@ -812,7 +783,10 @@ mod tests {
         );
         let key = RedisString::from_bytes(b"foo");
         ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
-        assert!(rx.try_recv().is_err(), "no notification should fire when flags are 0");
+        assert!(
+            rx.try_recv().is_err(),
+            "no notification should fire when flags are 0"
+        );
     }
 }
 

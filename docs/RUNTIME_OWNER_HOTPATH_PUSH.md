@@ -138,6 +138,16 @@ The profile shows `encode_resp2`, `RawVec::reserve`, malloc/free, and temporary
 reply objects on GET/SET/PING paths. Upstream's reply path has direct helpers
 for integer/simple/bulk bytes and attempts copy avoidance for bulk strings.
 
+Implementation note (`runtime-owner-11-reply-buffer-hotpath`):
+`Client` now has direct RESP append helpers for simple strings, errors,
+integers, bulk bytes/string refs, null bulk, null arrays, and aggregate headers.
+`CommandContext` hot reply helpers call those methods instead of constructing
+`RespFrame`/`RedisString` temporaries for the common legacy reply shapes.
+Generic `reply_frame()` and RESP3-only frame helpers still route through the
+existing protocol encoder, and the direct helpers preserve RESP3 null/push/map
+/set header shapes where the old generic encoder already switched on
+`client.resp_proto`.
+
 Allowed ideas:
 
 - add direct `Client` helpers for RESP2 legacy replies:
