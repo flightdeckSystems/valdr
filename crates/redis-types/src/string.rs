@@ -27,6 +27,11 @@ impl RedisString {
         Self(v)
     }
 
+    pub fn replace_from_slice(&mut self, b: &[u8]) {
+        self.0.clear();
+        self.0.extend_from_slice(b);
+    }
+
     pub fn from_static(b: &'static [u8]) -> Self {
         Self(b.to_vec())
     }
@@ -150,6 +155,13 @@ mod tests {
         assert_eq!(s.as_bytes(), b"hello");
         assert_eq!(s.len(), 5);
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn replace_from_slice_reuses_existing_string() {
+        let mut s = RedisString::from_bytes(b"hello");
+        s.replace_from_slice(b"bye");
+        assert_eq!(s.as_bytes(), b"bye");
     }
 
     #[test]

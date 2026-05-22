@@ -64,7 +64,6 @@ pub fn parse_inline_or_multibulk_into(
     buf: &[u8],
     out: &mut Vec<RedisString>,
 ) -> Result<Option<usize>, RedisError> {
-    out.clear();
     let parsed = if buf.is_empty() {
         Ok(None)
     } else if buf[0] == b'*' {
@@ -158,14 +157,16 @@ fn parse_multibulk_into(
     pos = after_argc;
 
     if argc <= 0 {
+        out.clear();
         return Ok(Some(pos));
     }
     if argc > PROTO_REQ_MULTIBULK_MAX_LEN {
         return Err(RedisError::runtime(b"Protocol error: invalid multibulk length"));
     }
 
-    out.reserve(argc as usize);
-    for _ in 0..argc {
+    let argc = argc as usize;
+    out.reserve(argc.saturating_sub(out.len()));
+    for arg_idx in 0..argc {
         if pos >= buf.len() {
             return Ok(None);
         }
@@ -202,9 +203,15 @@ fn parse_multibulk_into(
             ));
         }
 
-        out.push(RedisString::from_bytes(&buf[pos..payload_end]));
+        let bytes = &buf[pos..payload_end];
+        if arg_idx < out.len() {
+            out[arg_idx].replace_from_slice(bytes);
+        } else {
+            out.push(RedisString::from_bytes(bytes));
+        }
         pos = frame_end;
     }
+    out.truncate(argc);
 
     Ok(Some(pos))
 }
@@ -240,6 +247,7 @@ fn parse_inline_into(
     buf: &[u8],
     out: &mut Vec<RedisString>,
 ) -> Result<Option<usize>, RedisError> {
+    out.clear();
     let (argv, consumed) = match parse_inline(buf)? {
         Some(v) => v,
         None => return Ok(None),
@@ -526,6 +534,8 @@ mod tests {
         let buf = b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
         let mut argv = Vec::with_capacity(8);
         argv.push(RedisString::from_bytes(b"stale"));
+        argv.push(RedisString::from_bytes(b"existing-capacity"));
+        let key_ptr = argv[1].as_bytes().as_ptr();
         let cap = argv.capacity();
 
         let n = parse_inline_or_multibulk_into(buf, &mut argv).unwrap().unwrap();
@@ -535,6 +545,7 @@ mod tests {
         assert_eq!(argv.len(), 2);
         assert_eq!(argv[0].as_bytes(), b"GET");
         assert_eq!(argv[1].as_bytes(), b"key");
+        assert_eq!(argv[1].as_bytes().as_ptr(), key_ptr);
     }
 
     #[test]
