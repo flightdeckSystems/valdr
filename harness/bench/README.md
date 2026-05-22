@@ -1,5 +1,43 @@
 # Benchmark Backfill
 
+## Direct Hypothesis Probes
+
+Use `probe-hypotheses.py` when deciding what to optimize next and you do not
+want to create a harness work packet yet. These probes are telemetry only; they
+write raw artifacts under ignored `harness/bench/results/` and
+`harness/bench/profiles/`.
+
+```bash
+# Pipeline/payload/command shape. Answers whether the gap is fixed overhead,
+# payload copy, or pipeline batching.
+python3 harness/bench/probe-hypotheses.py protocol-shape --suite smoke
+
+# Allocation attribution on macOS. Uses MallocStackLogging + malloc_history.
+# Throughput is intentionally not trusted here because stack logging is slow.
+python3 harness/bench/probe-hypotheses.py alloc-stacks \
+  --requests 200000 \
+  --commands get,set,incr,ping_mbulk
+
+# CPU-time trace for one workload. Opens in Instruments; the child process uses
+# a minimal environment so .trace metadata does not capture shell secrets.
+python3 harness/bench/probe-hypotheses.py xctrace-time \
+  --command get \
+  --requests 1000000 \
+  --time-limit-s 6
+```
+
+How to read the current probes:
+
+- If `PING_MBULK` is near parity at `pipeline=1` but falls at `pipeline=100`,
+  the next bottleneck is not DB storage. Look at pipelined parser/dispatch/write
+  batching.
+- If `d1024_over_d8` is not meaningfully above `1.0`, larger payloads are not
+  amortizing the gap. Payload copy is probably not the first fix.
+- `malloc_history` mostly reports live/high-water allocations. Treat it as
+  stack attribution, not as a precise per-command allocation counter.
+- `xctrace-time` is the highest-fidelity local CPU tool on macOS, but its raw
+  `.trace` bundle is a local artifact, not something to commit.
+
 The benchmark runners rebuild `redis-server` by default. For historical data,
 use `backfill.py` instead of checking out commits in the main worktree.
 
