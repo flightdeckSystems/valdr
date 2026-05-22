@@ -1,0 +1,1081 @@
+{
+  "captured_ts": "2026-05-22T14:47:21.365062Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "651c67e",
+    "git_dirty": true,
+    "git_status_short": [
+      " M harness/evidence/ledger.jsonl"
+    ],
+    "resources": [
+      "bench-results",
+      "benchmark-host",
+      "port:16379",
+      "port:6379",
+      "profiler"
+    ],
+    "run_id": "loop-6e4dc35668d06051",
+    "target_commit": "651c67ea771e8c272de6d0e1a55c0af7378c0977",
+    "tree_hash": "24ef54acfd131ef182426ee363078a8438deb0f57aa7ff6a93f40871fe73cac7"
+  },
+  "kind": "runner_result",
+  "packet": "runtime-owner-8-post-poller-hotspots",
+  "result": {
+    "artifacts": [
+      {
+        "path": "harness/bench/results/20260522T144631Z-651c67e-hotspots.tsv"
+      },
+      {
+        "path": "harness/bench/results/20260522T144631Z-651c67e-hotspots.json"
+      }
+    ],
+    "claim_level": "telemetry",
+    "evidence": {
+      "commit": "651c67e",
+      "hardware": {
+        "arch": "arm64",
+        "cpu": "Apple M3 Max",
+        "os": "Darwin 24.3.0"
+      },
+      "harness_context": {
+        "claim_level": "telemetry",
+        "commit": "651c67e",
+        "git_dirty": true,
+        "git_status_short": [
+          " M harness/evidence/ledger.jsonl"
+        ],
+        "resources": [
+          "bench-results",
+          "benchmark-host",
+          "port:16379",
+          "port:6379",
+          "profiler"
+        ],
+        "run_id": "loop-6e4dc35668d06051",
+        "target_commit": "651c67ea771e8c272de6d0e1a55c0af7378c0977",
+        "tree_hash": "24ef54acfd131ef182426ee363078a8438deb0f57aa7ff6a93f40871fe73cac7"
+      },
+      "json_command": {
+        "command": [
+          "python3",
+          "harness/bench/profile-hotspots.py",
+          "--suite",
+          "big",
+          "--sample-seconds",
+          "8"
+        ],
+        "cwd": ".",
+        "resources": [
+          "benchmark-host",
+          "bench-results",
+          "profiler",
+          "port:6379",
+          "port:16379"
+        ],
+        "stderr": "==> get-p100: reference\n==> get-p100: rust + /usr/bin/sample\n==> set-p100: reference\n==> set-p100: rust + /usr/bin/sample\n==> incr-p100: reference\n==> incr-p100: rust + /usr/bin/sample\n==> ping-p100: reference\n==> ping-p100: rust + /usr/bin/sample\n"
+      },
+      "method_detail": "bench-load-with-stack-sampling",
+      "rows": [
+        {
+          "clients": 50,
+          "command": "GET",
+          "payload": 64,
+          "pipeline": 100,
+          "ratio": 0.8316414145196102,
+          "reference": {
+            "avg_ms": 1.226,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 8.319,
+            "min_ms": 0.144,
+            "p50_ms": 1.175,
+            "p95_ms": 1.375,
+            "p99_ms": 3.023,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3755868.75,
+            "target": "reference",
+            "workload": "get-p100"
+          },
+          "reference_p99_ms": 3.023,
+          "reference_rps": 3755868.75,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.583,
+            "clients": 50,
+            "command": "GET",
+            "max_ms": 12.351,
+            "min_ms": 0.536,
+            "p50_ms": 1.583,
+            "p95_ms": 1.719,
+            "p99_ms": 1.839,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3123536.0,
+            "target": "rust",
+            "workload": "get-p100"
+          },
+          "rust_p99_ms": 1.839,
+          "rust_rps": 3123536.0,
+          "sample_path": "harness/bench/results/20260522T144631Z-651c67e-get-p100.sample.txt",
+          "workload": "get-p100"
+        },
+        {
+          "clients": 50,
+          "command": "SET",
+          "payload": 64,
+          "pipeline": 100,
+          "ratio": 0.7398303905773683,
+          "reference": {
+            "avg_ms": 2.005,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 26.367,
+            "min_ms": 0.28,
+            "p50_ms": 1.991,
+            "p95_ms": 2.207,
+            "p99_ms": 2.463,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 2339728.5,
+            "target": "reference",
+            "workload": "set-p100"
+          },
+          "reference_p99_ms": 2.463,
+          "reference_rps": 2339728.5,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.858,
+            "clients": 50,
+            "command": "SET",
+            "max_ms": 4.927,
+            "min_ms": 1.144,
+            "p50_ms": 2.879,
+            "p95_ms": 3.039,
+            "p99_ms": 3.151,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 1731002.25,
+            "target": "rust",
+            "workload": "set-p100"
+          },
+          "rust_p99_ms": 3.151,
+          "rust_rps": 1731002.25,
+          "sample_path": "harness/bench/results/20260522T144631Z-651c67e-set-p100.sample.txt",
+          "workload": "set-p100"
+        },
+        {
+          "clients": 50,
+          "command": "INCR",
+          "payload": 64,
+          "pipeline": 100,
+          "ratio": 0.5952425935999244,
+          "reference": {
+            "avg_ms": 1.454,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 3.151,
+            "min_ms": 0.64,
+            "p50_ms": 1.455,
+            "p95_ms": 1.655,
+            "p99_ms": 1.799,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 3196931.0,
+            "target": "reference",
+            "workload": "incr-p100"
+          },
+          "reference_p99_ms": 1.799,
+          "reference_rps": 3196931.0,
+          "requests": 10000000,
+          "rust": {
+            "avg_ms": 2.601,
+            "clients": 50,
+            "command": "INCR",
+            "max_ms": 3.423,
+            "min_ms": 0.872,
+            "p50_ms": 2.623,
+            "p95_ms": 2.767,
+            "p99_ms": 2.863,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 10000000,
+            "rps": 1902949.5,
+            "target": "rust",
+            "workload": "incr-p100"
+          },
+          "rust_p99_ms": 2.863,
+          "rust_rps": 1902949.5,
+          "sample_path": "harness/bench/results/20260522T144631Z-651c67e-incr-p100.sample.txt",
+          "workload": "incr-p100"
+        },
+        {
+          "clients": 50,
+          "command": "PING_MBULK",
+          "payload": 64,
+          "pipeline": 100,
+          "ratio": 0.6917832299962765,
+          "reference": {
+            "avg_ms": 0.867,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 2.943,
+            "min_ms": 0.264,
+            "p50_ms": 0.863,
+            "p95_ms": 1.047,
+            "p99_ms": 1.159,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 5054334.0,
+            "target": "reference",
+            "workload": "ping-p100"
+          },
+          "reference_p99_ms": 1.159,
+          "reference_rps": 5054334.0,
+          "requests": 20000000,
+          "rust": {
+            "avg_ms": 1.406,
+            "clients": 50,
+            "command": "PING_MBULK",
+            "max_ms": 9.791,
+            "min_ms": 0.2,
+            "p50_ms": 1.399,
+            "p95_ms": 1.551,
+            "p99_ms": 1.679,
+            "payload": 64,
+            "pipeline": 100,
+            "requests": 20000000,
+            "rps": 3496503.5,
+            "target": "rust",
+            "workload": "ping-p100"
+          },
+          "rust_p99_ms": 1.679,
+          "rust_rps": 3496503.5,
+          "sample_path": "harness/bench/results/20260522T144631Z-651c67e-ping-p100.sample.txt",
+          "workload": "ping-p100"
+        }
+      ],
+      "sampler": "/usr/bin/sample",
+      "sampler_note": "/usr/bin/sample is wall-clock stack sampling. Treat wait/sleep/socket categories as scheduler/IO evidence, not pure CPU time. Use xctrace Time Profiler for a GUI-grade CPU trace when needed.",
+      "samples": {
+        "get-p100": {
+          "available": true,
+          "category_counts": {
+            "idle_or_wait": 35625,
+            "lock": 89,
+            "other": 2536,
+            "rust_user": 1951,
+            "socket_read": 313,
+            "socket_write": 292
+          },
+          "raw_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/results/20260522T144631Z-651c67e-get-p100.sample.txt",
+          "top_non_idle": [
+            {
+              "category": "other",
+              "count": 1203,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 466,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 344,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 313,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 292,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 281,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 263,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 198,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 182,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 162,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 151,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 128,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 115,
+              "frame": "clock_gettime_nsec_np  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 84,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 78,
+              "frame": "clock_gettime  (in libsystem_c.dylib)"
+            }
+          ],
+          "top_stacks": [
+            {
+              "category": "idle_or_wait",
+              "count": 33584,
+              "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 1595,
+              "frame": "kevent  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 1203,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 466,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 446,
+              "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 344,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 313,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 292,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 281,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 263,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 198,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 182,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 162,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 151,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 128,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 115,
+              "frame": "clock_gettime_nsec_np  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 84,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 78,
+              "frame": "clock_gettime  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 58,
+              "frame": "DYLD-STUB$$free  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 48,
+              "frame": "core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server)"
+            }
+          ]
+        },
+        "incr-p100": {
+          "available": true,
+          "category_counts": {
+            "idle_or_wait": 36490,
+            "lock": 171,
+            "other": 1771,
+            "rust_user": 2125,
+            "socket_read": 185,
+            "socket_write": 145
+          },
+          "raw_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/results/20260522T144631Z-651c67e-incr-p100.sample.txt",
+          "top_non_idle": [
+            {
+              "category": "other",
+              "count": 471,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 388,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 366,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 278,
+              "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 192,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 185,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 163,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 145,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 143,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 141,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 133,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 132,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 106,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 91,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 86,
+              "frame": "_$LT$alloc..vec..into_iter..IntoIter$LT$T$C$A$GT$$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfc72ff679ee63a3d  (in redis-server)"
+            }
+          ],
+          "top_stacks": [
+            {
+              "category": "idle_or_wait",
+              "count": 32525,
+              "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 2475,
+              "frame": "kevent  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 1490,
+              "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 471,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 388,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 366,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 278,
+              "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 192,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 185,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 163,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 145,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 143,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 141,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 133,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 132,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 106,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 91,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 86,
+              "frame": "_$LT$alloc..vec..into_iter..IntoIter$LT$T$C$A$GT$$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfc72ff679ee63a3d  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 79,
+              "frame": "_platform_memcmp  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 65,
+              "frame": "clock_gettime_nsec_np  (in libsystem_c.dylib)"
+            }
+          ]
+        },
+        "ping-p100": {
+          "available": true,
+          "category_counts": {
+            "idle_or_wait": 36259,
+            "lock": 96,
+            "other": 2501,
+            "rust_user": 1468,
+            "socket_read": 329,
+            "socket_write": 290
+          },
+          "raw_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/results/20260522T144631Z-651c67e-ping-p100.sample.txt",
+          "top_non_idle": [
+            {
+              "category": "other",
+              "count": 1210,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 330,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "socket_read",
+              "count": 329,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 290,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 282,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 247,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 213,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 171,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 124,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 109,
+              "frame": "clock_gettime_nsec_np  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 100,
+              "frame": "core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 91,
+              "frame": "_$LT$alloc..vec..into_iter..IntoIter$LT$T$C$A$GT$$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfc72ff679ee63a3d  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 87,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 81,
+              "frame": "DYLD-STUB$$memcpy  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 67,
+              "frame": "clock_gettime  (in libsystem_c.dylib)"
+            }
+          ],
+          "top_stacks": [
+            {
+              "category": "idle_or_wait",
+              "count": 31996,
+              "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 2192,
+              "frame": "kevent  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 1984,
+              "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 1210,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 330,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "socket_read",
+              "count": 329,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 290,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 282,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 247,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 213,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 171,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 124,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 109,
+              "frame": "clock_gettime_nsec_np  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 100,
+              "frame": "core::hash::BuildHasher::hash_one::h23ba648a26201d13  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 91,
+              "frame": "_$LT$alloc..vec..into_iter..IntoIter$LT$T$C$A$GT$$u20$as$u20$core..ops..drop..Drop$GT$::drop::hfc72ff679ee63a3d  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 87,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 87,
+              "frame": "nanosleep  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 81,
+              "frame": "DYLD-STUB$$memcpy  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 67,
+              "frame": "clock_gettime  (in libsystem_c.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 67,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            }
+          ]
+        },
+        "set-p100": {
+          "available": true,
+          "category_counts": {
+            "idle_or_wait": 36119,
+            "lock": 187,
+            "other": 2269,
+            "rust_user": 1957,
+            "socket_read": 194,
+            "socket_write": 148
+          },
+          "raw_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/bench/results/20260522T144631Z-651c67e-set-p100.sample.txt",
+          "top_non_idle": [
+            {
+              "category": "other",
+              "count": 602,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 460,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 325,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 257,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 241,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 230,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 223,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 194,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 169,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 154,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 148,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 128,
+              "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 95,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 94,
+              "frame": "redis_core::object::RedisObject::new_string_try_encoded::hfcb1fd5a0b690874  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 88,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            }
+          ],
+          "top_stacks": [
+            {
+              "category": "idle_or_wait",
+              "count": 33889,
+              "frame": "__semwait_signal  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 2049,
+              "frame": "kevent  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 602,
+              "frame": "_nanov2_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 460,
+              "frame": "mach_absolute_time  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 325,
+              "frame": "redis_commands::dispatch::lookup_runtime_command::h7bbb4ffaf68fd422  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 257,
+              "frame": "nanov2_malloc_type  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "other",
+              "count": 241,
+              "frame": "_platform_memmove  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 230,
+              "frame": "_$LT$std..hash..random..DefaultHasher$u20$as$u20$core..hash..Hasher$GT$::write::h1d555c3dc08887a8  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 223,
+              "frame": "_malloc_zone_malloc  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_read",
+              "count": 194,
+              "frame": "__recvfrom  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "idle_or_wait",
+              "count": 181,
+              "frame": "mach_msg2_trap  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 169,
+              "frame": "redis_protocol::request::read_resp_integer::he43a507cc4251946  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 154,
+              "frame": "_free  (in libsystem_malloc.dylib)"
+            },
+            {
+              "category": "socket_write",
+              "count": 148,
+              "frame": "__sendto  (in libsystem_kernel.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 128,
+              "frame": "core::hash::BuildHasher::hash_one::h794138a86e00798c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 95,
+              "frame": "redis_commands::dispatch::dispatch_command_name::h5d0125bdfdf9f92c  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 94,
+              "frame": "redis_core::object::RedisObject::new_string_try_encoded::hfcb1fd5a0b690874  (in redis-server)"
+            },
+            {
+              "category": "rust_user",
+              "count": 88,
+              "frame": "redis_protocol::request::parse_inline_or_multibulk_into::ha726da75abf42626  (in redis-server)"
+            },
+            {
+              "category": "other",
+              "count": 70,
+              "frame": "_platform_memset  (in libsystem_platform.dylib)"
+            },
+            {
+              "category": "rust_user",
+              "count": 63,
+              "frame": "DYLD-STUB$$free  (in redis-server)"
+            }
+          ]
+        }
+      },
+      "suite": "big",
+      "workloads": [
+        {
+          "clients": 50,
+          "command": "get",
+          "name": "get-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000,
+          "sample_seconds": 8
+        },
+        {
+          "clients": 50,
+          "command": "set",
+          "name": "set-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000,
+          "sample_seconds": 8
+        },
+        {
+          "clients": 50,
+          "command": "incr",
+          "name": "incr-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 10000000,
+          "sample_seconds": 8
+        },
+        {
+          "clients": 50,
+          "command": "ping_mbulk",
+          "name": "ping-p100",
+          "payload": 64,
+          "pipeline": 100,
+          "requests": 20000000,
+          "sample_seconds": 8
+        }
+      ]
+    },
+    "measurements": [],
+    "method": "bench-load",
+    "runner_id": "bench-profile-hotspots",
+    "schema_version": 1,
+    "status": "pass",
+    "summary": "profile hotspots: median 0.74x, min 0.60x, max 0.83x",
+    "surface": "performance"
+  },
+  "role": "runner"
+}
