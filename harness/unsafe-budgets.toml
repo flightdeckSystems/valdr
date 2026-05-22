@@ -10,7 +10,10 @@
 [crates]
 "redis-types"     = 0
 "redis-protocol"  = 0
-"redis-core"      = 0
+# Raised to 2 for the aarch64 monotonic hardware-counter reader in
+# monotonic.rs. Both unsafe blocks are inline assembly `mrs` reads of CPU timer
+# registers (`cntvct_el0`, `cntfrq_el0`): no pointers, no memory access.
+"redis-core"      = 2
 # Raised to 1 for the fork(2)-based BGSAVE in persist.rs (Round 19 Session 1D).
 # The single unsafe block covers libc::fork + libc::_exit in the child path.
 # This is the standard Unix COW-snapshot mechanism; no other unsafe is expected.

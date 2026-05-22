@@ -250,6 +250,7 @@ fn emit_startup_log() {
 }
 
 fn main() {
+    let _clock = redis_core::monotonic::monotonic_init();
     let argv: Vec<String> = std::env::args().collect();
     let args = match parse_args(argv) {
         Ok(a) => a,

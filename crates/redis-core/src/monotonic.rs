@@ -243,26 +243,37 @@ mod aarch64_cnt {
 
     /// Read the ARM virtual counter register `CNTVCT_EL0`.
     ///
-    /// TODO(architect): unsafe needed — `std::arch::asm!` requires an
-    /// `unsafe { }` block.  Placeholder returns 0 until architect approves.
-    ///
     /// C: `__asm__ volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));`
     pub(super) fn cntvct() -> u64 {
-        // TODO(port): replace with:
-        //   unsafe { let v: u64; std::arch::asm!("mrs {}, cntvct_el0", out(reg) v); v }
-        0
+        let value: u64;
+        // SAFETY: This reads the architectural virtual counter register. It
+        // does not touch memory, dereference pointers, or alter control flow.
+        unsafe {
+            core::arch::asm!(
+                "mrs {value}, cntvct_el0",
+                value = out(reg) value,
+                options(nomem, nostack)
+            );
+        }
+        value
     }
 
     /// Read the CNT frequency register `CNTFRQ_EL0`.
     ///
-    /// TODO(architect): unsafe needed — inline assembly requires unsafe block.
-    ///
     /// C: `__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(virtual_freq_value));`
     pub(super) fn cntfrq_hz() -> u32 {
-        // TODO(port): replace with:
-        //   unsafe { let v: u64; std::arch::asm!("mrs {}, cntfrq_el0", out(reg) v); v as u32 }
+        let value: u64;
+        // SAFETY: This reads the architectural counter-frequency register.
+        // The instruction is side-effect-free with respect to Rust memory.
+        unsafe {
+            core::arch::asm!(
+                "mrs {value}, cntfrq_el0",
+                value = out(reg) value,
+                options(nomem, nostack)
+            );
+        }
         // C: top 32 bits of cntfrq_el0 are reserved; cast to u32.
-        0
+        value as u32
     }
 
     /// ARM CNT-based clock reader.

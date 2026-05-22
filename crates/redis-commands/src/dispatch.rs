@@ -14,11 +14,11 @@
 
 use std::cmp::Ordering;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 use redis_core::acl::{category as acl_category, global_acl_state};
 use redis_core::eviction::{oom_error_reply, try_evict_to_fit, EvictionOutcome};
 use redis_core::memory::approximate_memory_used;
+use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
@@ -269,9 +269,9 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
-    let start = initial_slowlog_gate.should_time().then(Instant::now);
+    let start = initial_slowlog_gate.should_time().then(elapsed_start);
     let result = (entry.handler)(ctx);
-    let elapsed_micros = start.map(|start| start.elapsed().as_micros() as u64);
+    let elapsed_micros = start.map(elapsed_us);
     let should_record_slowlog = match elapsed_micros {
         Some(elapsed_micros) => ctx
             .live_config()
