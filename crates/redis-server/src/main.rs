@@ -46,6 +46,7 @@ mod runtime_owner;
 
 const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_BIND: &str = "127.0.0.1";
+const ACTIVE_TIME_SAMPLE_INTERVAL: u64 = 1024;
 
 /// Parsed command-line arguments.
 struct CliArgs {
@@ -1208,10 +1209,12 @@ fn process_current_command_with_db(
     client.clear_blocked_on_keys();
 
     let metrics = server_metrics();
-    metrics
+    let command_number = metrics
         .total_commands_processed
-        .fetch_add(1, Ordering::Relaxed);
-    let t0 = Instant::now();
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    let active_time_sample =
+        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx =
             CommandContext::with_server(client, db, Arc::clone(server), Arc::clone(registry));
@@ -1222,10 +1225,13 @@ fn process_current_command_with_db(
         }
         r
     };
-    let elapsed_us = t0.elapsed().as_micros() as u64;
-    metrics
-        .active_time_main_thread_us
-        .fetch_add(elapsed_us, Ordering::Relaxed);
+    if let Some(t0) = active_time_sample {
+        let elapsed_us =
+            (t0.elapsed().as_micros() as u64).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
+        metrics
+            .active_time_main_thread_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
+    }
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
@@ -1244,11 +1250,13 @@ fn process_current_command_with_db_list(
     client.clear_blocked_on_keys();
 
     let metrics = server_metrics();
-    metrics
+    let command_number = metrics
         .total_commands_processed
-        .fetch_add(1, Ordering::Relaxed);
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
     let dispatch_db = client.db_index;
-    let t0 = Instant::now();
+    let active_time_sample =
+        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(
             client,
@@ -1265,10 +1273,13 @@ fn process_current_command_with_db_list(
         }
         r
     };
-    let elapsed_us = t0.elapsed().as_micros() as u64;
-    metrics
-        .active_time_main_thread_us
-        .fetch_add(elapsed_us, Ordering::Relaxed);
+    if let Some(t0) = active_time_sample {
+        let elapsed_us =
+            (t0.elapsed().as_micros() as u64).saturating_mul(ACTIVE_TIME_SAMPLE_INTERVAL);
+        metrics
+            .active_time_main_thread_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
+    }
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);

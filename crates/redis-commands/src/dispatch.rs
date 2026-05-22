@@ -54,6 +54,13 @@ struct RuntimeDispatchEntry {
     metadata: CommandMetadata,
 }
 
+struct HotRuntimeDispatch {
+    ping: Option<&'static RuntimeDispatchEntry>,
+    get: Option<&'static RuntimeDispatchEntry>,
+    set: Option<&'static RuntimeDispatchEntry>,
+    incr: Option<&'static RuntimeDispatchEntry>,
+}
+
 struct RuntimeDispatchIndex {
     rows: Vec<RuntimeDispatchEntry>,
     buckets: [(usize, usize); 256],
@@ -61,6 +68,7 @@ struct RuntimeDispatchIndex {
 
 static COMMAND_METADATA_TABLE: OnceLock<Vec<(&'static [u8], CommandMetadata)>> = OnceLock::new();
 static RUNTIME_DISPATCH_INDEX: OnceLock<RuntimeDispatchIndex> = OnceLock::new();
+static HOT_RUNTIME_DISPATCH: OnceLock<HotRuntimeDispatch> = OnceLock::new();
 
 /// Look up the handler for `name` (case-insensitive ASCII).
 ///
@@ -70,6 +78,13 @@ pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
 }
 
 fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
+    if let Some(entry) = lookup_hot_runtime_command(name) {
+        return Some(entry);
+    }
+    lookup_runtime_command_indexed(name)
+}
+
+fn lookup_runtime_command_indexed(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
     let first = *name.first()?;
     let index = runtime_dispatch_index();
     let (start, end) = index.buckets[ascii_lower(first) as usize];
@@ -78,6 +93,52 @@ fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> 
         .binary_search_by(|row| ascii_casecmp(row.entry.name, name))
         .map(|idx| &index.rows[start + idx])
         .ok()
+}
+
+fn lookup_hot_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
+    let hot = hot_runtime_dispatch();
+    match name {
+        [a, b, c]
+            if ascii_lower(*a) == b'g'
+                && ascii_lower(*b) == b'e'
+                && ascii_lower(*c) == b't' =>
+        {
+            hot.get
+        }
+        [a, b, c]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'e'
+                && ascii_lower(*c) == b't' =>
+        {
+            hot.set
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'p'
+                && ascii_lower(*b) == b'i'
+                && ascii_lower(*c) == b'n'
+                && ascii_lower(*d) == b'g' =>
+        {
+            hot.ping
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'i'
+                && ascii_lower(*b) == b'n'
+                && ascii_lower(*c) == b'c'
+                && ascii_lower(*d) == b'r' =>
+        {
+            hot.incr
+        }
+        _ => None,
+    }
+}
+
+fn hot_runtime_dispatch() -> &'static HotRuntimeDispatch {
+    HOT_RUNTIME_DISPATCH.get_or_init(|| HotRuntimeDispatch {
+        ping: lookup_runtime_command_indexed(b"PING"),
+        get: lookup_runtime_command_indexed(b"GET"),
+        set: lookup_runtime_command_indexed(b"SET"),
+        incr: lookup_runtime_command_indexed(b"INCR"),
+    })
 }
 
 #[cfg(test)]
@@ -122,30 +183,58 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
 /// WATCH / UNWATCH / RESET) is appended to `client.queued_argvs` and the
 /// client receives `+QUEUED\r\n` instead of executing immediately.
 pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
-    let name: RedisString = match ctx.client_ref().arg(0) {
-        Some(s) => s.clone(),
+    let command_name = match ctx.client_ref().arg(0) {
+        Some(s) => StackCommandName::from_slice(s.as_bytes()),
         None => return Err(RedisError::runtime(b"ERR empty command")),
     };
-    if ctx.client_ref().is_replica() && !is_replica_allowed_command(name.as_bytes()) {
+    let name = command_name.as_bytes();
+    if ctx.client_ref().is_replica() && !is_replica_allowed_command(name) {
         return Ok(());
     }
     if ctx.client_ref().flag_multi() {
-        if crate::multi::is_no_multi_command(name.as_bytes()) {
-            if crate::multi::is_multi_command(name.as_bytes()) {
+        if crate::multi::is_no_multi_command(name) {
+            if crate::multi::is_multi_command(name) {
                 crate::multi::flag_transaction_dirty_exec(ctx.client_mut());
             }
-            return Err(crate::multi::reject_no_multi_command(name.as_bytes()));
+            return Err(crate::multi::reject_no_multi_command(name));
         }
-        if !crate::multi::is_tx_control_command(name.as_bytes()) {
+        if !crate::multi::is_tx_control_command(name) {
             return crate::multi::queue_current_command(ctx);
         }
     }
     if ctx.client_ref().in_pubsub_mode()
-        && !crate::pubsub::is_allowed_in_subscribe_mode(name.as_bytes())
+        && !crate::pubsub::is_allowed_in_subscribe_mode(name)
     {
-        return Err(crate::pubsub::subscribe_mode_error(name.as_bytes()));
+        return Err(crate::pubsub::subscribe_mode_error(name));
     }
-    dispatch_command_name(ctx, name.as_bytes())
+    dispatch_command_name(ctx, name)
+}
+
+enum StackCommandName {
+    Inline { bytes: [u8; 32], len: usize },
+    Heap(Vec<u8>),
+}
+
+impl StackCommandName {
+    fn from_slice(input: &[u8]) -> Self {
+        if input.len() <= 32 {
+            let mut bytes = [0; 32];
+            bytes[..input.len()].copy_from_slice(input);
+            Self::Inline {
+                bytes,
+                len: input.len(),
+            }
+        } else {
+            Self::Heap(input.to_vec())
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Inline { bytes, len } => &bytes[..*len],
+            Self::Heap(bytes) => bytes.as_slice(),
+        }
+    }
 }
 
 /// Dispatch using an externally-supplied command name.
