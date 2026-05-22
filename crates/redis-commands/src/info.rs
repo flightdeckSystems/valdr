@@ -81,8 +81,6 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             .iter()
             .any(|s| ascii_eq_ignore_case(s.as_bytes(), b"default"));
 
-    let dbsize = ctx.db().size();
-    let expires_count = ctx.db().expires_count();
     let pid = std::process::id();
     let uptime = now_unix_seconds().saturating_sub(server_start_time());
     let metrics = server_metrics();
@@ -260,19 +258,8 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
     if want(b"keyspace") {
         let _ = writeln!(buf, "# Keyspace\r");
-        let current_db_id = ctx.client_ref().db_index;
-        let dbs = redis_core::databases::global_databases();
-        for i in 0..dbs.count() as u32 {
-            let (keys, expires) = if i == current_db_id {
-                (dbsize, expires_count)
-            } else {
-                let arc = dbs.get(i);
-                let guard = match arc.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                (guard.size(), guard.expires_count())
-            };
+        for i in 0..ctx.database_count() as u32 {
+            let (keys, expires) = ctx.with_db_index(i, |db| (db.size(), db.expires_count()))?;
             if keys > 0 {
                 let _ = writeln!(
                     buf,
@@ -317,3 +304,15 @@ fn ascii_lower(b: u8) -> u8 {
         b
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        reference/valkey/src/server.c INFO keyspace DB iteration
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         1
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         INFO keyspace uses CommandContext DB routing so it can read
+//                  RuntimeOwner-owned DBs without `global_databases()`.
+// ──────────────────────────────────────────────────────────────────────────

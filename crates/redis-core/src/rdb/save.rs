@@ -7,7 +7,7 @@
 //!
 //! File layout:
 //!   - Magic header + AUX fields
-//!   - SELECTDB(0) + RESIZEDB hints
+//!   - SELECTDB + RESIZEDB hints for every non-empty logical DB
 //!   - Per-key: optional EXPIRETIME_MS + type byte + value payload
 //!   - EOF + CRC64 trailer
 //!
@@ -36,61 +36,67 @@ use super::string::save_string_object;
 use super::varint::write_len;
 use super::zset::save_zset_object;
 
-/// Write the complete RDB representation of `db` to the byte buffer `buf`.
-///
-/// The buffer includes magic, AUX fields, one DB section (id 0), all keys
-/// with optional EXPIRETIME_MS opcodes, EOF, and the CRC64 trailer.
-fn write_rdb_to_buf(db: &RedisDb, buf: &mut Vec<u8>) -> io::Result<()> {
+fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
     write_magic(buf)?;
     write_aux_fields(buf)?;
-
-    buf.write_all(&[RDB_OPCODE_SELECTDB])?;
-    write_len(buf, db.id as u64)?;
-
-    let total_keys = db.size();
-    let expires_count = db.expires_count();
-    buf.write_all(&[RDB_OPCODE_RESIZEDB])?;
-    write_len(buf, total_keys)?;
-    write_len(buf, expires_count)?;
 
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    for (key, obj) in db.iter_for_eviction() {
-        if obj.expire != EXPIRY_NONE && obj.expire < now_ms {
+    for db in dbs {
+        let live_keys = db
+            .iter_for_eviction()
+            .filter(|(_, obj)| obj.expire == EXPIRY_NONE || obj.expire >= now_ms)
+            .count();
+        if live_keys == 0 {
             continue;
         }
 
-        if obj.expire != EXPIRY_NONE {
-            buf.write_all(&[RDB_OPCODE_EXPIRETIME_MS])?;
-            buf.write_all(&obj.expire.to_le_bytes())?;
-        }
+        buf.write_all(&[RDB_OPCODE_SELECTDB])?;
+        write_len(buf, db.id as u64)?;
 
-        let type_byte = match &obj.kind {
-            ObjectKind::String(_) => RDB_TYPE_STRING,
-            ObjectKind::Hash(_) => RDB_TYPE_HASH,
-            ObjectKind::List(_) => RDB_TYPE_LIST,
-            ObjectKind::Set(_) => RDB_TYPE_SET,
-            ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
-            ObjectKind::Stream(_) => RDB_TYPE_STREAM_LISTPACKS_3,
-            ObjectKind::Json(_) => RDB_TYPE_JSON_NATIVE,
-            ObjectKind::Bloom(_) => RDB_TYPE_BLOOM_NATIVE,
-            ObjectKind::Module => continue,
-        };
-        buf.write_all(&[type_byte])?;
-        write_rdb_string(buf, key.as_bytes())?;
-        match &obj.kind {
-            ObjectKind::String(_) => save_string_object(buf, obj)?,
-            ObjectKind::Hash(_) => save_hash_object(buf, obj)?,
-            ObjectKind::List(_) => save_list_object(buf, obj)?,
-            ObjectKind::Set(_) => save_set_object(buf, obj)?,
-            ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
-            ObjectKind::Stream(_) => save_stream_object(buf, obj)?,
-            ObjectKind::Json(_) => save_json_object(buf, obj)?,
-            ObjectKind::Bloom(_) => save_bloom_object(buf, obj)?,
-            ObjectKind::Module => unreachable!(),
+        let total_keys = db.size();
+        let expires_count = db.expires_count();
+        buf.write_all(&[RDB_OPCODE_RESIZEDB])?;
+        write_len(buf, total_keys)?;
+        write_len(buf, expires_count)?;
+
+        for (key, obj) in db.iter_for_eviction() {
+            if obj.expire != EXPIRY_NONE && obj.expire < now_ms {
+                continue;
+            }
+
+            if obj.expire != EXPIRY_NONE {
+                buf.write_all(&[RDB_OPCODE_EXPIRETIME_MS])?;
+                buf.write_all(&obj.expire.to_le_bytes())?;
+            }
+
+            let type_byte = match &obj.kind {
+                ObjectKind::String(_) => RDB_TYPE_STRING,
+                ObjectKind::Hash(_) => RDB_TYPE_HASH,
+                ObjectKind::List(_) => RDB_TYPE_LIST,
+                ObjectKind::Set(_) => RDB_TYPE_SET,
+                ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
+                ObjectKind::Stream(_) => RDB_TYPE_STREAM_LISTPACKS_3,
+                ObjectKind::Json(_) => RDB_TYPE_JSON_NATIVE,
+                ObjectKind::Bloom(_) => RDB_TYPE_BLOOM_NATIVE,
+                ObjectKind::Module => continue,
+            };
+            buf.write_all(&[type_byte])?;
+            write_rdb_string(buf, key.as_bytes())?;
+            match &obj.kind {
+                ObjectKind::String(_) => save_string_object(buf, obj)?,
+                ObjectKind::Hash(_) => save_hash_object(buf, obj)?,
+                ObjectKind::List(_) => save_list_object(buf, obj)?,
+                ObjectKind::Set(_) => save_set_object(buf, obj)?,
+                ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
+                ObjectKind::Stream(_) => save_stream_object(buf, obj)?,
+                ObjectKind::Json(_) => save_json_object(buf, obj)?,
+                ObjectKind::Bloom(_) => save_bloom_object(buf, obj)?,
+                ObjectKind::Module => unreachable!(),
+            }
         }
     }
 
@@ -148,8 +154,13 @@ fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> 
 /// A temporary file `<path>.tmp` is written first; on success it is renamed
 /// over `path`. This ensures the on-disk file is never partially written.
 pub fn save_rdb(db: &RedisDb, path: &Path) -> io::Result<()> {
+    save_rdb_databases(std::slice::from_ref(db), path)
+}
+
+/// Save every non-empty logical DB to `path`.
+pub fn save_rdb_databases(dbs: &[RedisDb], path: &Path) -> io::Result<()> {
     let mut buf: Vec<u8> = Vec::with_capacity(256);
-    write_rdb_to_buf(db, &mut buf)?;
+    write_rdb_dbs_to_buf(dbs, &mut buf)?;
 
     let tmp_path = path.with_extension("rdb.tmp");
     {
@@ -159,3 +170,15 @@ pub fn save_rdb(db: &RedisDb, path: &Path) -> io::Result<()> {
     }
     std::fs::rename(&tmp_path, path)
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        reference/valkey/src/rdb.c save DB iteration semantics
+//   target_crate:  redis-core
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         RuntimeOwner persistence can now save a caller-owned DB
+//                  slice without reading the transitional global DB store.
+// ──────────────────────────────────────────────────────────────────────────

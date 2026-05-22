@@ -5,14 +5,11 @@
 //! `mio` owner loop approved by
 //! `harness/architecture/decisions/runtime-ownership.md`.
 //!
-//! The transitional DB model is intentional: command dispatch still locks the
-//! existing `global_databases()` handles. RuntimeOwner owns plain-TCP sockets,
-//! client parser state, per-slot foreign payload receivers, and ordinary reply
-//! flushing, but it does not create a second live `Vec<RedisDb>`.
-//!
-//! `CommandContext::with_server` now attaches a DB-list route to the same
-//! global handles, so the owner loop has a selected-DB/cross-DB routing
-//! boundary without changing the live storage owner yet.
+//! RuntimeOwner owns accepted plain-TCP sockets, client parser state, per-slot
+//! foreign payload receivers, ordinary reply flushing, and the live
+//! `Vec<RedisDb>` used by normal command execution. Commands still enter
+//! `redis_commands::dispatch` through `CommandContext`; the context DB-list
+//! route points at the owner-held DB slice instead of `global_databases()`.
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
@@ -20,25 +17,27 @@ use std::net::{Shutdown, TcpListener as StdTcpListener, TcpStream as StdTcpStrea
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Events, Interest, Poll, Registry as MioRegistry, Token};
 use redis_core::client_info::client_info_registry;
-use redis_core::databases::global_databases;
+use redis_core::db::RedisDb;
+use redis_core::expire::run_active_expire_tick_on_db;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
 use redis_types::RedisString;
 
-const DEFAULT_DATABASE_COUNT: u32 = 16;
+pub const DEFAULT_DATABASE_COUNT: u32 = 16;
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 const MAX_COMMANDS_PER_SLOT_TICK: usize = 128;
 const LISTENER_TOKEN: Token = Token(0);
 const SLOT_TOKEN_BASE: usize = 1;
 const POLL_TIMEOUT: Duration = Duration::from_millis(2);
+const ACTIVE_EXPIRE_FALLBACK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Typed key into the future RuntimeOwner client-slot table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -390,10 +389,6 @@ struct SlotDispatchOutcome {
 }
 
 /// Owner of normal plain-TCP command execution for the mio readiness path.
-///
-/// This is still transitional: it owns accepted plain-TCP sockets and client
-/// slots, but dispatch reaches live keyspace state through `global_databases()`
-/// handles rather than an owner-held `Vec<RedisDb>`.
 pub struct RuntimeOwner {
     config: RuntimeOwnerConfig,
     poll_driver: PollDriverHandle,
@@ -401,20 +396,35 @@ pub struct RuntimeOwner {
     free_slots: Vec<SlotId>,
     continuation_queue: VecDeque<SlotId>,
     queued_continuations: HashSet<SlotId>,
-    database_count: u32,
+    dbs: Vec<RedisDb>,
+    active_expire_cursor: usize,
+    last_active_expire: Instant,
     events: VecDeque<RuntimeEvent>,
 }
 
 impl RuntimeOwner {
     pub fn new(config: RuntimeOwnerConfig) -> Self {
+        let dbs = create_databases(config.database_count());
+        Self::with_databases(config, dbs)
+    }
+
+    pub fn with_databases(config: RuntimeOwnerConfig, mut dbs: Vec<RedisDb>) -> Self {
+        if dbs.is_empty() {
+            dbs.push(RedisDb::new(0));
+        }
+        for (idx, db) in dbs.iter_mut().enumerate() {
+            db.id = idx as u32;
+        }
         Self {
-            database_count: config.database_count(),
             config,
             poll_driver: PollDriverHandle::abstract_placeholder(),
             slots: Vec::new(),
             free_slots: Vec::new(),
             continuation_queue: VecDeque::new(),
             queued_continuations: HashSet::new(),
+            dbs,
+            active_expire_cursor: 0,
+            last_active_expire: Instant::now(),
             events: VecDeque::new(),
         }
     }
@@ -432,7 +442,15 @@ impl RuntimeOwner {
     }
 
     pub fn database_count(&self) -> usize {
-        self.database_count as usize
+        self.dbs.len()
+    }
+
+    pub fn dbs(&self) -> &[RedisDb] {
+        &self.dbs
+    }
+
+    pub fn dbs_mut(&mut self) -> &mut [RedisDb] {
+        &mut self.dbs
     }
 
     pub fn active_slot_count(&self) -> usize {
@@ -502,6 +520,7 @@ impl RuntimeOwner {
         registry: Arc<Mutex<PubSubRegistry>>,
         server: Arc<redis_core::RedisServer>,
         tcp_port: u16,
+        initial_dbs: Vec<RedisDb>,
     ) {
         let _ = tcp_port;
         if let Err(e) = listener.set_nonblocking(true) {
@@ -526,14 +545,15 @@ impl RuntimeOwner {
         let mut events = Events::with_capacity(DEFAULT_EVENT_CAPACITY);
         let config = RuntimeOwnerConfig::disabled()
             .with_enabled(true)
-            .with_database_count(global_databases().count() as u32);
-        let mut owner = RuntimeOwner::new(config);
+            .with_database_count(initial_dbs.len() as u32);
+        let mut owner = RuntimeOwner::with_databases(config, initial_dbs);
         owner.poll_driver = PollDriverHandle::mio(1);
-        eprintln!("redis-server: RuntimeOwner mio plain TCP loop enabled");
+        eprintln!("redis-server: RuntimeOwner mio plain TCP loop enabled with owner-owned DBs");
 
         while !shutdown.load(Ordering::SeqCst) {
             let mut progressed = false;
 
+            progressed |= owner.active_expire_step();
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
 
             let timeout = if owner.has_scheduled_commands() {
@@ -919,12 +939,6 @@ impl RuntimeOwner {
             return SlotDispatchOutcome::default();
         }
 
-        let db0 = global_databases().get(0);
-        let mut batch_db0_guard = if slot.client.db_index == 0 {
-            Some(super::lock_redis_db(&db0))
-        } else {
-            None
-        };
         let mut consumed_total = 0usize;
         let mut commands = 0usize;
         let mut saw_command = false;
@@ -951,26 +965,20 @@ impl RuntimeOwner {
                         super::update_client_info_snapshot(&slot.client, &last_cmd_name);
                     }
 
-                    if slot.client.db_index == 0 {
-                        if batch_db0_guard.is_none() {
-                            batch_db0_guard = Some(super::lock_redis_db(&db0));
-                        }
-                        if let Some(db_guard) = batch_db0_guard.as_mut() {
-                            super::process_current_command_with_db(
-                                &mut slot.client,
-                                db_guard,
-                                registry,
-                                server,
-                            );
-                        }
-                    } else {
-                        batch_db0_guard = None;
-                        super::process_current_command(&mut slot.client, registry, server);
+                    if (slot.client.db_index as usize) >= self.dbs.len() {
+                        super::queue_error_reply(
+                            &mut slot.client,
+                            &redis_types::RedisError::runtime(b"ERR DB index is out of range"),
+                        );
+                        slot.mark_close_after_flush();
+                        break;
                     }
-
-                    if slot.client.db_index != 0 || slot.client.blocked_on_keys {
-                        batch_db0_guard = None;
-                    }
+                    super::process_current_command_with_db_list(
+                        &mut slot.client,
+                        &mut self.dbs,
+                        registry,
+                        server,
+                    );
 
                     if slot.client.should_close {
                         slot.mark_close_after_flush();
@@ -997,7 +1005,6 @@ impl RuntimeOwner {
                 slot.client.query_buf.drain(..consumed_total);
             }
         }
-        drop(batch_db0_guard);
 
         let reply = slot.client.drain_reply();
         let queued_write = !reply.is_empty();
@@ -1014,6 +1021,29 @@ impl RuntimeOwner {
             queued_write,
             reschedule,
         }
+    }
+
+    fn active_expire_step(&mut self) -> bool {
+        if self.dbs.is_empty() {
+            return false;
+        }
+        let (effort, hz) = redis_core::expire::active_expire_config().snapshot();
+        if effort == 0 {
+            return false;
+        }
+        let interval = if hz == 0 {
+            ACTIVE_EXPIRE_FALLBACK_INTERVAL
+        } else {
+            Duration::from_millis((1000 / hz).max(1) as u64)
+        };
+        if self.last_active_expire.elapsed() < interval {
+            return false;
+        }
+        self.last_active_expire = Instant::now();
+        let idx = self.active_expire_cursor % self.dbs.len();
+        self.active_expire_cursor = (self.active_expire_cursor + 1) % self.dbs.len();
+        let metrics = server_metrics();
+        run_active_expire_tick_on_db(&mut self.dbs[idx], effort, Some(metrics.as_ref())) > 0
     }
 
     fn flush_slot_pending_write(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
@@ -1117,6 +1147,11 @@ impl RuntimeOwner {
             }
         }
     }
+}
+
+fn create_databases(count: u32) -> Vec<RedisDb> {
+    let count = count.max(1);
+    (0..count).map(RedisDb::new).collect()
 }
 
 fn token_for_slot(slot_id: SlotId) -> Token {
@@ -1307,8 +1342,6 @@ mod tests {
 //   todos:         0
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         Mio readiness plain-TCP owner loop with stable slot tokens.
-//                  CommandContext carries a route to the existing DB handles;
-//                  no command fast path or owner-owned live DB migration is
-//                  introduced.
+//   notes:         Mio readiness plain-TCP owner loop with stable slot tokens
+//                  and owner-owned live DB storage for normal command dispatch.
 // --------------------------------------------------------------------------

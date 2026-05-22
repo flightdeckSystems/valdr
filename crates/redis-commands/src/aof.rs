@@ -89,6 +89,7 @@ pub fn remove_aof_writer() {
 pub struct AofWriter {
     pub path: PathBuf,
     file: Mutex<BufWriter<File>>,
+    selected_db: Mutex<Option<u32>>,
     pub pending_bytes: AtomicUsize,
     pub fsync_policy: AtomicU8,
 }
@@ -100,6 +101,7 @@ impl AofWriter {
         Ok(Self {
             path: path.to_path_buf(),
             file: Mutex::new(BufWriter::new(file)),
+            selected_db: Mutex::new(None),
             pending_bytes: AtomicUsize::new(0),
             fsync_policy: AtomicU8::new(fsync_policy),
         })
@@ -111,7 +113,29 @@ impl AofWriter {
     /// returning. Otherwise the everysec background thread or the OS handles
     /// durability.
     pub fn append(&self, argv: &[RedisString]) -> io::Result<()> {
-        let encoded = encode_resp_command(argv);
+        self.append_selected(0, argv)
+    }
+
+    /// Append a command that was executed against logical DB `db_id`.
+    ///
+    /// Mirrors Valkey `feedAppendOnlyFile`: a SELECT record is inserted when
+    /// the target DB differs from the previous AOF record, then the command is
+    /// appended in the same RESP multibulk format used by replication.
+    pub fn append_selected(&self, db_id: u32, argv: &[RedisString]) -> io::Result<()> {
+        let mut encoded = Vec::with_capacity(64);
+        {
+            let mut selected = match self.selected_db.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if *selected != Some(db_id) {
+                let db_arg = RedisString::from_vec(db_id.to_string().into_bytes());
+                let select = [RedisString::from_bytes(b"SELECT"), db_arg];
+                encoded.extend_from_slice(&encode_resp_command(&select));
+                *selected = Some(db_id);
+            }
+        }
+        encoded.extend_from_slice(&encode_resp_command(argv));
         let len = encoded.len();
         {
             let mut guard = match self.file.lock() {
@@ -223,11 +247,37 @@ pub fn spawn_fsync_thread() {
 ///
 /// After the data command each key with a TTL gets PEXPIREAT.
 pub fn write_aof_rewrite<W: Write>(db: &RedisDb, writer: &mut W) -> io::Result<()> {
+    write_aof_rewrite_for_dbs(std::slice::from_ref(db), writer)
+}
+
+/// Write a compact AOF rewrite for every non-empty logical DB in order.
+pub fn write_aof_rewrite_for_dbs<W: Write>(dbs: &[RedisDb], writer: &mut W) -> io::Result<()> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
+    let mut selected_db: Option<u32> = None;
+    for db in dbs {
+        if db.size() == 0 {
+            continue;
+        }
+        if selected_db != Some(db.id) {
+            let db_id = RedisString::from_vec(db.id.to_string().into_bytes());
+            let cmd = [RedisString::from_bytes(b"SELECT"), db_id];
+            writer.write_all(&encode_resp_command(&cmd))?;
+            selected_db = Some(db.id);
+        }
+        write_aof_rewrite_db_contents(db, writer, now_ms)?;
+    }
+    Ok(())
+}
+
+fn write_aof_rewrite_db_contents<W: Write>(
+    db: &RedisDb,
+    writer: &mut W,
+    now_ms: i64,
+) -> io::Result<()> {
     for (key, obj) in db.iter_for_eviction() {
         if obj.expire != EXPIRY_NONE && obj.expire <= now_ms {
             continue;
@@ -494,12 +544,28 @@ fn format_score(score: f64) -> String {
 ///
 /// Returns the number of commands successfully replayed.
 pub fn replay_aof(path: &Path, db: &mut RedisDb) -> io::Result<usize> {
-    use redis_core::object::EXPIRY_NONE;
+    replay_aof_databases(path, std::slice::from_mut(db))
+}
+
+/// Replay an AOF file into an owner-provided logical DB vector.
+///
+/// SELECT commands update the replay target. This is used during startup
+/// before `RuntimeOwner` begins polling sockets, so it mutates only the DB
+/// vector that will become the owner-owned live keyspace.
+pub fn replay_aof_databases(path: &Path, dbs: &mut [RedisDb]) -> io::Result<usize> {
     use redis_protocol::parse_inline_or_multibulk;
+
+    if dbs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "AOF replay requires at least one database",
+        ));
+    }
 
     let data = std::fs::read(path)?;
     let mut buf: &[u8] = &data;
     let mut replayed = 0usize;
+    let mut selected_db: usize = 0;
 
     loop {
         while buf.starts_with(b"#") {
@@ -519,7 +585,28 @@ pub fn replay_aof(path: &Path, db: &mut RedisDb) -> io::Result<usize> {
                 if argv.is_empty() {
                     continue;
                 }
-                dispatch_replay_command(&argv, db);
+                let name_lower: Vec<u8> = argv[0]
+                    .as_bytes()
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
+                if name_lower.as_slice() == b"select" && argv.len() >= 2 {
+                    if let Some(index) = parse_usize_ascii(argv[1].as_bytes()) {
+                        if index < dbs.len() {
+                            selected_db = index;
+                        }
+                    }
+                    replayed += 1;
+                    continue;
+                }
+                if name_lower.as_slice() == b"flushall" {
+                    for db in dbs.iter_mut() {
+                        db.clear();
+                    }
+                    replayed += 1;
+                    continue;
+                }
+                dispatch_replay_command(&argv, &mut dbs[selected_db]);
                 replayed += 1;
             }
             Ok(None) => {
@@ -567,7 +654,7 @@ fn dispatch_via_handler(argv: &[RedisString], db: &mut RedisDb) {
 ///
 /// Unknown or unsupported commands during replay are silently skipped.
 fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) {
-    use redis_core::object::{RedisObject, StringEncoding, ObjectKind, EXPIRY_NONE};
+    use redis_core::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 
     if argv.is_empty() {
         return;
@@ -600,7 +687,6 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) {
             db.insert(key, val);
         }
         b"rpush" if argv.len() >= 3 => {
-            use redis_core::object::ListEncoding;
             use std::collections::VecDeque;
             let key = argv[1].clone();
             let mut dq = match db.lookup_key_read(&key) {
@@ -772,3 +858,29 @@ fn current_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+fn parse_usize_ascii(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut out: usize = 0;
+    for b in bytes {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        reference/valkey/src/aof.c feedAppendOnlyFile/replay path
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         AOF append/rewrite/replay now preserves logical DB
+//                  selection for RuntimeOwner-owned DB slices.
+// ──────────────────────────────────────────────────────────────────────────

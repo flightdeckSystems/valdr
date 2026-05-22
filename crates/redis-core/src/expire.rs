@@ -1121,6 +1121,26 @@ fn run_active_expire_tick(
     effort: u8,
     metrics: Option<&ServerMetrics>,
 ) -> u64 {
+    let mut deleted_total = 0u64;
+    let mut guard = match db.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    deleted_total += run_active_expire_tick_on_db(&mut guard, effort, metrics);
+    deleted_total
+}
+
+/// One active-expire tick against a caller-owned DB.
+///
+/// RuntimeOwner calls this from its cron/expire step after the live keyspace
+/// moves into the owner-owned DB vector. The legacy background-thread wrapper
+/// above is retained for tests and non-owner callers, but the default server
+/// path no longer spawns it after the owner-owned DB flip.
+pub fn run_active_expire_tick_on_db(
+    db: &mut RedisDb,
+    effort: u8,
+    metrics: Option<&ServerMetrics>,
+) -> u64 {
     use crate::db::notify_keyspace_event_global;
     use crate::notify::NOTIFY_EXPIRED;
 
@@ -1136,31 +1156,22 @@ fn run_active_expire_tick(
         let now_ms = wall_clock_ms();
         let seed = pseudo_random_seed();
 
-        let expired_in_pass = {
-            let mut guard = match db.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let db_id = guard.id;
-            let sample = guard.sample_expiring_keys(sample_size, seed);
-            let mut deleted_keys: Vec<RedisString> = Vec::new();
-            for (key, expire_at) in &sample {
-                if *expire_at <= now_ms {
-                    if guard.sync_delete(key) {
-                        deleted_keys.push(key.clone());
-                    }
+        let db_id = db.id;
+        let sample = db.sample_expiring_keys(sample_size, seed);
+        let mut deleted_keys: Vec<RedisString> = Vec::new();
+        for (key, expire_at) in &sample {
+            if *expire_at <= now_ms {
+                if db.sync_delete(key) {
+                    deleted_keys.push(key.clone());
                 }
             }
-            let deleted = deleted_keys.len() as u64;
-            let sampled = sample.len();
-            drop(guard);
-            for key in &deleted_keys {
-                notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, db_id);
-            }
-            (sampled, deleted)
-        };
+        }
+        let deleted = deleted_keys.len() as u64;
+        let sampled = sample.len();
+        for key in &deleted_keys {
+            notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, db_id);
+        }
 
-        let (sampled, deleted) = expired_in_pass;
         total_deleted = total_deleted.saturating_add(deleted);
         if let Some(m) = metrics {
             if deleted > 0 {

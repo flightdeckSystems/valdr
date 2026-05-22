@@ -1196,23 +1196,7 @@ pub fn flushdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// individually to avoid re-acquiring the mutex held by the accept loop.
 pub fn flushall_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     fire_stream_db_flushed_hook();
-    let current_db_id = ctx.selected_db_id();
-    ctx.db_mut().clear();
-    let count = ctx.database_count();
-    for i in 0..count {
-        let db_id = i as u32;
-        if db_id == current_db_id {
-            continue;
-        }
-        let Some(arc) = ctx.other_db_handle(db_id)? else {
-            continue;
-        };
-        let mut guard = match arc.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        guard.clear();
-    }
+    ctx.for_each_db_mut(|db| db.clear())?;
     ctx.reply_simple_string(b"OK")
 }
 
@@ -1733,55 +1717,27 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return ctx.reply_simple_string(b"OK");
     }
 
-    if current_db_id == id1u || current_db_id == id2u {
-        let other_db_id = if current_db_id == id1u { id2u } else { id1u };
-        let Some(other_arc) = ctx.other_db_handle(other_db_id)? else {
-            return ctx.reply_simple_string(b"OK");
-        };
-        let mut other_guard = match other_arc.lock() {
+    ctx.with_two_db_indices(id1u, id2u, |left, right| {
+        left.swap_contents_with(right);
+    })?;
+
+    let blocked_keys: Vec<RedisString> = {
+        let idx = match crate::blocked_keys::blocked_keys_index().lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        ctx.db_mut().swap_contents_with(&mut other_guard);
-        drop(other_guard);
-        let blocked_keys: Vec<RedisString> = {
-            let idx = match crate::blocked_keys::blocked_keys_index().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            idx.all_blocked_keys()
-        };
-        for key in &blocked_keys {
-            if ctx.db().find(key).is_some() {
-                ctx.client_mut().pending_wakes.push(key.clone());
+        idx.all_blocked_keys()
+    };
+    for db_id in [id1u, id2u] {
+        if db_id == current_db_id {
+            for key in &blocked_keys {
+                if ctx.db().find(key).is_some() {
+                    ctx.client_mut().pending_wakes.push(key.clone());
+                }
             }
-        }
-        wake_blocked_in_other_db(other_db_id);
-    } else {
-        let (lo, hi) = if id1u < id2u {
-            (id1u, id2u)
         } else {
-            (id2u, id1u)
-        };
-        let Some(lo_arc) = ctx.other_db_handle(lo)? else {
-            return ctx.reply_simple_string(b"OK");
-        };
-        let Some(hi_arc) = ctx.other_db_handle(hi)? else {
-            return ctx.reply_simple_string(b"OK");
-        };
-        let mut lo_guard = match lo_arc.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let mut hi_guard = match hi_arc.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        lo_guard.swap_contents_with(&mut hi_guard);
-        drop(hi_guard);
-        drop(lo_guard);
-        wake_blocked_in_other_db(id1u);
-        wake_blocked_in_other_db(id2u);
+            wake_blocked_in_other_db(db_id);
+        }
     }
 
     ctx.reply_simple_string(b"OK")

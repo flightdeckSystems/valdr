@@ -236,60 +236,16 @@ fn dispatch_queued_on_db(
     name: &[u8],
     selected_db: u32,
 ) -> RedisResult<()> {
-    if ctx.selected_db_id() == selected_db {
-        return dispatch_command_name(ctx, name);
-    }
-
-    let route = ctx.db_list_route();
-    let db = match ctx.other_db_handle(selected_db)? {
-        Some(db) => db,
-        None => return dispatch_command_name(ctx, name),
-    };
-    let mut guard = match db.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    let server = ctx.server_arc();
-    match ctx.pubsub.as_ref().cloned() {
-        Some(pubsub) => {
-            let mut selected_ctx = CommandContext::with_server_and_db_route(
-                ctx.client_mut(),
-                &mut guard,
-                route,
-                server,
-                pubsub,
-            );
-            dispatch_command_name(&mut selected_ctx, name)
-        }
-        None => {
-            let mut selected_ctx = CommandContext::with_db(ctx.client_mut(), &mut guard);
-            dispatch_command_name(&mut selected_ctx, name)
-        }
-    }
+    ctx.with_selected_db_index(selected_db, |selected_ctx| {
+        dispatch_command_name(selected_ctx, name)
+    })?
 }
 
 fn wake_blocked_for_db(ctx: &mut CommandContext, db_id: u32, key: &RedisString) {
-    if ctx.selected_db_id() == db_id {
-        wake_blocked_for_key(ctx.db_mut(), key);
-        wake_blocked_zset_for_key(ctx.db_mut(), key);
-        return;
-    }
-
-    let db = match ctx.other_db_handle(db_id) {
-        Ok(Some(db)) => db,
-        Ok(None) => {
-            wake_blocked_for_key(ctx.db_mut(), key);
-            wake_blocked_zset_for_key(ctx.db_mut(), key);
-            return;
-        }
-        Err(_) => return,
-    };
-    let mut guard = match db.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    wake_blocked_for_key(&mut guard, key);
-    wake_blocked_zset_for_key(&mut guard, key);
+    let _ = ctx.with_db_index(db_id, |db| {
+        wake_blocked_for_key(db, key);
+        wake_blocked_zset_for_key(db, key);
+    });
 }
 
 /// `WATCH key [key …]` — register CAS watchers on each key.

@@ -4,14 +4,13 @@
 //! `RuntimeOwner` loop: one owner accepts sockets, parses RESP requests,
 //! dispatches through `redis-commands`, and flushes replies.
 //!
-//! TLS remains on the earlier thread-per-connection path. Its outbound
-//! `mpsc::Sender` still lets PUBLISH and blocked wakeups deliver bytes without
-//! re-acquiring the subscriber's transport from a foreign thread.
+//! TLS transport migration is still human-gated. Once the owner loop owns the
+//! live DB vector, this binary refuses to start the old TLS command path rather
+//! than letting TLS commands mutate a divergent global DB.
 //!
 //! Out of scope for Wave A:
 //!   * Tokio/raw pollers; plain TCP uses `mio`, TLS keeps the older path.
-//!   * Multi-DB routing (every command sees DB 0).
-//!   * Replication, cluster, persistence, modules.
+//!   * Cluster, modules, and full TLS socket migration.
 
 use std::fs;
 use std::io::{self, Write};
@@ -34,7 +33,7 @@ use redis_core::client_info::client_info_registry;
 use redis_core::command_context::CommandContext;
 use redis_core::databases::global_databases;
 use redis_core::db::RedisDb;
-use redis_core::expire::{active_expire_config, spawn_active_expire_thread};
+use redis_core::expire::active_expire_config;
 use redis_core::lru_clock::spawn_lru_clock_thread;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
@@ -315,39 +314,27 @@ fn main() {
         Arc::clone(&live_config),
     ));
 
-    let db_zero = global_databases().get(0);
-
     redis_commands::replica_dialer::install_dialer_resources(
-        Arc::clone(&db_zero),
         Arc::clone(&server),
         args.port,
         args.dir.clone(),
     );
 
+    let mut owner_dbs: Vec<RedisDb> = (0..runtime_owner::DEFAULT_DATABASE_COUNT)
+        .map(RedisDb::new)
+        .collect();
+
     if !args.rdb_disabled {
         let rdb_path =
             redis_core::rdb::rdb_path(&live_config.rdb_dir(), &live_config.rdb_filename());
         if rdb_path.exists() {
-            match db_zero.lock() {
-                Ok(mut guard) => match redis_core::rdb::load_into(&mut guard, &rdb_path) {
-                    Ok(msg) => eprintln!("redis-server: {}", msg),
-                    Err(e) => eprintln!(
-                        "redis-server: RDB load failed ({}): {}",
-                        rdb_path.display(),
-                        e
-                    ),
-                },
-                Err(p) => {
-                    let mut guard = p.into_inner();
-                    match redis_core::rdb::load_into(&mut guard, &rdb_path) {
-                        Ok(msg) => eprintln!("redis-server: {}", msg),
-                        Err(e) => eprintln!(
-                            "redis-server: RDB load failed ({}): {}",
-                            rdb_path.display(),
-                            e
-                        ),
-                    }
-                }
+            match redis_core::rdb::load_into_dbs(&mut owner_dbs, &rdb_path) {
+                Ok(msg) => eprintln!("redis-server: {}", msg),
+                Err(e) => eprintln!(
+                    "redis-server: RDB load failed ({}): {}",
+                    rdb_path.display(),
+                    e
+                ),
             }
         }
     }
@@ -355,26 +342,13 @@ fn main() {
     if args.appendonly {
         let aof_path = std::path::Path::new(&args.dir).join(&args.appendfilename);
         if aof_path.exists() {
-            match db_zero.lock() {
-                Ok(mut guard) => match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
-                    Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
-                    Err(e) => eprintln!(
-                        "redis-server: AOF replay failed ({}): {}",
-                        aof_path.display(),
-                        e
-                    ),
-                },
-                Err(p) => {
-                    let mut guard = p.into_inner();
-                    match redis_commands::aof::replay_aof(&aof_path, &mut guard) {
-                        Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
-                        Err(e) => eprintln!(
-                            "redis-server: AOF replay failed ({}): {}",
-                            aof_path.display(),
-                            e
-                        ),
-                    }
-                }
+            match redis_commands::aof::replay_aof_databases(&aof_path, &mut owner_dbs) {
+                Ok(n) => eprintln!("redis-server: AOF replay: {} commands", n),
+                Err(e) => eprintln!(
+                    "redis-server: AOF replay failed ({}): {}",
+                    aof_path.display(),
+                    e
+                ),
             }
         }
         match redis_commands::aof::AofWriter::open(&aof_path, args.appendfsync) {
@@ -397,81 +371,24 @@ fn main() {
     redis_commands::stream::install_stream_hooks();
     spawn_blocked_timeout_thread(Arc::clone(&shutdown));
     let active_expire_cfg = Arc::clone(active_expire_config());
-    let metrics_arc = Arc::clone(server_metrics());
-    let _ = spawn_active_expire_thread(
-        global_databases().get(0),
-        active_expire_cfg,
-        Some(metrics_arc),
-    );
+    active_expire_cfg.set_effort(live_config.active_expire_effort());
+    active_expire_cfg.set_hz(live_config.hz());
     let _ = spawn_lru_clock_thread();
     spawn_bgsave_reaper(Arc::clone(&server), Arc::clone(&live_config));
     spawn_repl_bgsave_reaper();
 
-    let db_for_tls = global_databases().get(0);
-    let registry_for_tls = Arc::clone(&registry);
-    let server_for_tls = Arc::clone(&server);
-    let next_id_for_tls = Arc::clone(&next_client_id);
-    let shutdown_for_tls = Arc::clone(&shutdown);
-    let bind_ip_for_hook = bind_ip;
     redis_core::tls::install_tls_start_hook(Box::new(move |port| {
         if port == 0 {
             return;
         }
-        let cert = match live_config_for_hook.tls_cert_file() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "redis-server: CONFIG SET tls-port requires tls-cert-file to be set first"
-                );
-                live_config_for_hook.set_tls_port(0);
-                return;
-            }
-        };
-        let key = match live_config_for_hook.tls_key_file() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "redis-server: CONFIG SET tls-port requires tls-key-file to be set first"
-                );
-                live_config_for_hook.set_tls_port(0);
-                return;
-            }
-        };
-        let ca = live_config_for_hook.tls_ca_cert_file();
-        let require_client_cert = live_config_for_hook.tls_auth_clients() == 1;
-        let tls_cfg = match redis_core::tls::TlsConfig::from_paths(
-            &cert,
-            &key,
-            ca.as_deref(),
-            require_client_cert,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("redis-server: failed to load TLS config: {}", e);
-                live_config_for_hook.set_tls_port(0);
-                return;
-            }
-        };
-        let tls_addr = SocketAddr::new(bind_ip_for_hook, port);
-        let tls_listener = match TcpListener::bind(tls_addr) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("redis-server: TLS bind {} failed: {}", tls_addr, e);
-                live_config_for_hook.set_tls_port(0);
-                return;
-            }
-        };
-        eprintln!("redis-server: TLS listener on {}", tls_addr);
-        let db2 = Arc::clone(&db_for_tls);
-        let reg2 = Arc::clone(&registry_for_tls);
-        let srv2 = Arc::clone(&server_for_tls);
-        let id2 = Arc::clone(&next_id_for_tls);
-        let shut2 = Arc::clone(&shutdown_for_tls);
-        let _ = thread::Builder::new()
-            .name("tls-accept".to_string())
-            .spawn(move || {
-                serve_tls(tls_listener, tls_cfg, shut2, db2, id2, reg2, srv2);
-            });
+        // TODO(human): TLS transport still needs an owner-command/effect route.
+        // Starting the old TLS thread path after the DB flip would mutate the
+        // divergent global DB store, so reject the dynamic listener request.
+        eprintln!(
+            "redis-server: TLS listener request on port {} refused until TLS commands route through RuntimeOwner",
+            port
+        );
+        live_config_for_hook.set_tls_port(0);
     }));
 
     runtime_owner::RuntimeOwner::run_plain_tcp(
@@ -481,6 +398,7 @@ fn main() {
         registry,
         server,
         args.port,
+        owner_dbs,
     );
 }
 
@@ -1315,6 +1233,49 @@ fn process_current_command_with_db(
     client.reset_args();
 }
 
+/// Route the current `client.argv` through the dispatcher using the
+/// RuntimeOwner-owned DB list.
+fn process_current_command_with_db_list(
+    client: &mut Client,
+    dbs: &mut [RedisDb],
+    registry: &Arc<Mutex<PubSubRegistry>>,
+    server: &Arc<redis_core::RedisServer>,
+) {
+    client.clear_blocked_on_keys();
+
+    let metrics = server_metrics();
+    metrics
+        .total_commands_processed
+        .fetch_add(1, Ordering::Relaxed);
+    let dispatch_db = client.db_index;
+    let t0 = Instant::now();
+    let result = {
+        let mut ctx = CommandContext::with_server_and_db_list(
+            client,
+            dbs,
+            Arc::clone(server),
+            Arc::clone(registry),
+        );
+        let r = dispatch(&mut ctx);
+        let deferred: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
+        for key in &deferred {
+            let _ = ctx.with_db_index(dispatch_db, |db| {
+                redis_commands::list::wake_blocked_for_key(db, key);
+            });
+        }
+        r
+    };
+    let elapsed_us = t0.elapsed().as_micros() as u64;
+    metrics
+        .active_time_main_thread_us
+        .fetch_add(elapsed_us, Ordering::Relaxed);
+    if let Err(err) = result {
+        let payload = err.to_resp_payload();
+        encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
+    }
+    client.reset_args();
+}
+
 fn lock_redis_db(db: &Arc<Mutex<RedisDb>>) -> MutexGuard<'_, RedisDb> {
     match db.lock() {
         Ok(g) => g,
@@ -1398,11 +1359,11 @@ fn queue_error_reply(client: &mut Client, err: &RedisError) {
 //   source:        architect packet (Wave A main + Round 8a pub/sub wiring)
 //   target_crate:  redis-server
 //   confidence:    high
-//   todos:         0
+//   todos:         1
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Plain TCP now enters the mio RuntimeOwner loop.
-//                  TLS stays on the existing per-connection thread path with
-//                  mpsc foreign payload delivery. SIGINT handler is a no-op
-//                  stub.
+//   notes:         Plain TCP now enters the mio RuntimeOwner loop with an
+//                  owner-owned DB vector. Dynamic TLS listener startup is
+//                  refused with TODO(human) until TLS command effects can route
+//                  through the owner. SIGINT handler is a no-op stub.
 // ──────────────────────────────────────────────────────────────────────────

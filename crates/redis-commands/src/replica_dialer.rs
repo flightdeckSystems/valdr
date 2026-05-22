@@ -32,7 +32,6 @@ use redis_core::replication::{global_replication_state, repl_state_code, Replica
 use redis_core::server::RedisServer;
 use redis_types::RedisString;
 
-static GLOBAL_DB: OnceLock<Arc<Mutex<RedisDb>>> = OnceLock::new();
 static GLOBAL_SERVER: OnceLock<Arc<RedisServer>> = OnceLock::new();
 static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
@@ -42,12 +41,10 @@ static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 /// Called once from the binary's main before any `REPLICAOF` command can be
 /// issued. Subsequent calls are no-ops (OnceLock semantics).
 pub fn install_dialer_resources(
-    db: Arc<Mutex<RedisDb>>,
     server: Arc<RedisServer>,
     our_port: u16,
     rdb_dir: String,
 ) {
-    let _ = GLOBAL_DB.set(db);
     let _ = GLOBAL_SERVER.set(server);
     let _ = GLOBAL_OUR_PORT.set(our_port);
     let _ = GLOBAL_RDB_DIR.set(rdb_dir);
@@ -60,21 +57,16 @@ pub fn install_dialer_resources(
 /// `ReplicationState::dialer_stop_flag` is set to `true`. Returns an error
 /// when the dialer resources have not been installed.
 pub fn spawn_replica_dialer(host: RedisString, port: u16) -> Result<(), &'static str> {
-    let db = GLOBAL_DB.get().ok_or("dialer resources not installed")?.clone();
-    let server = GLOBAL_SERVER.get().ok_or("dialer resources not installed")?.clone();
-    let our_port = *GLOBAL_OUR_PORT.get().ok_or("dialer resources not installed")?;
-    let rdb_dir = GLOBAL_RDB_DIR.get().ok_or("dialer resources not installed")?.clone();
+    let _ = (host, port);
+    let _ = GLOBAL_SERVER.get().ok_or("dialer resources not installed")?;
+    let _ = GLOBAL_OUR_PORT.get().ok_or("dialer resources not installed")?;
+    let _ = GLOBAL_RDB_DIR.get().ok_or("dialer resources not installed")?;
 
-    let _ = thread::Builder::new()
-        .name(format!(
-            "replica-dialer-{}:{}",
-            String::from_utf8_lossy(host.as_bytes()),
-            port
-        ))
-        .spawn(move || {
-            dialer_loop(host, port, our_port, rdb_dir, db, server);
-        });
-    Ok(())
+    // TODO(architect): replica apply must become a RuntimeOwner event/channel
+    // before REPLICAOF can start after the owner-owned DB flip. The previous
+    // dialer mutated a global Arc<Mutex<RedisDb>>, which would now be a
+    // divergent keyspace.
+    Err("replica dialer blocked until RuntimeOwner-owned DB apply channel exists")
 }
 
 /// The outer reconnect loop. Connects to the master, runs the handshake,
@@ -524,11 +516,10 @@ fn stream_read_slice(stream: &TcpStream, buf: &mut [u8]) -> io::Result<usize> {
 //   source:        valkey/src/replication.c (replica-side state machine)
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         4
+//   todos:         1
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Wave C replica dialer. Partial-resync resume on
-//                  reconnect (TODO), AUTH-required masters (TODO), replica
-//                  priority for sentinel (TODO), min-replicas-to-write
-//                  gating (TODO).
+//   notes:         Replica dialer is explicitly blocked after the owner-owned
+//                  DB flip until replication apply can route through
+//                  RuntimeOwner instead of a divergent global DB.
 // ──────────────────────────────────────────────────────────────────────────

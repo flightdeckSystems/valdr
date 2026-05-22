@@ -90,6 +90,21 @@ fn skip_rdb_string(reader: &mut impl Read) -> io::Result<()> {
 /// in the `Ok` string for the caller to log. On failure an `io::Error` is
 /// returned; the caller should log and continue without crashing.
 pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
+    load_into_dbs(std::slice::from_mut(db), path)
+}
+
+/// Load an RDB file at `path` into the supplied logical DB vector.
+///
+/// `SELECTDB` opcodes switch the destination DB, matching Valkey startup load
+/// into `server.db[]`. The caller owns the DB vector; this helper does not
+/// touch `global_databases()`.
+pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
+    if dbs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "RDB load requires at least one database",
+        ));
+    }
     let file = std::fs::File::open(path)?;
     let mut raw = BufReader::new(file);
 
@@ -130,6 +145,7 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 
     let mut pending_expire: i64 = EXPIRY_NONE;
     let mut keys_loaded: u64 = 0;
+    let mut selected_db: usize = 0;
 
     loop {
         let opcode = read_byte(&mut reader)?;
@@ -141,7 +157,15 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
             }
 
             RDB_OPCODE_SELECTDB => {
-                let (_db_id, _is_enc) = load_len(&mut reader)?;
+                let (db_id, _is_enc) = load_len(&mut reader)?;
+                let db_index = db_id as usize;
+                if db_index >= dbs.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("RDB SELECTDB {} exceeds configured DB count", db_id),
+                    ));
+                }
+                selected_db = db_index;
             }
 
             RDB_OPCODE_RESIZEDB => {
@@ -189,7 +213,7 @@ pub fn load_into(db: &mut RedisDb, path: &Path) -> io::Result<String> {
 
                 obj.expire = expire;
                 let key = RedisString::from_vec(key_bytes);
-                db.insert(key, obj);
+                dbs[selected_db].insert(key, obj);
                 keys_loaded += 1;
             }
         }
@@ -319,3 +343,15 @@ fn load_bloom_object(reader: &mut impl Read) -> io::Result<crate::object::RedisO
     };
     Ok(crate::object::RedisObject::new_bloom_from_filter(bf))
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        reference/valkey/src/rdb.c SELECTDB load semantics
+//   target_crate:  redis-core
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Startup load can populate a caller-owned DB slice; SELECTDB
+//                  is bounded by that slice instead of `global_databases()`.
+// ──────────────────────────────────────────────────────────────────────────

@@ -277,6 +277,19 @@ owner-owned live DB migration is in scope.
    - route active expire and non-owner command effects through owner-owned DB
      APIs/channels, or stop with `TODO(architect)`/`TODO(human)` instead of
      creating a divergent DB path.
+   - implementation update: the plain-TCP `RuntimeOwner` now owns the live
+     `Vec<RedisDb>` and dispatches through `CommandContext`'s owner DB-list
+     route. Startup RDB load and AOF replay populate that owner vector before
+     the loop starts; active expire runs from the owner loop over the same
+     vector.
+   - persistence, AOF rewrite/replay, INFO keyspace, FLUSHALL, SWAPDB, queued
+     EXEC selected-DB dispatch, and deferred blocked-key wakes now use
+     `CommandContext` DB routing or caller-owned DB snapshots instead of naming
+     `global_databases()` in the runtime-owner path.
+   - TLS command effects and replica dialer apply are intentionally stopped
+     with `TODO(human)` / `TODO(architect)` until they have an owner-command or
+     owner-effect route; they do not mutate a divergent global DB after the
+     owner-owned DB flip.
 
 6. `runtime-owner-15` gates
    - wire-smoke, profile matrix, call-tree, and p100 regression comparators for

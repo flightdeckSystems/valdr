@@ -28,12 +28,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::client::ClientId;
 use redis_core::db::RedisDb;
-use redis_core::rdb::{rdb_path, save_rdb};
+use redis_core::rdb::{rdb_path, save_rdb_databases};
 use redis_core::replication::{global_replication_state, ReplBgsaveJob};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult};
 
-use crate::aof::{aof_writer, write_aof_rewrite};
+use crate::aof::{aof_writer, write_aof_rewrite_for_dbs};
 
 /// `SAVE` — synchronous RDB save.
 ///
@@ -46,10 +46,9 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let cfg = Arc::clone(&ctx.server().live_config);
     let path = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
 
-    let result = {
-        let db = ctx.db();
-        save_rdb(db, &path)
-    };
+    let snapshot = ctx.snapshot_all_dbs()?;
+    let snapshot_dbs = snapshots_to_dbs(&snapshot);
+    let result = save_rdb_databases(&snapshot_dbs, &path);
 
     match result {
         Ok(()) => {
@@ -91,10 +90,12 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     let cfg = Arc::clone(&server.live_config);
     let path: PathBuf = rdb_path(&cfg.rdb_dir(), &cfg.rdb_filename());
+    let snapshot = ctx.snapshot_all_dbs()?;
 
     #[cfg(unix)]
     {
         let server_arc = ctx.server_arc();
+        let snapshot_for_child = snapshot.clone();
 
         // SAFETY: fork(2) is the standard Unix mechanism for COW snapshot.
         // All requirements (single-threaded child, async-signal-safe ops only)
@@ -105,7 +106,12 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
-                let exit_code = if save_rdb(ctx.db(), &path).is_ok() { 0i32 } else { 1i32 };
+                let dbs = snapshots_to_dbs(&snapshot_for_child);
+                let exit_code = if save_rdb_databases(&dbs, &path).is_ok() {
+                    0i32
+                } else {
+                    1i32
+                };
                 libc::_exit(exit_code);
             }
             p
@@ -119,12 +125,11 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         eprintln!("redis-server: fork() failed, falling back to thread snapshot");
     }
 
-    let snapshot = snapshot_db(ctx.db());
     let _ = thread::Builder::new()
         .name("bgsave".to_string())
         .spawn(move || {
-            let tmp_db = RedisDb::from_snapshot(snapshot);
-            match save_rdb(&tmp_db, &path) {
+            let dbs = snapshots_to_dbs(&snapshot);
+            match save_rdb_databases(&dbs, &path) {
                 Ok(()) => {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -186,14 +191,24 @@ pub fn bgsave_for_replication(
     let parent_pid = std::process::id() as i32;
     let temp_path: PathBuf =
         std::path::Path::new(&dir).join(format!("temp-repl-{}.rdb", parent_pid));
+    let snapshot = match ctx.snapshot_all_dbs() {
+        Ok(snapshot) => snapshot,
+        Err(_) => return BgsaveForReplResult::Failed,
+    };
 
     #[cfg(unix)]
     {
         let path_for_child = temp_path.clone();
+        let snapshot_for_child = snapshot.clone();
         let pid = unsafe {
             let p = libc::fork();
             if p == 0 {
-                let exit_code = if save_rdb(ctx.db(), &path_for_child).is_ok() { 0i32 } else { 1i32 };
+                let dbs = snapshots_to_dbs(&snapshot_for_child);
+                let exit_code = if save_rdb_databases(&dbs, &path_for_child).is_ok() {
+                    0i32
+                } else {
+                    1i32
+                };
                 libc::_exit(exit_code);
             }
             p
@@ -215,7 +230,6 @@ pub fn bgsave_for_replication(
         );
     }
 
-    let snapshot = snapshot_db(ctx.db());
     let temp_for_thread = temp_path.clone();
     let repl_for_thread = Arc::clone(&repl);
     repl.install_repl_bgsave_job(ReplBgsaveJob {
@@ -227,8 +241,8 @@ pub fn bgsave_for_replication(
     let spawn = thread::Builder::new()
         .name("bgsave-repl".to_string())
         .spawn(move || {
-            let tmp_db = RedisDb::from_snapshot(snapshot);
-            let ok = save_rdb(&tmp_db, &temp_for_thread).is_ok();
+            let dbs = snapshots_to_dbs(&snapshot);
+            let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
             if !ok {
                 eprintln!(
                     "redis-server: BGSAVE-for-replication thread fallback save failed"
@@ -264,7 +278,7 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
     };
 
-    let snapshot = snapshot_db(ctx.db());
+    let snapshot = ctx.snapshot_all_dbs()?;
     let aof_path = writer_arc.path.clone();
 
     #[cfg(unix)]
@@ -316,7 +330,7 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// Write a complete AOF rewrite for `snapshot` to `tmp_path`, then atomically
 /// rename it over `final_path`.
 fn do_aof_rewrite(
-    snapshot: &[(redis_types::RedisString, redis_core::RedisObject)],
+    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
     tmp_path: &PathBuf,
     final_path: &PathBuf,
 ) -> std::io::Result<()> {
@@ -326,17 +340,35 @@ fn do_aof_rewrite(
         .truncate(true)
         .open(tmp_path)?;
     let mut buf = BufWriter::new(file);
-    let tmp_db = RedisDb::from_snapshot(snapshot.to_vec());
-    write_aof_rewrite(&tmp_db, &mut buf)?;
+    let dbs = snapshots_to_dbs(snapshot);
+    write_aof_rewrite_for_dbs(&dbs, &mut buf)?;
     buf.flush()?;
     std::fs::rename(tmp_path, final_path)?;
     Ok(())
 }
 
-/// Snapshot the entries of `db` into an owned `Vec` for the thread-based
-/// BGSAVE fallback used on non-Unix targets and on fork failure.
-fn snapshot_db(db: &RedisDb) -> Vec<(redis_types::RedisString, redis_core::RedisObject)> {
-    db.iter_for_eviction()
-        .map(|(k, v)| (k.clone(), v.clone()))
+fn snapshots_to_dbs(
+    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
+) -> Vec<RedisDb> {
+    snapshot
+        .iter()
+        .map(|(id, entries)| {
+            let mut db = RedisDb::from_snapshot(entries.clone());
+            db.id = *id;
+            db
+        })
         .collect()
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        src/rdb.c / src/aof.c persistence command integration
+//   target_crate:  redis-commands
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 3   (pre-existing fork/_exit wrappers; no new unsafe)
+//   notes:         Persistence snapshots now come from CommandContext's full
+//                  DB route so owner-owned DB storage is captured without
+//                  reading global_databases().
+// ──────────────────────────────────────────────────────────────────────────

@@ -36,6 +36,10 @@ pub enum DbStorage<'a> {
         selected: &'a mut RedisDb,
         route: DbListRoute,
     },
+    OwnerList {
+        selected_index: u32,
+        dbs: &'a mut [RedisDb],
+    },
 }
 
 impl<'a> DbStorage<'a> {
@@ -44,6 +48,13 @@ impl<'a> DbStorage<'a> {
             DbStorage::Owned(db) => db,
             DbStorage::Borrowed(db) => db,
             DbStorage::Routed { selected, .. } => selected,
+            DbStorage::OwnerList {
+                selected_index,
+                dbs,
+            } => {
+                let index = selected_position(dbs.len(), *selected_index);
+                &dbs[index]
+            }
         }
     }
 
@@ -52,14 +63,33 @@ impl<'a> DbStorage<'a> {
             DbStorage::Owned(db) => db,
             DbStorage::Borrowed(db) => db,
             DbStorage::Routed { selected, .. } => selected,
+            DbStorage::OwnerList {
+                selected_index,
+                dbs,
+            } => {
+                let index = selected_position(dbs.len(), *selected_index);
+                &mut dbs[index]
+            }
         }
     }
 
     fn route(&self) -> Option<DbListRoute> {
         match self {
             DbStorage::Routed { route, .. } => Some(*route),
-            DbStorage::Owned(_) | DbStorage::Borrowed(_) => None,
+            DbStorage::Owned(_) | DbStorage::Borrowed(_) | DbStorage::OwnerList { .. } => None,
         }
+    }
+
+    fn is_owner_list(&self) -> bool {
+        matches!(self, DbStorage::OwnerList { .. })
+    }
+}
+
+fn selected_position(len: usize, selected_index: u32) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (selected_index as usize).min(len - 1)
     }
 }
 
@@ -266,6 +296,30 @@ impl<'a> CommandContext<'a> {
         }
     }
 
+    /// Construct a production context backed by the RuntimeOwner-owned DB
+    /// slice.
+    ///
+    /// The selected DB is derived from `client.db_index`, matching Valkey's
+    /// per-client selected database semantics. Cross-DB commands route through
+    /// closure helpers on this context instead of taking global DB mutexes.
+    pub fn with_server_and_db_list(
+        client: &'a mut Client,
+        dbs: &'a mut [RedisDb],
+        server: Arc<RedisServer>,
+        pubsub: Arc<Mutex<PubSubRegistry>>,
+    ) -> Self {
+        let selected_index = client.db_index;
+        Self {
+            client,
+            db: DbStorage::OwnerList {
+                selected_index,
+                dbs,
+            },
+            server,
+            pubsub: Some(pubsub),
+        }
+    }
+
     // ── Args ──────────────────────────────────────────────────────
 
     pub fn arg(&self, i: usize) -> RedisResult<&RedisString> {
@@ -464,10 +518,14 @@ impl<'a> CommandContext<'a> {
     /// count so SELECT validation keeps matching the product envelope until
     /// tests opt into an explicit route.
     pub fn database_count(&self) -> usize {
-        self.db
-            .route()
-            .map(DbListRoute::count)
-            .unwrap_or_else(|| global_databases().count())
+        match &self.db {
+            DbStorage::OwnerList { dbs, .. } => dbs.len(),
+            _ => self
+                .db
+                .route()
+                .map(DbListRoute::count)
+                .unwrap_or_else(|| global_databases().count()),
+        }
     }
 
     /// Route to the logical DB list visible from this context.
@@ -507,6 +565,11 @@ impl<'a> CommandContext<'a> {
     /// changing the route internals.
     pub fn other_db_handle(&self, index: u32) -> RedisResult<Option<Arc<Mutex<RedisDb>>>> {
         self.validate_db_index(index as i64)?;
+        if self.db.is_owner_list() {
+            return Err(RedisError::runtime(
+                b"ERR owner DB route does not expose mutex handles",
+            ));
+        }
         if index == self.selected_db_id() {
             return Ok(None);
         }
@@ -525,12 +588,161 @@ impl<'a> CommandContext<'a> {
         f: impl FnOnce(&mut RedisDb) -> R,
     ) -> RedisResult<R> {
         self.validate_db_index(index as i64)?;
+        if let DbStorage::OwnerList { dbs, .. } = &mut self.db {
+            let pos = index as usize;
+            return Ok(f(&mut dbs[pos]));
+        }
         if index == self.selected_db_id() {
             return Ok(f(self.db.as_mut()));
         }
         let handle = self.db_list_route().get(index);
         let mut guard = lock_db_handle(&handle);
         Ok(f(&mut guard))
+    }
+
+    /// Run `f` with this context temporarily routed to `index` as its selected
+    /// DB.
+    ///
+    /// Queued EXEC dispatch uses this to preserve commands that changed DB via
+    /// an earlier queued SELECT. On owner-owned storage this simply changes the
+    /// selected index inside the DB slice route; on the transitional global
+    /// route it builds a short-lived context around the requested DB handle.
+    pub fn with_selected_db_index<R>(
+        &mut self,
+        index: u32,
+        f: impl FnOnce(&mut CommandContext<'_>) -> R,
+    ) -> RedisResult<R> {
+        self.validate_db_index(index as i64)?;
+        if let DbStorage::OwnerList { selected_index, .. } = &mut self.db {
+            let old = *selected_index;
+            *selected_index = index;
+            let result = f(self);
+            if let DbStorage::OwnerList { selected_index, .. } = &mut self.db {
+                *selected_index = old;
+            }
+            return Ok(result);
+        }
+
+        if index == self.selected_db_id() {
+            return Ok(f(self));
+        }
+
+        let route = self.db_list_route();
+        let handle = route.get(index);
+        let mut guard = lock_db_handle(&handle);
+        let server = self.server_arc();
+        match self.pubsub.as_ref().cloned() {
+            Some(pubsub) => {
+                let mut selected_ctx = CommandContext::with_server_and_db_route(
+                    self.client_mut(),
+                    &mut guard,
+                    route,
+                    server,
+                    pubsub,
+                );
+                Ok(f(&mut selected_ctx))
+            }
+            None => {
+                let mut selected_ctx = CommandContext::with_db(self.client_mut(), &mut guard);
+                Ok(f(&mut selected_ctx))
+            }
+        }
+    }
+
+    /// Run `f` once for every logical DB in the context route.
+    pub fn for_each_db_mut(
+        &mut self,
+        mut f: impl FnMut(&mut RedisDb),
+    ) -> RedisResult<()> {
+        if let DbStorage::OwnerList { dbs, .. } = &mut self.db {
+            for db in dbs.iter_mut() {
+                f(db);
+            }
+            return Ok(());
+        }
+
+        let current = self.selected_db_id();
+        f(self.db.as_mut());
+        let count = self.database_count();
+        for i in 0..count {
+            let db_id = i as u32;
+            if db_id == current {
+                continue;
+            }
+            let handle = self.db_list_route().get(db_id);
+            let mut guard = lock_db_handle(&handle);
+            f(&mut guard);
+        }
+        Ok(())
+    }
+
+    /// Run `f` with mutable access to two distinct logical DBs.
+    pub fn with_two_db_indices<R>(
+        &mut self,
+        first: u32,
+        second: u32,
+        f: impl FnOnce(&mut RedisDb, &mut RedisDb) -> R,
+    ) -> RedisResult<R> {
+        self.validate_db_index(first as i64)?;
+        self.validate_db_index(second as i64)?;
+        if first == second {
+            return Err(RedisError::runtime(
+                b"ERR source and destination objects are the same",
+            ));
+        }
+
+        if let DbStorage::OwnerList { dbs, .. } = &mut self.db {
+            let a = first as usize;
+            let b = second as usize;
+            if a < b {
+                let (lo, hi) = dbs.split_at_mut(b);
+                return Ok(f(&mut lo[a], &mut hi[0]));
+            }
+            let (lo, hi) = dbs.split_at_mut(a);
+            return Ok(f(&mut hi[0], &mut lo[b]));
+        }
+
+        let current = self.selected_db_id();
+        if first == current {
+            let handle = self.db_list_route().get(second);
+            let mut guard = lock_db_handle(&handle);
+            return Ok(f(self.db.as_mut(), &mut guard));
+        }
+        if second == current {
+            let handle = self.db_list_route().get(first);
+            let mut guard = lock_db_handle(&handle);
+            return Ok(f(&mut guard, self.db.as_mut()));
+        }
+
+        let (lo, hi, flip) = if first < second {
+            (first, second, false)
+        } else {
+            (second, first, true)
+        };
+        let lo_handle = self.db_list_route().get(lo);
+        let hi_handle = self.db_list_route().get(hi);
+        let mut lo_guard = lock_db_handle(&lo_handle);
+        let mut hi_guard = lock_db_handle(&hi_handle);
+        if flip {
+            Ok(f(&mut hi_guard, &mut lo_guard))
+        } else {
+            Ok(f(&mut lo_guard, &mut hi_guard))
+        }
+    }
+
+    /// Snapshot every logical DB reachable through this context.
+    pub fn snapshot_all_dbs(
+        &mut self,
+    ) -> RedisResult<Vec<(u32, Vec<(RedisString, RedisObject)>)>> {
+        let mut out = Vec::new();
+        self.for_each_db_mut(|db| {
+            let entries = db
+                .iter_for_eviction()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            out.push((db.id, entries));
+        })?;
+        Ok(out)
     }
 
     /// Mutable borrow of the underlying `Client`.

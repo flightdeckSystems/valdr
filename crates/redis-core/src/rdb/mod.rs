@@ -7,7 +7,8 @@
 //!   - `save`   — `save_rdb` writes a complete RDB file
 //!   - `load`   — `load_into` reads an RDB file into a `RedisDb`
 //!
-//! Re-exported entry points: `save_rdb`, `load_into`.
+//! Re-exported entry points: `save_rdb`, `save_rdb_databases`, `load_into`,
+//! `load_into_dbs`.
 
 pub mod crc;
 pub mod hash;
@@ -23,8 +24,8 @@ pub mod string;
 pub mod varint;
 pub mod zset;
 
-pub use load::load_into;
-pub use save::save_rdb;
+pub use load::{load_into, load_into_dbs};
+pub use save::{save_rdb, save_rdb_databases};
 
 use std::path::PathBuf;
 
@@ -32,3 +33,15 @@ use std::path::PathBuf;
 pub fn rdb_path(dir: &str, filename: &str) -> PathBuf {
     PathBuf::from(dir).join(filename)
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        RDB module surface
+//   target_crate:  redis-core
+//   confidence:    medium
+//   todos:         0
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Re-exports include caller-owned multi-DB load/save helpers
+//                  used by the RuntimeOwner-owned DB startup path.
+// ──────────────────────────────────────────────────────────────────────────

@@ -225,7 +225,7 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
 
     if let Some(aof) = aof {
         if let Some(argv) = argv_snapshot.as_ref() {
-            if let Err(e) = aof.append(argv) {
+            if let Err(e) = aof.append_selected(ctx.selected_db_id(), argv) {
                 eprintln!("redis-server: AOF append failed: {}", e);
             }
         }
