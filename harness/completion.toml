@@ -81,7 +81,7 @@ id = "latest-profile-hotspots"
 kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-post-scaffold-hotspots"
-runner = "bench-profile-hotspots-big"
+runner = "bench-profile-hotspots"
 
 [[criterion]]
 id = "final-owner-loop-wire-smoke"
@@ -102,7 +102,7 @@ id = "final-owner-loop-hotspots"
 kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-5-post-polish-hotspots"
-runner = "bench-profile-hotspots-big"
+runner = "bench-profile-hotspots"
 
 [[criterion]]
 id = "no-ready-auto-packets"
