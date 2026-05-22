@@ -177,6 +177,17 @@ registered any watch. Upstream checks whether the DB has watched keys before
 doing deeper work. The Rust port currently enters a global mutex path and
 allocates a `RedisString` in `signal_modified()` on every write.
 
+Implementation note (`runtime-owner-12-watch-dirty-fastpath`):
+`redis-core::db` now maintains an atomic count of active WATCH registrations.
+`signal_modified()`, `watched_keys_touch()`, and `clear()` use that count to
+skip RedisString construction, key snapshots, and the global watched-key mutex
+when no client is watching anything. Registration increments before taking the
+authoritative mutex so concurrent writes conservatively take the locked path;
+duplicate WATCH registrations roll the count back after the locked insert
+reports no new membership. `UNWATCH`/EXEC cleanup decrements by the exact
+number of removed client-key memberships. The runtime-owner canary corpus now
+includes a duplicate-WATCH/UNWATCH case.
+
 Allowed ideas:
 
 - add a cheap global or per-index "watchers present" fast path before locking;

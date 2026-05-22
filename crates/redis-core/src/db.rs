@@ -23,7 +23,7 @@
 //! which handles `*` and `?` but not `[...]` character classes yet.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -57,6 +57,7 @@ pub struct WatchedKeysIndex {
 }
 
 static WATCHED_KEYS_INDEX: OnceLock<Arc<Mutex<WatchedKeysIndex>>> = OnceLock::new();
+static WATCHED_KEYS_REGISTRATIONS: AtomicUsize = AtomicUsize::new(0);
 
 type SwapDbWakeFn = dyn Fn(u32) + Send + Sync;
 static SWAPDB_WAKE_HOOK: OnceLock<Box<SwapDbWakeFn>> = OnceLock::new();
@@ -158,8 +159,14 @@ static GLOBAL_NOTIFY_HANDLE: OnceLock<Arc<GlobalNotifyHandle>> = OnceLock::new()
 ///
 /// Should be called once during server initialisation, before any connection
 /// is accepted. Subsequent calls are no-ops (OnceLock semantics).
-pub fn install_global_notify_handle(pubsub: Arc<Mutex<PubSubRegistry>>, live_config: Arc<LiveConfig>) {
-    let _ = GLOBAL_NOTIFY_HANDLE.set(Arc::new(GlobalNotifyHandle { pubsub, live_config }));
+pub fn install_global_notify_handle(
+    pubsub: Arc<Mutex<PubSubRegistry>>,
+    live_config: Arc<LiveConfig>,
+) {
+    let _ = GLOBAL_NOTIFY_HANDLE.set(Arc::new(GlobalNotifyHandle {
+        pubsub,
+        live_config,
+    }));
 }
 
 /// Publish a keyspace notification from a code path that has no `CommandContext`.
@@ -203,7 +210,11 @@ pub fn notify_keyspace_event_global(event_type: i32, event: &[u8], key: &RedisSt
     }
 }
 
-fn publish_to_registry(registry: &Arc<Mutex<PubSubRegistry>>, channel: &RedisString, message: &RedisString) {
+fn publish_to_registry(
+    registry: &Arc<Mutex<PubSubRegistry>>,
+    channel: &RedisString,
+    message: &RedisString,
+) {
     use redis_protocol::frame::encode_resp2;
     use redis_protocol::RespFrame;
     let frame_bytes = {
@@ -295,14 +306,40 @@ pub fn watched_keys_index() -> &'static Arc<Mutex<WatchedKeysIndex>> {
     WATCHED_KEYS_INDEX.get_or_init(|| Arc::new(Mutex::new(WatchedKeysIndex::default())))
 }
 
+/// True when any client has at least one WATCH registration.
+///
+/// This is a fast-path mirror of the global watched-key index. The index
+/// mutex remains authoritative for exact key/client membership.
+pub fn watched_keys_any() -> bool {
+    WATCHED_KEYS_REGISTRATIONS.load(Ordering::Acquire) != 0
+}
+
+fn watched_keys_sub_registrations(n: usize) {
+    if n == 0 {
+        return;
+    }
+    let _ =
+        WATCHED_KEYS_REGISTRATIONS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            Some(current.saturating_sub(n))
+        });
+}
+
 /// Register `client_id` as a watcher of `key` in the global index.
 pub fn watched_keys_index_add(key: &RedisString, client_id: ClientId) {
+    WATCHED_KEYS_REGISTRATIONS.fetch_add(1, Ordering::AcqRel);
     let idx = watched_keys_index();
     let mut guard = match idx.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    guard.watched.entry(key.clone()).or_default().insert(client_id);
+    let inserted = guard
+        .watched
+        .entry(key.clone())
+        .or_default()
+        .insert(client_id);
+    if !inserted {
+        watched_keys_sub_registrations(1);
+    }
 }
 
 /// Remove `client_id` from every watch list.
@@ -312,16 +349,24 @@ pub fn watched_keys_index_remove_client(client_id: ClientId) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
+    let mut removed = 0usize;
     guard.watched.retain(|_, watchers| {
-        watchers.remove(&client_id);
+        if watchers.remove(&client_id) {
+            removed += 1;
+        }
         !watchers.is_empty()
     });
+    drop(guard);
+    watched_keys_sub_registrations(removed);
 }
 
 /// Mark every client watching `key` as dirty.
 ///
 /// C: db.c → multi.c::touchWatchedKey. Called after every write to `key`.
 pub fn watched_keys_touch(key: &RedisString) {
+    if !watched_keys_any() {
+        return;
+    }
     let idx = watched_keys_index();
     let mut guard = match idx.lock() {
         Ok(g) => g,
@@ -350,28 +395,28 @@ pub fn watched_keys_take_dirty(client_id: ClientId) -> bool {
 // Lookup flags  (C: server.h LOOKUP_*)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub const LOOKUP_NONE: u32     = 0;
-pub const LOOKUP_NOTOUCH: u32  = 1 << 0;
+pub const LOOKUP_NONE: u32 = 0;
+pub const LOOKUP_NOTOUCH: u32 = 1 << 0;
 pub const LOOKUP_NONOTIFY: u32 = 1 << 1;
-pub const LOOKUP_NOSTATS: u32  = 1 << 2;
-pub const LOOKUP_WRITE: u32    = 1 << 3;
+pub const LOOKUP_NOSTATS: u32 = 1 << 2;
+pub const LOOKUP_WRITE: u32 = 1 << 3;
 pub const LOOKUP_NOEXPIRE: u32 = 1 << 4;
 
 pub const EXPIRE_FORCE_DELETE_EXPIRED: u32 = 1 << 0;
 pub const EXPIRE_AVOID_DELETE_EXPIRED: u32 = 1 << 1;
 
-pub const SETKEY_KEEPTTL: u32       = 1 << 0;
-pub const SETKEY_NO_SIGNAL: u32     = 1 << 1;
+pub const SETKEY_KEEPTTL: u32 = 1 << 0;
+pub const SETKEY_NO_SIGNAL: u32 = 1 << 1;
 pub const SETKEY_ALREADY_EXIST: u32 = 1 << 2;
-pub const SETKEY_DOESNT_EXIST: u32  = 1 << 3;
+pub const SETKEY_DOESNT_EXIST: u32 = 1 << 3;
 pub const SETKEY_ADD_OR_UPDATE: u32 = 1 << 4;
 
-pub const EMPTYDB_NO_FLAGS: u32    = 0;
-pub const EMPTYDB_ASYNC: u32       = 1 << 0;
+pub const EMPTYDB_NO_FLAGS: u32 = 0;
+pub const EMPTYDB_ASYNC: u32 = 1 << 0;
 pub const EMPTYDB_NOFUNCTIONS: u32 = 1 << 1;
 
-pub const DB_FLAG_KEY_DELETED: u32   = 1 << 0;
-pub const DB_FLAG_KEY_EXPIRED: u32   = 1 << 1;
+pub const DB_FLAG_KEY_DELETED: u32 = 1 << 0;
+pub const DB_FLAG_KEY_EXPIRED: u32 = 1 << 1;
 pub const DB_FLAG_KEY_OVERWRITE: u32 = 1 << 2;
 
 const DEFAULT_SCAN_COUNT: i64 = 10;
@@ -443,7 +488,9 @@ pub struct GetKeysResult {
 
 impl GetKeysResult {
     pub fn new() -> Self {
-        Self { keys: Vec::with_capacity(16) }
+        Self {
+            keys: Vec::with_capacity(16),
+        }
     }
 }
 
@@ -506,7 +553,10 @@ pub struct RedisDb {
 
 impl RedisDb {
     pub fn new(id: u32) -> Self {
-        Self { id, ..Default::default() }
+        Self {
+            id,
+            ..Default::default()
+        }
     }
 
     /// Construct a `RedisDb` from a snapshot of (key, object) pairs.
@@ -557,7 +607,9 @@ impl RedisDb {
         // TODO(port): propagateDeletion to AOF + replicas
         self.dict.remove(key);
         notify_keyspace_event_global(NOTIFY_EXPIRED, b"expired", key, self.id);
-        server_metrics().expired_keys.fetch_add(1, Ordering::Relaxed);
+        server_metrics()
+            .expired_keys
+            .fetch_add(1, Ordering::Relaxed);
         KeyStatus::Deleted
     }
 
@@ -569,7 +621,9 @@ impl RedisDb {
     pub fn lookup_key(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
         if self.expire_if_needed(key, 0) != KeyStatus::Valid {
             if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
-                server_metrics().keyspace_misses.fetch_add(1, Ordering::Relaxed);
+                server_metrics()
+                    .keyspace_misses
+                    .fetch_add(1, Ordering::Relaxed);
             }
             return None;
         }
@@ -582,8 +636,12 @@ impl RedisDb {
         let result = self.dict.get(key);
         if flags & (LOOKUP_NOSTATS | LOOKUP_WRITE) == 0 {
             match result {
-                Some(_) => server_metrics().keyspace_hits.fetch_add(1, Ordering::Relaxed),
-                None => server_metrics().keyspace_misses.fetch_add(1, Ordering::Relaxed),
+                Some(_) => server_metrics()
+                    .keyspace_hits
+                    .fetch_add(1, Ordering::Relaxed),
+                None => server_metrics()
+                    .keyspace_misses
+                    .fetch_add(1, Ordering::Relaxed),
             };
         }
         result
@@ -592,7 +650,11 @@ impl RedisDb {
     /// Read-oriented lookup. Asserts no LOOKUP_WRITE flag.
     ///
     /// C: db.c:136 lookupKeyReadWithFlags
-    pub fn lookup_key_read_with_flags(&mut self, key: &RedisString, flags: u32) -> Option<&RedisObject> {
+    pub fn lookup_key_read_with_flags(
+        &mut self,
+        key: &RedisString,
+        flags: u32,
+    ) -> Option<&RedisObject> {
         debug_assert!(flags & LOOKUP_WRITE == 0);
         self.lookup_key(key, flags)
     }
@@ -616,7 +678,11 @@ impl RedisDb {
     /// Write-oriented lookup — may force-delete an expired key.
     ///
     /// C: db.c:153 lookupKeyWriteWithFlags
-    pub fn lookup_key_write_with_flags(&mut self, key: &RedisString, flags: u32) -> Option<&mut RedisObject> {
+    pub fn lookup_key_write_with_flags(
+        &mut self,
+        key: &RedisString,
+        flags: u32,
+    ) -> Option<&mut RedisObject> {
         if self.expire_if_needed(key, EXPIRE_FORCE_DELETE_EXPIRED | flags) != KeyStatus::Valid {
             return None;
         }
@@ -778,7 +844,11 @@ impl RedisDb {
     /// C: db.c:601 emptyDbStructure (single-db path)
     pub fn clear(&mut self) {
         // TODO(port): emptyDbAsync, kvstoreEmpty callback, resetDbExpiryState
-        let watched_keys: Vec<RedisString> = self.dict.keys().cloned().collect();
+        let watched_keys: Vec<RedisString> = if watched_keys_any() {
+            self.dict.keys().cloned().collect()
+        } else {
+            Vec::new()
+        };
         self.dict.clear();
         self.avg_ttl = 0;
         for k in &watched_keys {
@@ -809,7 +879,8 @@ impl RedisDb {
 
     /// True if the key is present and not expired.
     pub fn exists(&mut self, key: &RedisString) -> bool {
-        self.lookup_key_read_with_flags(key, LOOKUP_NOTOUCH).is_some()
+        self.lookup_key_read_with_flags(key, LOOKUP_NOTOUCH)
+            .is_some()
     }
 
     /// Number of keys including logically-expired ones not yet lazily removed.
@@ -823,7 +894,10 @@ impl RedisDb {
     ///
     /// Used by `INFO keyspace` to populate the `expires=N` field.
     pub fn expires_count(&self) -> u64 {
-        self.dict.values().filter(|o| o.expire != EXPIRY_NONE).count() as u64
+        self.dict
+            .values()
+            .filter(|o| o.expire != EXPIRY_NONE)
+            .count() as u64
     }
 
     pub fn is_empty(&self) -> bool {
@@ -907,7 +981,10 @@ impl RedisDb {
     ///
     /// PERF(port): O(n) walk — phase-4 kvstore exposes `db->expires` size in O(1).
     pub fn expiring_key_count(&self) -> usize {
-        self.dict.iter().filter(|(_, obj)| obj.expire != EXPIRY_NONE).count()
+        self.dict
+            .iter()
+            .filter(|(_, obj)| obj.expire != EXPIRY_NONE)
+            .count()
     }
 
     /// Swap keyspace contents with `other`. blocking/ready/watched stay in place.
@@ -933,6 +1010,9 @@ impl RedisDb {
     /// `key` via the global watched-keys index (see [`watched_keys_index`]).
     pub fn signal_modified(&self, key: impl AsRef<[u8]>) {
         // TODO(port): trackingInvalidateKey(c, key, 1)
+        if !watched_keys_any() {
+            return;
+        }
         let k = RedisString::from_bytes(key.as_ref());
         watched_keys_touch(&k);
     }
@@ -990,7 +1070,11 @@ impl RedisDb {
     /// MIGRATION SHIM: the architect stub stored watcher lists on the db
     /// itself. The full port defers this to Phase 3; we record presence
     /// only so [`watched_keys_is_empty`] returns the expected answer.
-    pub fn watched_keys_add_client(&mut self, key: &RedisObject, _client_id: crate::client::ClientId) {
+    pub fn watched_keys_add_client(
+        &mut self,
+        key: &RedisObject,
+        _client_id: crate::client::ClientId,
+    ) {
         if let Some(bytes) = key.as_string_bytes() {
             self.watched_keys
                 .entry(RedisString::from_bytes(bytes))
@@ -1144,7 +1228,11 @@ pub fn exists_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut count: i64 = 0;
     for j in 1..argc {
         let key = ctx.arg(j)?.clone();
-        if ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH).is_some() {
+        if ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+            .is_some()
+        {
             count += 1;
         }
     }
@@ -1235,8 +1323,9 @@ pub fn scan_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             if j + 1 >= argc {
                 return Err(RedisError::runtime(b"ERR syntax error"));
             }
-            let n = parse_i64_from_bytes(ctx.arg(j + 1)?.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            let n = parse_i64_from_bytes(ctx.arg(j + 1)?.as_bytes()).ok_or_else(|| {
+                RedisError::runtime(b"ERR value is not an integer or out of range")
+            })?;
             if n < 1 {
                 return Err(RedisError::runtime(b"ERR syntax error"));
             }
@@ -1312,18 +1401,21 @@ pub fn lastsave_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// C: db.c:1416 typeCommand — TYPE key
 pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg(1)?.clone();
-    let type_name: &[u8] = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH) {
+    let type_name: &[u8] = match ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+    {
         None => b"none",
         Some(obj) => match &obj.kind {
             ObjectKind::String(_) => b"string",
-            ObjectKind::List(_)   => b"list",
-            ObjectKind::Hash(_)   => b"hash",
-            ObjectKind::Set(_)    => b"set",
-            ObjectKind::ZSet(_)   => b"zset",
+            ObjectKind::List(_) => b"list",
+            ObjectKind::Hash(_) => b"hash",
+            ObjectKind::Set(_) => b"set",
+            ObjectKind::ZSet(_) => b"zset",
             ObjectKind::Stream(_) => b"stream",
-            ObjectKind::Module    => b"none",
-            ObjectKind::Json(_)   => b"ReJSON-RL",
-            ObjectKind::Bloom(_)  => b"MBbloom--",
+            ObjectKind::Module => b"none",
+            ObjectKind::Json(_) => b"ReJSON-RL",
+            ObjectKind::Bloom(_) => b"MBbloom--",
         },
     };
     ctx.reply_simple_string(type_name)
@@ -1333,7 +1425,9 @@ pub fn type_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 pub fn shutdown_command(_ctx: &mut CommandContext) -> Result<(), RedisError> {
     // TODO(port): full flag parsing (NOSAVE / SAVE / NOW / FORCE / ABORT / SAFE / FAILOVER)
     // TODO(port): blockClientShutdown, prepareForShutdown, abortShutdown, exit(0)
-    Err(RedisError::runtime(b"SHUTDOWN: TODO(port): not implemented in Phase A"))
+    Err(RedisError::runtime(
+        b"SHUTDOWN: TODO(port): not implemented in Phase A",
+    ))
 }
 
 /// Common body for RENAME and RENAMENX.
@@ -1348,7 +1442,11 @@ fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), Redi
         return Err(RedisError::runtime(b"ERR no such key"));
     }
     if same_key {
-        return if nx { ctx.reply_integer(0) } else { ctx.reply_simple_string(b"OK") };
+        return if nx {
+            ctx.reply_integer(0)
+        } else {
+            ctx.reply_simple_string(b"OK")
+        };
     }
 
     let dst_exists = ctx.db_mut().exists_raw(&dst_key);
@@ -1375,7 +1473,11 @@ fn rename_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), Redi
     // TODO(port): server.dirty++
     fire_stream_rename_hook(&dst_key, ctx.db().id() as u32);
 
-    if nx { ctx.reply_integer(1) } else { ctx.reply_simple_string(b"OK") }
+    if nx {
+        ctx.reply_integer(1)
+    } else {
+        ctx.reply_simple_string(b"OK")
+    }
 }
 
 /// C: db.c:1530 renameCommand — RENAME key newkey
@@ -1422,9 +1524,14 @@ pub fn move_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     let current_db_id = ctx.db().id() as i64;
     if target_db == current_db_id {
-        return Err(RedisError::runtime(b"ERR source and destination objects are the same"));
+        return Err(RedisError::runtime(
+            b"ERR source and destination objects are the same",
+        ));
     }
-    let src_obj = match ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH) {
+    let src_obj = match ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+    {
         None => return ctx.reply_integer(0),
         Some(obj) => obj.clone(),
     };
@@ -1472,8 +1579,9 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 return Err(RedisError::runtime(b"ERR syntax error"));
             }
             let val_bytes = ctx.arg(j + 1)?.clone();
-            let parsed = parse_i64_from_bytes(val_bytes.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+            let parsed = parse_i64_from_bytes(val_bytes.as_bytes()).ok_or_else(|| {
+                RedisError::runtime(b"ERR value is not an integer or out of range")
+            })?;
             if !(0..=15).contains(&parsed) {
                 return Err(RedisError::runtime(b"ERR DB index is out of range"));
             }
@@ -1491,7 +1599,10 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         return ctx.reply_integer(0);
     }
 
-    let src_clone = match ctx.db_mut().lookup_key_read_with_flags(&src_key, LOOKUP_NOTOUCH) {
+    let src_clone = match ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&src_key, LOOKUP_NOTOUCH)
+    {
         None => return ctx.reply_integer(0),
         Some(obj) => obj.clone(),
     };
@@ -1518,7 +1629,12 @@ pub fn copy_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
     dest_guard.insert(dst_key.clone(), new_obj);
     drop(dest_guard);
-    notify_keyspace_event_global(NOTIFY_GENERIC, b"copy_to", &dst_key, resolved_target_db as u32);
+    notify_keyspace_event_global(
+        NOTIFY_GENERIC,
+        b"copy_to",
+        &dst_key,
+        resolved_target_db as u32,
+    );
     ctx.reply_integer(1)
 }
 
@@ -1532,7 +1648,11 @@ pub fn touch_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut count: i64 = 0;
     for j in 1..argc {
         let key = ctx.arg(j)?.clone();
-        if ctx.db_mut().lookup_key_read_with_flags(&key, LOOKUP_NONE).is_some() {
+        if ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key, LOOKUP_NONE)
+            .is_some()
+        {
             count += 1;
         }
     }
@@ -1555,7 +1675,9 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
 }
 
 /// C: db.c:1861 swapdbCommand — SWAPDB index index
@@ -1612,7 +1734,11 @@ pub fn swapdb_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
         wake_blocked_in_other_db(other_db_id);
     } else {
-        let (lo, hi) = if id1u < id2u { (id1u, id2u) } else { (id2u, id1u) };
+        let (lo, hi) = if id1u < id2u {
+            (id1u, id2u)
+        } else {
+            (id2u, id1u)
+        };
         let lo_arc = crate::databases::global_databases().get(lo);
         let hi_arc = crate::databases::global_databases().get(hi);
         let mut lo_guard = match lo_arc.lock() {
@@ -1651,7 +1777,9 @@ pub fn generic_get_keys(
     result: &mut GetKeysResult,
 ) -> Result<usize, RedisError> {
     // TODO(port): validate numkeys against argc; handle modules / negative arity
-    let numkeys_bytes = argv.get(key_count_ofs).ok_or_else(RedisError::not_integer)?;
+    let numkeys_bytes = argv
+        .get(key_count_ofs)
+        .ok_or_else(RedisError::not_integer)?;
     let numkeys = parse_i64_from_bytes(numkeys_bytes.as_bytes())
         .filter(|&n| n >= 1)
         .ok_or_else(RedisError::not_integer)? as usize;
@@ -1704,7 +1832,11 @@ fn parse_i64_from_bytes(b: &[u8]) -> Option<i64> {
     if b.is_empty() {
         return None;
     }
-    let (neg, digits) = if b[0] == b'-' { (true, &b[1..]) } else { (false, b) };
+    let (neg, digits) = if b[0] == b'-' {
+        (true, &b[1..])
+    } else {
+        (false, b)
+    };
     if digits.is_empty() {
         return None;
     }
@@ -1715,7 +1847,11 @@ fn parse_i64_from_bytes(b: &[u8]) -> Option<i64> {
         }
         n = n.checked_mul(10)?.checked_add((c - b'0') as i64)?;
     }
-    if neg { Some(-n) } else { Some(n) }
+    if neg {
+        Some(-n)
+    } else {
+        Some(n)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1829,6 +1965,24 @@ mod tests {
         db.clear();
         assert!(db.is_empty());
         assert_eq!(db.size(), 0);
+    }
+
+    #[test]
+    fn watched_key_fast_path_preserves_dirty_marking() {
+        let key = k(b"watched-fast-path");
+        let cid = 9_101_001;
+        watched_keys_index_remove_client(cid);
+
+        watched_keys_touch(&key);
+        assert!(!watched_keys_take_dirty(cid));
+
+        watched_keys_index_add(&key, cid);
+        watched_keys_touch(&key);
+        assert!(watched_keys_take_dirty(cid));
+
+        watched_keys_index_remove_client(cid);
+        watched_keys_touch(&key);
+        assert!(!watched_keys_take_dirty(cid));
     }
 
     #[test]

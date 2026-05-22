@@ -75,7 +75,9 @@ pub fn is_multi_command(name: &[u8]) -> bool {
 
 fn eq_ignore_ascii(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
-        && a.iter().zip(b.iter()).all(|(x, y)| x.eq_ignore_ascii_case(y))
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 /// Reject a `CMD_NO_MULTI` command issued inside a MULTI block.
@@ -88,7 +90,8 @@ pub fn reject_no_multi_command(name: &[u8]) -> RedisError {
     for b in name {
         lower.push(b.to_ascii_lowercase());
     }
-    let mut msg = Vec::with_capacity(b"ERR Command '' not allowed inside a transaction".len() + lower.len());
+    let mut msg =
+        Vec::with_capacity(b"ERR Command '' not allowed inside a transaction".len() + lower.len());
     msg.extend_from_slice(b"ERR Command '");
     msg.extend_from_slice(&lower);
     msg.extend_from_slice(b"' not allowed inside a transaction");
@@ -129,7 +132,8 @@ pub fn queue_current_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
     if lookup_command(name.as_bytes()).is_none() {
         ctx.client_mut().set_flag_dirty_exec(true);
-        let mut msg = Vec::with_capacity(b"ERR unknown command '".len() + name.as_bytes().len() + 1);
+        let mut msg =
+            Vec::with_capacity(b"ERR unknown command '".len() + name.as_bytes().len() + 1);
         msg.extend_from_slice(b"ERR unknown command '");
         msg.extend_from_slice(name.as_bytes());
         msg.push(b'\'');
@@ -227,7 +231,11 @@ fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) -> u32 {
     selected_db
 }
 
-fn dispatch_queued_on_db(ctx: &mut CommandContext, name: &[u8], selected_db: u32) -> RedisResult<()> {
+fn dispatch_queued_on_db(
+    ctx: &mut CommandContext,
+    name: &[u8],
+    selected_db: u32,
+) -> RedisResult<()> {
     if ctx.db().id as u32 == selected_db {
         return dispatch_command_name(ctx, name);
     }
@@ -309,6 +317,7 @@ pub fn reset_multi_state(client: &mut Client) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redis_core::db::watched_keys_touch;
     use redis_core::Client;
 
     #[test]
@@ -360,6 +369,21 @@ mod tests {
         let mut ctx = CommandContext::new(&mut c);
         let err = discard_command(&mut ctx).unwrap_err();
         assert!(matches!(err, RedisError::Runtime(_)));
+    }
+
+    #[test]
+    fn duplicate_watch_then_unwatch_removes_client_from_index() {
+        let key = RedisString::from_bytes(b"dup-watch-key");
+        let mut c = Client::new(9_101_002);
+        c.set_args(vec![RedisString::from_bytes(b"WATCH"), key.clone()]);
+        let mut ctx = CommandContext::new(&mut c);
+
+        watch_command(&mut ctx).unwrap();
+        watch_command(&mut ctx).unwrap();
+        unwatch_command(&mut ctx).unwrap();
+
+        watched_keys_touch(&key);
+        assert!(!watched_keys_take_dirty(ctx.client_ref().id()));
     }
 }
 

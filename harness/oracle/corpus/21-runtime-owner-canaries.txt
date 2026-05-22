@@ -39,6 +39,7 @@ TYPE err_k
 #       subsequent MULTI/EXEC must run normally.
 SET w_k initial
 WATCH w_k
+WATCH w_k
 UNWATCH
 MULTI
 SET w_k changed
