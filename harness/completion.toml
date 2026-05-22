@@ -1,9 +1,9 @@
 schema_version = 1
 
 [project]
-name = "valkey-rs-runtime-owner-hotpath-run"
-target = "faithful runtime-owner small hot-path wave after the mio plain-TCP poller"
-description = "This run is complete when the completed poller evidence remains green, the three post-poller hot-path packets land, and each packet is followed by wire-smoke plus benchmark/profile evidence. The owner-owned DB migration remains a manual follow-up."
+name = "valkey-rs-runtime-owner-owned-db-run"
+target = "faithful RuntimeOwner-owned DB migration after the mio plain-TCP poller and hot-path wave"
+description = "This run is complete when the owner-owned DB architecture packet is recorded, selected-DB/cross-DB routing is prepared through CommandContext, RuntimeOwner owns the single live DB vector for normal command execution, and each implementation packet is followed by wire-smoke plus benchmark/profile/regression evidence."
 non_goals = [
   "Sharding",
   "Benchmark-only command fast paths",
@@ -19,6 +19,9 @@ non_goals = [
   "Linux-specific optimizations in this wave: no io_uring, raw epoll, Linux perf gate, or Linux-only benchmark requirement",
   "Owner-owned live Vec<RedisDb> migration during runtime-owner-10 through runtime-owner-12",
   "Disabling slowlog, RESP3, WATCH/MULTI/EXEC, AOF, replication, ACL, maxmemory, pub/sub, blocking, expiration, scripting, or RDB semantics for speed",
+  "Flipping RuntimeOwner to own the live DB vector before CommandContext selected-DB and cross-DB routing is prepared",
+  "Leaving TLS command execution, replication apply, runtime AOF replay, persistence snapshot entry, or active expire on a divergent global DB after the owner-owned DB flip",
+  "Using global_databases() as the normal command-execution keyspace after the owner-owned DB flip",
 ]
 binding_architecture_artifacts = [
   "harness/architecture/decisions/runtime-ownership.md",
@@ -33,6 +36,12 @@ latest_runtime_owner_evidence = [
   "harness/evidence/runs/20260522T144623Z-651c67e-runner-runtime-owner-8-post-poller-hotspots.json",
   "harness/evidence/runs/20260522T144733Z-d3b7602-runner-runtime-owner-8-post-poller-calltree.json",
 ]
+latest_hotpath_evidence = [
+  "harness/evidence/runs/20260522T170427Z-8857714-runner-runtime-owner-12-post-watch-oracle.json",
+  "harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json",
+  "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json",
+]
+owner_owned_db_architecture_packet = "runtime-owner-9-owner-owned-db-architecture"
 
 [[criterion]]
 id = "workspace-check"
@@ -258,6 +267,89 @@ id = "hotpath-regression-incr-p100"
 kind = "runner_latest_pass"
 required = true
 packet = "runtime-owner-12-regression-incr-p100"
+runner = "regress-core-p100-incr"
+
+[[criterion]]
+id = "runtime-owner-owned-db-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "runtime-owner-9-owner-owned-db-architecture",
+  "runtime-owner-13-db-context-router",
+  "runtime-owner-13-post-db-context-oracle",
+  "runtime-owner-14-cross-db-owner-routing",
+  "runtime-owner-14-post-cross-db-oracle",
+  "runtime-owner-15-owner-owned-db-loop",
+  "runtime-owner-15-post-owned-db-oracle",
+  "runtime-owner-15-post-owned-db-profile-matrix",
+  "runtime-owner-15-post-owned-db-calltree",
+  "runtime-owner-15-regression-ping-p100",
+  "runtime-owner-15-regression-get-p100",
+  "runtime-owner-15-regression-set-p100",
+  "runtime-owner-15-regression-incr-p100",
+]
+
+[[criterion]]
+id = "owned-db-context-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-13-post-db-context-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "owned-db-cross-db-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-14-post-cross-db-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "owned-db-final-wire-smoke"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-post-owned-db-oracle"
+runner = "wire-smoke"
+
+[[criterion]]
+id = "owned-db-final-profile-matrix"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-post-owned-db-profile-matrix"
+runner = "bench-profile-matrix"
+
+[[criterion]]
+id = "owned-db-final-calltree"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-post-owned-db-calltree"
+runner = "bench-profile-calltree"
+
+[[criterion]]
+id = "owned-db-regression-ping-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-regression-ping-p100"
+runner = "regress-core-p100-ping"
+
+[[criterion]]
+id = "owned-db-regression-get-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-regression-get-p100"
+runner = "regress-core-p100-get"
+
+[[criterion]]
+id = "owned-db-regression-set-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-regression-set-p100"
+runner = "regress-core-p100-set"
+
+[[criterion]]
+id = "owned-db-regression-incr-p100"
+kind = "runner_latest_pass"
+required = true
+packet = "runtime-owner-15-regression-incr-p100"
 runner = "regress-core-p100-incr"
 
 [[criterion]]

@@ -1,10 +1,10 @@
 # Runtime Owner Next Push
 
-Status: `runtime-owner-8-mio-poller-owner-loop` implementation landed and its
-post-poller oracle, profile, call-tree, and p100 regression gates passed. The
-next auto wave is the smaller macOS hot-path packet family in
-`docs/RUNTIME_OWNER_HOTPATH_PUSH.md`; the owner-owned DB migration remains a
-manual architecture packet.
+Status: `runtime-owner-8-mio-poller-owner-loop` and the smaller
+`runtime-owner-10` through `runtime-owner-12` hot-path wave completed with
+wire-smoke, profile, call-tree, and p100 regression gates. The next safe work is
+the staged owner-owned DB packet family locked by
+`runtime-owner-9-owner-owned-db-architecture`.
 
 This document scopes the next large harness run after the std nonblocking
 `RuntimeOwner` loop. The previous run proved the big architecture move was
@@ -37,6 +37,16 @@ expected command-path costs after the loop reaches dispatch. The remaining gap
 is no longer the old DB-mutex wall; it is local runtime owner-loop readiness and
 per-command work.
 
+The latest post-hot-path evidence is now the binding input for owner-owned DB
+work:
+
+```text
+runtime-owner-12-post-watch-oracle: wire-smoke pass, including runtime-owner canaries
+runtime-owner-12-post-watch-profile-matrix: p100 PING 0.80x, GET 0.75x, SET 0.78x, INCR 0.62x
+runtime-owner-12-post-watch-calltree: median 0.73x, min 0.58x, max 0.81x
+runtime-owner-12-regression gates: PING/GET/SET/INCR p100 all passed
+```
+
 The next run should use the harness performance loop:
 
 ```text
@@ -53,10 +63,10 @@ oracle
   -> regression comparators
 ```
 
-## Chosen next architecture bet
+## Completed Poller Architecture Bet
 
-The next auto run should attempt a real readiness poller for the plain-TCP
-owner loop.
+The previous architecture run approved and completed a real readiness poller
+for the plain-TCP owner loop.
 
 Approved direction:
 
@@ -76,6 +86,30 @@ Why this first:
 - If it fails to move numbers, the post-poller call-tree evidence should tell
   us whether the next wall is command execution, allocation/copying, or the
   transitional DB lock.
+
+## Owner-Owned DB Architecture Result
+
+The next migration is no longer a one-packet "move the vector" change. It is a
+staged ownership migration:
+
+- `RuntimeOwner` is the eventual owner of the single live mutable
+  `Vec<RedisDb>` for normal command execution.
+- `CommandContext` becomes the typed selected-DB and cross-DB routing boundary.
+  Command handlers should not call `global_databases()` directly when a context
+  DB-list route exists.
+- Cross-DB commands (`MOVE`, `COPY`, `SWAPDB`), queued `EXEC`, WATCH dirtying,
+  and blocked-key wakeups must be owner-routable before the live DB owner flips.
+- Active expire, replication apply, AOF replay after startup, persistence
+  snapshot entry, and TLS command effects may not mutate a divergent global DB
+  after the flip.
+- Full TLS socket migration remains a human sequencing question, but TLS
+  command effects still have to route through the owner-owned command/effect
+  path if owner-owned DB is live.
+
+This keeps the existing `redis_commands::dispatch` path, ACL, slowlog,
+maxmemory, readonly-replica, WATCH/MULTI/EXEC, scripting, expiration, pub/sub,
+blocking, AOF, RDB, and replication semantics in scope. It also keeps the
+product claim at alpha telemetry.
 
 ## Runtime-Owner-8 Contract
 
@@ -173,15 +207,14 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.
    - p100 performance-regression comparators for PING/GET/SET/INCR.
 
 9. `runtime-owner-9-owner-owned-db-architecture`
-   - Manual follow-up only.
-   - This is the real high-risk migration; do not auto-dispatch it until the
-     poller evidence is reviewed.
+   - Manual architecture follow-up.
+   - Now reviewed and encoded in the owner-owned DB packet family below.
 
-## Next queued packet family
+## Completed Hot-Path Packet Family
 
-The next auto selector wave is intentionally smaller than owner-owned DB. It is
-documented in `docs/RUNTIME_OWNER_HOTPATH_PUSH.md` and targets three measured
-post-poller costs:
+The completed auto selector wave was intentionally smaller than owner-owned DB.
+It is documented in `docs/RUNTIME_OWNER_HOTPATH_PUSH.md` and targeted three
+measured post-poller costs:
 
 1. `runtime-owner-10-hotpath-timing-gate`
    - reduce avoidable command timing / slowlog predicate overhead without
@@ -202,6 +235,36 @@ post-poller costs:
 This wave explicitly ignores Linux-only optimizations. No io_uring, epoll,
 Linux perf dependency, sharding, command-specific benchmark bypass, or
 owner-owned live DB migration is in scope.
+
+## Next Owner-Owned DB Packet Family
+
+1. `runtime-owner-13-db-context-router`
+   - add owner-compatible selected-DB and cross-DB APIs to `CommandContext`;
+   - preserve the current live storage model while preparing command handlers
+     to stop calling `global_databases()` directly.
+
+2. `runtime-owner-13-post-db-context-oracle`
+   - run full wire-smoke before touching cross-DB command behavior.
+
+3. `runtime-owner-14-cross-db-owner-routing`
+   - remove `global_databases()` from `MOVE`, `COPY`, `SWAPDB`, queued `EXEC`
+     selected-DB routing, and blocked wake paths;
+   - strengthen runtime-owner canaries for SELECT plus cross-DB WATCH and
+     SWAPDB behavior.
+
+4. `runtime-owner-14-post-cross-db-oracle`
+   - prove the cross-DB routing packet before the live DB owner changes.
+
+5. `runtime-owner-15-owner-owned-db-loop`
+   - move the default command-execution keyspace to a RuntimeOwner-owned
+     `Vec<RedisDb>`;
+   - route active expire and non-owner command effects through owner-owned DB
+     APIs/channels, or stop with `TODO(architect)`/`TODO(human)` instead of
+     creating a divergent DB path.
+
+6. `runtime-owner-15` gates
+   - wire-smoke, profile matrix, call-tree, and p100 regression comparators for
+     PING/GET/SET/INCR.
 
 ## Kickoff command
 
@@ -229,8 +292,9 @@ python3 ../port-harness/loop/run-loop.py \
   --max-same-packet-failures 2
 ```
 
-After this implementation packet, the next selected packet should be
-`runtime-owner-8-post-poller-oracle`. If the loop selects anything else,
+After `runtime-owner-9-owner-owned-db-architecture` is recorded in the ledger,
+the next selected packet should be `runtime-owner-13-db-context-router`. If the
+loop selects anything else,
 inspect `harness/work-packets.jsonl` and `harness/evidence/ledger.jsonl` before
 dispatching.
 
@@ -238,22 +302,24 @@ dispatching.
 
 Minimum useful success:
 
-- post-poller wire smoke passes;
-- benchmark artifacts are captured with dirty/tree metadata from the updated
-  harness;
-- no p100 simple-command regression worse than the configured tolerance;
-- call-tree artifacts point to the next wall.
+- owner-owned DB routing packets do not introduce a second live keyspace;
+- wire-smoke passes after each implementation packet;
+- no p100 simple-command regression worse than the configured tolerance after
+  the live DB owner flip;
+- call-tree artifacts identify the next wall without requiring a command
+  fast path.
 
 High success:
 
-- p100 GET/SET/PING move closer to 0.9x+;
+- p100 GET/SET/PING move closer to 0.9x+ after the DB owner flip;
 - p99 tails narrow or stay neutral;
-- the profiler shows readiness/writeback cost reduced;
-- the next architecture decision is obviously owner-owned DB, allocation, or
-  parser/serializer work.
+- the profiler shows the selected-DB/global mutex path is gone from normal
+  command execution;
+- the next architecture decision is obviously TLS transport, background
+  lifecycle work, allocation, or parser/serializer work.
 
 ## Decision boundary
 
-If the `mio` poller does not improve p100 throughput or tails, do not keep
-patching readiness blindly. Stop at the post-poller architecture decision and
-use the call-tree evidence to pick the next packet family.
+If owner-owned DB work requires TLS transport sequencing, I/O thread parity, a
+soak threshold, or a new unsafe/dependency budget decision, stop in the packet
+with an explicit `TODO(human)` instead of guessing.

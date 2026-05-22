@@ -46,7 +46,7 @@ tls_migration = "out-of-scope-this-milestone"
 
 [runtime.open_questions]
 poller_dependency = "resolved for runtime-owner-8: mio plain-TCP readiness poller landed and post-poller gates passed"
-tls_migration_sequencing = "TODO(human) — never | follow-up | pre-default; pending"
+tls_migration_sequencing = "TODO(human) — never | follow-up | pre-default; pending for transport ownership. Owner-owned DB command effects may not stay on a divergent global DB after the DB flip."
 io_threads_parity = "TODO(human) — skip | follow-up | match-upstream; pending"
 soak_runner = "TODO(human) — harness/bench/run-soak.sh does not exist yet"
 
@@ -59,6 +59,32 @@ command_path = "redis_commands::dispatch through CommandContext::with_server"
 database_model = "transitional use of existing global_databases Arc<Mutex<RedisDb>> handles; no second live Vec<RedisDb>"
 foreign_payload_route = "per-slot mpsc receiver drained by RuntimeOwner; senders stay registered in PubSubRegistry and blocked-key/replication helpers"
 oracle_gate = "runtime-owner-4-post-owner-loop-oracle must pass before benchmarks count"
+
+[runtime.owner_owned_db]
+architect_packet = "runtime-owner-9-owner-owned-db-architecture"
+status = "staged-packets-approved"
+latest_wire_evidence = "harness/evidence/runs/20260522T170427Z-8857714-runner-runtime-owner-12-post-watch-oracle.json"
+latest_profile_evidence = "harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json"
+latest_calltree_evidence = "harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json"
+target_storage = "RuntimeOwner owns the single live Vec<RedisDb> for normal command execution."
+command_context_boundary = "CommandContext exposes selected-DB and cross-DB access over the owner DB list; commands do not call global_databases() directly."
+legacy_global_databases = "Allowed only for tests, inert compatibility helpers, or startup/transitional code before the owner-owned DB flip; not a normal command-execution store after the flip."
+tls_transport = "Full TLS socket migration remains TODO(human), but TLS command effects may not mutate a separate global DB after owner-owned DB is live."
+active_expire = "Must run in the owner cron/expire step or through an explicit owner event after the live DB flip."
+startup_loading = "RDB/AOF startup load may populate the owner DB vector before RuntimeOwner starts."
+runtime_external_effects = [
+  "replication apply",
+  "AOF replay after startup",
+  "persistence snapshot entry",
+  "active expire",
+  "TLS command execution",
+]
+forbidden_after_flip = [
+  "global_databases() in normal command dispatch",
+  "second live keyspace",
+  "command fast paths",
+  "disabled WATCH/MULTI/EXEC, blocking, expiration, AOF, replication, RDB, scripting, pub/sub, ACL, or readonly-replica semantics",
+]
 
 [[subsystem]]
 id = "accept"
@@ -194,14 +220,32 @@ description = "Default plain-TCP RuntimeOwner path now uses mio readiness. Post-
 
 [[transition]]
 id = "post-poller-hotpath"
-status = "queued"
+status = "completed"
 packet = "runtime-owner-10-hotpath-timing-gate"
 description = "Small macOS/current-runner hot-path wave before owner-owned DB: command timing/slowlog gate, direct RESP reply-buffer helpers, and WATCH dirty-key no-watch fast path."
 
 [[transition]]
+id = "db-context-router"
+status = "approved-for-dispatch"
+packet = "runtime-owner-13-db-context-router"
+description = "Add owner-compatible selected-DB and cross-DB routing APIs to CommandContext while keeping the current live storage model."
+
+[[transition]]
+id = "cross-db-owner-routing"
+status = "planned"
+packet = "runtime-owner-14-cross-db-owner-routing"
+description = "Remove global_databases() from MOVE, COPY, SWAPDB, queued EXEC selected-DB routing, and blocked wake paths before flipping the live DB owner."
+
+[[transition]]
+id = "owner-owned-db-loop"
+status = "planned"
+packet = "runtime-owner-15-owner-owned-db-loop"
+description = "Move the default command-execution keyspace to a RuntimeOwner-owned Vec<RedisDb>, including startup loading, active expire, and non-owner command-effect routing."
+
+[[transition]]
 id = "production-owner-loop"
-status = "blocked-on-human"
-description = "Full production event-loop migration with owned DB list; gated on the manual owner-owned DB architecture packet plus TODO(human) decisions for TLS, I/O threads, and soak."
+status = "blocked-on-human-for-public-claim"
+description = "The owner-owned DB packet family is staged, but full production/public claim remains gated on TODO(human) decisions for TLS transport sequencing, I/O thread parity, and soak evidence."
 
 [invariants]
 runner_capability_alignment = "harness/runners.toml wire-smoke runner must declare wire-compatibility, runtime-owner-canaries, and runtime-owner-scaffold so post-canary-oracle and post-scaffold-oracle packets can produce capability evidence."
@@ -214,3 +258,7 @@ plain_tcp_foreign_payloads_enter_owner = "Pub/sub, blocked wakeups, replication/
 no_soak_runner_before_script = "harness/runners.toml [[runner]] entries for runtime-owner-soak require harness/bench/run-soak.sh to exist; planned_runner row is the only acceptable placeholder until then."
 post_poller_hotpath_no_linux = "runtime-owner-10 through runtime-owner-12 use macOS/current benchmark and sample runners only; no Linux-specific io_uring/epoll/perf dependency is approved in this wave."
 post_poller_hotpath_preserve_semantics = "The small hot-path wave may reduce timing, reply-encoding, and WATCH bookkeeping overhead, but must not disable slowlog, RESP3, WATCH/MULTI/EXEC, AOF, replication, ACL, maxmemory, pub/sub, blocking, expiration, scripting, or RDB semantics."
+owner_owned_db_no_second_keyspace = "runtime-owner-13 through runtime-owner-15 may not create two live mutable keyspaces. The live DB owner flips only after command and cross-DB routing no longer depend on global_databases()."
+owner_owned_db_context_boundary = "CommandContext is the required selected-DB and cross-DB boundary for command handlers; direct global_databases() command access is a migration blocker."
+owner_owned_db_tls_no_divergence = "TLS transport may remain outside the poller only while command effects are routed through the owner after the DB flip; TLS must not mutate a separate global DB."
+owner_owned_db_background_effects = "Active expire, replication apply, runtime AOF replay, and persistence snapshot entry must route through or be coordinated by RuntimeOwner after the owner-owned DB flip."

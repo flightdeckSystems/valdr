@@ -232,10 +232,10 @@ Decision:
 ## Post-Poller Hotpath Wave (locked 2026-05-22)
 
 `runtime-owner-8` completed cleanly enough to make the next performance wall
-local and measurable rather than structural. The owner-owned DB migration is
-still the larger manual architecture decision, but it is not the first next
-step. The current macOS call-tree artifacts show three smaller faithful-port
-cost centers that can be tested directly with the existing harness runners:
+local and measurable rather than structural. At this point in the run, the
+owner-owned DB migration was still the larger manual architecture decision, and
+three smaller faithful-port cost centers could be tested directly with the
+existing harness runners:
 
 1. **Command timing / slowlog predicate overhead.** `dispatch_command_name()`
    currently pays `Instant::now()` plus `elapsed()` on every command before
@@ -265,6 +265,80 @@ Binding constraints for this wave:
   RESP3 semantics;
 - every implementation packet must be followed by wire-smoke and fresh
   profile/call-tree evidence before the next packet is trusted.
+
+## Owner-Owned DB Migration (locked 2026-05-22)
+
+`runtime-owner-9-owner-owned-db-architecture` approves a staged owner-owned DB
+packet family after the `runtime-owner-10` through `runtime-owner-12` hot-path
+wave completed.
+
+Evidence:
+
+- `runtime-owner-12-post-watch-oracle` passed at
+  `harness/evidence/runs/20260522T170427Z-8857714-runner-runtime-owner-12-post-watch-oracle.json`.
+- `runtime-owner-12-post-watch-profile-matrix` passed at
+  `harness/evidence/runs/20260522T170800Z-f8f5124-runner-runtime-owner-12-post-watch-profile-matrix.json`
+  with p1 near parity, but p100 still below parity: PING 0.80x, GET 0.75x,
+  SET 0.78x, INCR 0.62x.
+- `runtime-owner-12-post-watch-calltree` passed at
+  `harness/evidence/runs/20260522T170812Z-2813e87-runner-runtime-owner-12-post-watch-calltree.json`
+  and still shows owner-loop and command-path costs, including poll wait,
+  dispatch lookup, hashing, allocation/copying, and selected-DB work. The old
+  catastrophic thread-per-client DB mutex wall is gone, so the next DB work is
+  an ownership-correctness migration, not a benchmark-only shortcut.
+
+Binding decisions:
+
+1. **Single live keyspace.** The target model is `RuntimeOwner` owning the only
+   live mutable `Vec<RedisDb>` for normal command execution. Translators may
+   not create an owner-owned DB vector that runs beside `global_databases()` as
+   another live keyspace.
+2. **`CommandContext` is the DB-routing boundary.** Commands should continue to
+   enter `redis_commands::dispatch`; they must obtain the selected DB and any
+   cross-DB access through typed `CommandContext`/DB-list APIs instead of
+   calling `global_databases()` directly. Existing borrowed-DB constructors may
+   remain for tests and transitional startup code.
+3. **Prepare before flipping.** The next implementation packet must first add
+   owner-compatible selected-DB routing to `CommandContext` without changing
+   the product storage owner. A later packet removes `global_databases()` from
+   cross-DB commands (`MOVE`, `COPY`, `SWAPDB`, queued `EXEC`, blocked wakeups)
+   before the owner loop is allowed to own the live DB list.
+4. **Selected DB and transactions stay per-client.** `SELECT` changes only the
+   client selected DB index and validates against the configured DB count.
+   `MULTI`/`EXEC`, `WATCH`, Lua command dispatch, and queued commands must
+   keep upstream selected-DB ordering semantics.
+5. **Cross-DB semantics match Valkey.** `MOVE` and `COPY` must route source
+   and destination DBs through the owner DB list and still signal watched keys.
+   `SWAPDB` swaps keyspace contents while preserving per-DB watched/blocking
+   and ready-key ownership boundaries, matching upstream `dbSwapDatabases`.
+6. **Active expire moves with the DB owner.** After the live DB flip, the old
+   active-expire thread must not mutate a global DB. Active expiration must run
+   in an owner cron/expire step or through an explicit owner event and preserve
+   deletion propagation, notifications, WATCH invalidation, and dirty counters.
+7. **AOF/RDB/replication do not bypass ownership.** Startup RDB/AOF loading may
+   populate the DB vector before the owner loop starts. After the owner loop is
+   live, replication apply, AOF replay, persistence snapshots, and propagation
+   may not mutate `global_databases()` behind the owner.
+8. **TLS transport remains a separate human sequencing question, but TLS
+   command effects may not diverge.** Full TLS socket migration is still under
+   `TODO(human): TLS migration sequencing`. The owner-owned DB packet may keep
+   TLS transport outside the poller only if parsed TLS commands execute through
+   the owner-owned command/effect route. If a translator cannot do that without
+   a product decision, it must stop with `TODO(human)` instead of leaving TLS on
+   a separate global DB.
+9. **No expanded unsafe or product claim.** This family does not approve
+   unsafe-budget growth, sharding, command fast paths, disabled subsystems, or
+   any public speed-parity claim.
+
+Stop conditions for this family:
+
+- `global_databases()` remains in normal command execution after the owner DB
+  flip;
+- TLS, replication apply, active expire, AOF replay, or persistence snapshot
+  code mutates a divergent global keyspace after the owner DB flip;
+- selected-DB, WATCH/MULTI/EXEC, blocking, expiration, AOF, replication, RDB,
+  scripting, pub/sub, ACL, or readonly-replica semantics are disabled to make
+  the migration easier.
 
 ## TODO(human): Long-Term Runtime Decisions
 
