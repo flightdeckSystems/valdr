@@ -189,11 +189,11 @@ same profile matrix and kept the table current after each pass.
 | 6 | Dispatch metadata cache + lazy argv snapshot for slowlog/AOF/replication | median 0.63x, min 0.39x, max 1.68x | 2,061,856 req/s (0.63x) | 2,702,703 req/s (0.53x) | 64,935 req/s (1.68x) |
 | 7 | Standalone no-replica propagation skip + unified runtime dispatch table | median 0.66x, min 0.51x, max 1.54x | 2,127,660 req/s (0.65x) | 2,777,778 req/s (0.54x) | 63,211 req/s (1.54x) |
 | 8 | First-byte bucketed runtime dispatch lookup | median 0.68x, min 0.56x, max 1.58x | 2,173,913 req/s (0.65x) | 3,448,276 req/s (0.67x) | 66,094 req/s (1.58x) |
-| 9 | Runtime-owner reply/write-buffer polish | median 0.80x, min 0.57x, max 1.18x | 2,409,639 req/s (0.72x) | 4,081,633 req/s (0.80x) | 43,346 req/s (1.11x) |
+| 9 | Runtime-owner reply/write-buffer polish, final post-polish runner | median 0.79x, min 0.66x, max 1.63x | 2,564,103 req/s (0.76x) | 3,921,569 req/s (0.73x) | 46,447 req/s (1.17x) |
 
 The individual runs are noisy, especially on loopback with short benchmark
 windows, so the useful read is the trend: deep-pipeline GET moved from about
-221k req/s to about 2.17M req/s. The exact LRANGE number bounces because it is
+221k req/s to about 2.56M req/s. The exact LRANGE number bounces because it is
 already doing enough response work that the TCP-loop patches are not the main
 determinant.
 
@@ -263,6 +263,17 @@ Typed evidence for `runtime-owner-5-owner-loop-polish`:
 - `harness/evidence/runs/20260522T044045Z-803918c-perf-fixer-runtime-owner-5-owner-loop-polish.json`:
   packet validation summary, including oracle smoke and focused Rust checks.
 
+Final post-polish completion evidence:
+
+- `harness/evidence/runs/20260522T045343Z-803918c-runner-runtime-owner-5-post-polish-oracle.json`:
+  wire smoke passed after the owner-loop polish.
+- `harness/bench/results/20260522T045345Z-803918c-profile-matrix.tsv`:
+  profile matrix median 0.79x, min 0.66x, max 1.63x; GET p1 1.08x and
+  GET p100 0.76x.
+- `harness/bench/results/20260522T045355Z-803918c-hotspots.tsv` and
+  `harness/bench/results/20260522T045355Z-803918c-hotspots.json`: long p100
+  hotspot median 0.78x, min 0.58x, max 0.84x.
+
 The current hotspot read is different from the pre-owner baseline. DB mutex
 waiting is no longer the dominant sampled leaf. The remaining long-run p100
 gap shows up around the owner loop, dispatch lookup, RESP integer parsing,
@@ -271,15 +282,15 @@ costs.
 
 ## Reading this honestly
 
-**Where we're still slower (long p100 simple commands, ~61-80% of upstream in
+**Where we're still slower (long p100 simple commands, ~58-84% of upstream in
 the latest hotspot run):**
 The profile matrix now has noisy pipeline-1 wins, but the long p100 run is the
-more useful read for the owner-loop path. GET reached 0.80x, SET 0.74x, PING
-0.70x, and INCR 0.61x. The remaining gap is local hot-path work, not the old
+more useful read for the owner-loop path. GET reached 0.84x, SET 0.78x, PING
+0.69x, and INCR 0.58x. The remaining gap is local hot-path work, not the old
 thread-per-connection DB mutex wall.
 
 **Where we're competitive or faster (larger replies):**
-The latest short matrix has LRANGE_100 at 0.77x and LRANGE_300 at 1.11x.
+The latest short matrix has LRANGE_100 at 0.75x and LRANGE_300 at 1.17x.
 Those numbers are noisier than the simple-command hotspot suite, but they keep
 the same broad shape: once each operation returns meaningful payload, command
 implementation and serialization costs matter more than tiny-command loop
@@ -287,8 +298,9 @@ overhead.
 
 **Per-op latency p99 is still close enough to guide packet work** even when
 throughput lags. In the latest long p100 hotspot run, Rust p99 is about
-1.3-2.3x upstream across GET/SET/INCR/PING. GET and PING still show wider
-tails than upstream and should stay visible in future owner-loop evidence.
+1.7x upstream for GET, 1.7x for INCR, and 2.0x for PING; SET's p99 was lower
+than the reference in this noisy run. GET and PING still show wider tails than
+upstream and should stay visible in future owner-loop evidence.
 
 ## What we'd improve
 
