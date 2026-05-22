@@ -25,6 +25,7 @@
 
 use redis_core::client::Client;
 use redis_core::command_context::CommandContext;
+use redis_core::databases::global_databases;
 use redis_core::db::{
     watched_keys_index_add, watched_keys_index_remove_client, watched_keys_take_dirty,
 };
@@ -187,18 +188,19 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let header_res = ctx.reply_array_header(queued.len());
 
+    let mut deferred_wakes: Vec<(u32, RedisString)> = Vec::new();
     if header_res.is_ok() {
         for argv in queued.into_iter() {
-            run_one_queued(ctx, argv);
+            let db_id = run_one_queued(ctx, argv);
+            let keys: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
+            deferred_wakes.extend(keys.into_iter().map(|key| (db_id, key)));
         }
     }
 
     ctx.client_mut().set_flag_deny_blocking(false);
 
-    let deferred_keys: Vec<RedisString> = std::mem::take(&mut ctx.client_mut().pending_wakes);
-    for key in deferred_keys {
-        wake_blocked_for_key(ctx.db_mut(), &key);
-        wake_blocked_zset_for_key(ctx.db_mut(), &key);
+    for (db_id, key) in deferred_wakes {
+        wake_blocked_for_db(ctx, db_id, &key);
     }
 
     reset_multi_state(ctx.client_mut());
@@ -210,17 +212,59 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// Replies (including errors) are written into `client.reply_buf` exactly as
 /// they would be for a top-level dispatch — that's what gives EXEC its array
 /// of inner frames.
-fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) {
+fn run_one_queued(ctx: &mut CommandContext, argv: Vec<RedisString>) -> u32 {
     ctx.client_mut().set_args(argv);
+    let selected_db = ctx.client_ref().db_index;
     let name = ctx.client_ref().arg(0).cloned();
     let result = match name {
-        Some(n) => dispatch_command_name(ctx, n.as_bytes()),
+        Some(n) => dispatch_queued_on_db(ctx, n.as_bytes(), selected_db),
         None => Err(RedisError::runtime(b"ERR empty queued command")),
     };
     if let Err(err) = result {
         let payload = err.to_resp_payload();
         encode_resp2(&RespFrame::Error(payload), &mut ctx.client_mut().reply_buf);
     }
+    selected_db
+}
+
+fn dispatch_queued_on_db(ctx: &mut CommandContext, name: &[u8], selected_db: u32) -> RedisResult<()> {
+    if ctx.db().id as u32 == selected_db {
+        return dispatch_command_name(ctx, name);
+    }
+
+    let db = global_databases().get(selected_db);
+    let mut guard = match db.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let server = ctx.server_arc();
+    match ctx.pubsub.as_ref().cloned() {
+        Some(pubsub) => {
+            let mut selected_ctx =
+                CommandContext::with_server(ctx.client_mut(), &mut guard, server, pubsub);
+            dispatch_command_name(&mut selected_ctx, name)
+        }
+        None => {
+            let mut selected_ctx = CommandContext::with_db(ctx.client_mut(), &mut guard);
+            dispatch_command_name(&mut selected_ctx, name)
+        }
+    }
+}
+
+fn wake_blocked_for_db(ctx: &mut CommandContext, db_id: u32, key: &RedisString) {
+    if ctx.db().id as u32 == db_id {
+        wake_blocked_for_key(ctx.db_mut(), key);
+        wake_blocked_zset_for_key(ctx.db_mut(), key);
+        return;
+    }
+
+    let db = global_databases().get(db_id);
+    let mut guard = match db.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    wake_blocked_for_key(&mut guard, key);
+    wake_blocked_zset_for_key(&mut guard, key);
 }
 
 /// `WATCH key [key …]` — register CAS watchers on each key.
@@ -324,12 +368,12 @@ mod tests {
 //   source:        src/multi.c (Round 8b dispatch-integration rewrite)
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         3
+//   todos:         0
 //   port_notes:    1
 //   unsafe_blocks: 0
 //   notes:         Cross-conn WATCH dirty propagation runs through the global
 //                  watched-keys index in redis-core::db. CLIENT PAUSE during
 //                  EXEC, scripting (EVAL inside MULTI), and proper EXEC ACL
-//                  re-checks are deferred. SELECT-tracking inside MULTI is
-//                  also a TODO until per-tx db routing lands.
+//                  re-checks are deferred. Queued SELECT commands route later
+//                  EXEC commands through the selected logical DB.
 // ──────────────────────────────────────────────────────────────────────────
