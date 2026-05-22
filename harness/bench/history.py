@@ -134,6 +134,120 @@ RAW_KIND_LABEL = {
     "raw-calltree": "Raw calltree",
 }
 
+LEGACY_HOT_SERIES_DEFS = [
+    {
+        "id": "legacy_ping",
+        "label": "PING",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:PING_MBULK",
+        "color": "#2f6fed",
+    },
+    {
+        "id": "legacy_set",
+        "label": "SET",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:SET",
+        "color": "#0f8f68",
+    },
+    {
+        "id": "legacy_get",
+        "label": "GET",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:GET",
+        "color": "#d33f49",
+    },
+    {
+        "id": "legacy_incr",
+        "label": "INCR",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:INCR",
+        "color": "#7a4cc2",
+    },
+]
+
+LEGACY_COLLECTION_SERIES_DEFS = [
+    {
+        "id": "legacy_lpush",
+        "label": "LPUSH",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:LPUSH",
+        "color": "#2f6fed",
+    },
+    {
+        "id": "legacy_rpush",
+        "label": "RPUSH",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:RPUSH",
+        "color": "#0f8f68",
+    },
+    {
+        "id": "legacy_lpop",
+        "label": "LPOP",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:LPOP",
+        "color": "#d33f49",
+    },
+    {
+        "id": "legacy_rpop",
+        "label": "RPOP",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:RPOP",
+        "color": "#7a4cc2",
+    },
+    {
+        "id": "legacy_sadd",
+        "label": "SADD",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:SADD",
+        "color": "#c16a1a",
+    },
+    {
+        "id": "legacy_hset",
+        "label": "HSET",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:HSET",
+        "color": "#008c9e",
+    },
+    {
+        "id": "legacy_spop",
+        "label": "SPOP",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:SPOP",
+        "color": "#a13d63",
+    },
+    {
+        "id": "legacy_zadd",
+        "label": "ZADD",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:ZADD",
+        "color": "#5b6b00",
+    },
+    {
+        "id": "legacy_mset",
+        "label": "MSET",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:MSET (10 keys)",
+        "color": "#5f6b7a",
+    },
+]
+
+LEGACY_RANGE_SERIES_DEFS = [
+    {
+        "id": "legacy_lrange_100",
+        "label": "LRANGE 100",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:LRANGE_100 (first 100 elements)",
+        "color": "#2f6fed",
+    },
+    {
+        "id": "legacy_lrange_300",
+        "label": "LRANGE 300",
+        "runner_kind": "raw-legacy",
+        "field": "ratio:LRANGE_300 (first 300 elements)",
+        "color": "#0f8f68",
+    },
+]
+
 
 @dataclass(frozen=True)
 class Point:
@@ -600,6 +714,9 @@ def build_history() -> dict[str, Any]:
     series = build_series(point_dicts)
     raw_points = collect_raw_points()
     raw_series = build_series(raw_points, RAW_SERIES_DEFS)
+    legacy_hot_series = build_series(raw_points, LEGACY_HOT_SERIES_DEFS)
+    legacy_collection_series = build_series(raw_points, LEGACY_COLLECTION_SERIES_DEFS)
+    legacy_range_series = build_series(raw_points, LEGACY_RANGE_SERIES_DEFS)
     latest = {}
     for point in point_dicts:
         latest[point["runner_kind"]] = point
@@ -638,8 +755,14 @@ def build_history() -> dict[str, Any]:
         "raw_point_count": len(raw_points),
         "series_defs": SERIES_DEFS,
         "raw_series_defs": RAW_SERIES_DEFS,
+        "legacy_hot_series_defs": LEGACY_HOT_SERIES_DEFS,
+        "legacy_collection_series_defs": LEGACY_COLLECTION_SERIES_DEFS,
+        "legacy_range_series_defs": LEGACY_RANGE_SERIES_DEFS,
         "series": series,
         "raw_series": raw_series,
+        "legacy_hot_series": legacy_hot_series,
+        "legacy_collection_series": legacy_collection_series,
+        "legacy_range_series": legacy_range_series,
         "points": point_dicts,
         "raw_points": raw_points,
         "latest": latest,
@@ -676,7 +799,11 @@ def build_series(
         for idx, point in enumerate(points):
             if point["runner_kind"] != spec["runner_kind"]:
                 continue
-            value = point.get(spec["field"])
+            field = spec["field"]
+            if field.startswith("ratio:"):
+                value = point.get("ratios", {}).get(field[len("ratio:") :])
+            else:
+                value = point.get(field)
             if value is None:
                 continue
             row = {
@@ -724,6 +851,21 @@ def render_html(history: dict[str, Any]) -> str:
             """
         )
     if raw_points:
+        legacy_points = [
+            point for point in raw_points if point["runner_kind"] == "raw-legacy"
+        ]
+        if legacy_points:
+            first_legacy = legacy_points[0]
+            latest_legacy = legacy_points[-1]
+            latest_cards.append(
+                f"""
+                <article class="metric-card">
+                  <div class="eyebrow">Full command matrix</div>
+                  <div class="metric">{len({point['commit'] for point in legacy_points})} commits</div>
+                  <div class="subtle">{html.escape(first_legacy['commit'])} {first_legacy['median']:.2f}x &rarr; {html.escape(latest_legacy['commit'])} {latest_legacy['median']:.2f}x</div>
+                </article>
+                """
+            )
         first_matrix = next(
             (point for point in raw_points if point["runner_kind"] == "raw-profile-matrix"),
             None,
@@ -821,6 +963,27 @@ def render_html(history: dict[str, Any]) -> str:
     .tooltip.show {{ opacity: 1; }}
     .point-hit {{ fill: transparent; cursor: crosshair; }}
     .refresh-status {{ text-align: right; }}
+    .bench-info {{
+      margin: 14px 0 0;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 6px 14px;
+      font-size: 12px;
+      background: #f4f6fb;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }}
+    .bench-info dt {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      font-weight: 600;
+      margin: 0;
+    }}
+    .bench-info dd {{ margin: 0; color: var(--text); }}
+    .bench-info code {{ background: rgba(47, 111, 237, .08); padding: 1px 5px; border-radius: 4px; }}
     @media (max-width: 900px) {{
       main {{ padding: 18px; }}
       header {{ display: block; }}
@@ -850,10 +1013,45 @@ def render_html(history: dict[str, Any]) -> str:
   </section>
 
   <section class="panel">
+    <h2>Full Matrix — Core Commands</h2>
+    <p>Throughput ratio per command for the four single-key core commands. Each point is one full benchmark run; the line shows how valkey-rs has closed the gap to upstream Valkey as the port has progressed. 1.00x means we match upstream on that command at this workload.</p>
+    <div class="chart-wrap"><svg id="legacy-hot-chart" role="img" aria-label="Full matrix core command throughput ratio over time"></svg></div>
+    <div class="legend" id="legacy-hot-legend"></div>
+    <dl class="bench-info">
+      <dt>Tool</dt><dd><code>valkey-benchmark</code> (upstream binary, same one Redis/Valkey users run)</dd>
+      <dt>Setup</dt><dd>both servers on the same host, sequential not parallel · upstream Valkey on <code>:6379</code>, valkey-rs on <code>:16379</code></dd>
+      <dt>Workload</dt><dd>1,000,000 requests · 50 concurrent clients · pipeline depth 100 · 64-byte payload</dd>
+      <dt>Commands</dt><dd><code>PING_MBULK</code> · <code>SET</code> · <code>GET</code> · <code>INCR</code> — the four simple single-key commands every Redis workload exercises</dd>
+      <dt>Reading</dt><dd>Each point's y-value = valkey-rs ops/sec ÷ upstream Valkey ops/sec on the matching command. Points are placed at the code commit being benchmarked (not at the run time), so multiple measurements of the same commit stack on the same x-position.</dd>
+    </dl>
+  </section>
+
+  <section class="panel">
+    <h2>Full Matrix — Data Structures</h2>
+    <p>Collection-command ratios from the same commit-keyed default benchmark rows.</p>
+    <div class="chart-wrap"><svg id="legacy-collection-chart" role="img" aria-label="Full matrix data structure command throughput ratio over time"></svg></div>
+    <div class="legend" id="legacy-collection-legend"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Full Matrix — Range Workloads</h2>
+    <p>Range-heavy rows are intentionally separate because their scale is different from single-key commands.</p>
+    <div class="chart-wrap"><svg id="legacy-range-chart" role="img" aria-label="Full matrix range command throughput ratio over time"></svg></div>
+    <div class="legend" id="legacy-range-legend"></div>
+  </section>
+
+  <section class="panel">
     <h2>Curated Packet Evidence</h2>
     <p class="note">These points come from packet-completion evidence blobs, so this series starts later than the raw TSV history. 1.00x means valkey-rs matches upstream Valkey for the same workload and hardware.</p>
     <div class="chart-wrap"><svg id="median-chart" role="img" aria-label="Curated median throughput ratio over time"></svg></div>
     <div class="legend" id="median-legend"></div>
+    <dl class="bench-info">
+      <dt>Tool</dt><dd><code>valkey-benchmark</code> (upstream binary, built from <code>reference/valkey/src/</code>)</dd>
+      <dt>Setup</dt><dd>both servers on the same host, sequential not parallel · 50 clients · 64-byte payload · valkey on <code>:6379</code>, valkey-rs on <code>:16379</code></dd>
+      <dt>Profile matrix</dt><dd><code>core-p1</code> (50K req, pipeline=1) · <code>core-p16</code> (200K req, pipeline=16) · <code>core-p100</code> (200K req, pipeline=100) · <code>range-heavy-p16</code> (100K req, pipeline=16)</dd>
+      <dt>Commands</dt><dd><code>SET</code> · <code>GET</code> · <code>INCR</code> · <code>PING_MBULK</code> · <code>LRANGE_100</code> · <code>LRANGE_300</code></dd>
+      <dt>Reading</dt><dd>median ratio per packet = valkey-rs ops/s ÷ upstream Valkey ops/s on the same workload. Hotspots / Calltree runners sample the same shape under perf / callgrind respectively.</dd>
+    </dl>
   </section>
 
   <section class="panel">
@@ -923,6 +1121,9 @@ def render_html(history: dict[str, Any]) -> str:
 const HISTORY = {data};
 const SERIES = Object.fromEntries(HISTORY.series_defs.map(s => [s.id, s]));
 const RAW_SERIES = Object.fromEntries(HISTORY.raw_series_defs.map(s => [s.id, s]));
+const LEGACY_HOT_SERIES = Object.fromEntries(HISTORY.legacy_hot_series_defs.map(s => [s.id, s]));
+const LEGACY_COLLECTION_SERIES = Object.fromEntries(HISTORY.legacy_collection_series_defs.map(s => [s.id, s]));
+const LEGACY_RANGE_SERIES = Object.fromEntries(HISTORY.legacy_range_series_defs.map(s => [s.id, s]));
 const INITIAL_SIGNATURE = JSON.stringify(HISTORY.signature || {{}});
 
 function fmtRatio(value) {{
@@ -981,7 +1182,7 @@ function hideTooltip() {{
   document.getElementById("chart-tooltip").classList.remove("show");
 }}
 
-function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seriesDefs = SERIES, pointSource = HISTORY.points) {{
+function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seriesDefs = SERIES, pointSource = HISTORY.points, opts = {{}}) {{
   const svg = document.getElementById(svgId);
   const legend = document.getElementById(legendId);
   const width = 1120, height = 420;
@@ -1041,15 +1242,33 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
   tickPoints.forEach((point, idx) => {{
     if (idx % Math.ceil(tickPoints.length / 8) !== 0 && idx !== tickPoints.length - 1) return;
     const tx = x(point.ts);
-    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    text.setAttribute("x", tx);
-    text.setAttribute("y", height - 20);
-    text.setAttribute("text-anchor", "end");
-    text.setAttribute("font-size", "11");
-    text.setAttribute("fill", "#5e6878");
-    text.setAttribute("transform", `rotate(-35 ${{tx}} ${{height - 20}})`);
-    text.textContent = point.commit;
-    svg.appendChild(text);
+    if (opts.alignedXAxis) {{
+      const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      tick.setAttribute("x1", tx);
+      tick.setAttribute("x2", tx);
+      tick.setAttribute("y1", height - margin.bottom);
+      tick.setAttribute("y2", height - margin.bottom + 5);
+      tick.setAttribute("class", "axis");
+      svg.appendChild(tick);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", tx);
+      text.setAttribute("y", height - margin.bottom + 19);
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("font-size", "11");
+      text.setAttribute("fill", "#5e6878");
+      text.textContent = point.commit;
+      svg.appendChild(text);
+    }} else {{
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", tx);
+      text.setAttribute("y", height - 20);
+      text.setAttribute("text-anchor", "end");
+      text.setAttribute("font-size", "11");
+      text.setAttribute("fill", "#5e6878");
+      text.setAttribute("transform", `rotate(-35 ${{tx}} ${{height - 20}})`);
+      text.textContent = point.commit;
+      svg.appendChild(text);
+    }}
   }});
 
   for (const id of seriesIds) {{
@@ -1089,6 +1308,28 @@ function drawChart(svgId, legendId, seriesIds, seriesData = HISTORY.series, seri
     item.className = "legend-item";
     item.innerHTML = `<span class="swatch" style="background:${{spec.color}}"></span>${{spec.label}}`;
     legend.appendChild(item);
+  }}
+
+  if (opts.parityLine && yMax >= 1.0) {{
+    const py = y(1.0);
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", margin.left);
+    line.setAttribute("x2", width - margin.right);
+    line.setAttribute("y1", py);
+    line.setAttribute("y2", py);
+    line.setAttribute("stroke", "#0f8f68");
+    line.setAttribute("stroke-width", "1.5");
+    line.setAttribute("stroke-dasharray", "6 4");
+    svg.appendChild(line);
+    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    label.setAttribute("x", width - margin.right - 6);
+    label.setAttribute("y", py - 6);
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("font-size", "11");
+    label.setAttribute("fill", "#0f8f68");
+    label.setAttribute("font-weight", "600");
+    label.textContent = "parity (1.00x)";
+    svg.appendChild(label);
   }}
 }}
 
@@ -1150,9 +1391,12 @@ function renderTables() {{
 }}
 
 const REMOTE_COMMIT_PREFIX = "{REMOTE_COMMIT_PREFIX}";
-drawChart("median-chart", "median-legend", ["matrix_median", "hotspots_median", "calltree_median"]);
+drawChart("median-chart", "median-legend", ["matrix_median", "hotspots_median", "calltree_median"], HISTORY.series, SERIES, HISTORY.points, {{parityLine: true, alignedXAxis: true}});
 drawChart("get-chart", "get-legend", ["matrix_get_p1", "matrix_get_p100", "hotspots_get_p100", "calltree_get_p100"]);
-drawChart("raw-chart", "raw-legend", ["raw_legacy_median", "raw_matrix_median", "raw_hotspots_median", "raw_calltree_median"], HISTORY.raw_series, RAW_SERIES, HISTORY.raw_points);
+drawChart("raw-chart", "raw-legend", ["raw_legacy_median", "raw_matrix_median", "raw_hotspots_median", "raw_calltree_median"], HISTORY.raw_series, RAW_SERIES, HISTORY.raw_points, {{parityLine: true, alignedXAxis: true}});
+drawChart("legacy-hot-chart", "legacy-hot-legend", ["legacy_ping", "legacy_set", "legacy_get", "legacy_incr"], HISTORY.legacy_hot_series, LEGACY_HOT_SERIES, HISTORY.raw_points, {{parityLine: true, alignedXAxis: true}});
+drawChart("legacy-collection-chart", "legacy-collection-legend", ["legacy_lpush", "legacy_rpush", "legacy_lpop", "legacy_rpop", "legacy_sadd", "legacy_hset", "legacy_spop", "legacy_zadd", "legacy_mset"], HISTORY.legacy_collection_series, LEGACY_COLLECTION_SERIES, HISTORY.raw_points);
+drawChart("legacy-range-chart", "legacy-range-legend", ["legacy_lrange_100", "legacy_lrange_300"], HISTORY.legacy_range_series, LEGACY_RANGE_SERIES, HISTORY.raw_points);
 renderTables();
 
 async function checkForRefresh() {{

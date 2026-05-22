@@ -1,0 +1,169 @@
+# Scope and gaps — what valkey-rs does and does not do today
+
+This document is the **honest counterpart** to the headline numbers in the
+README. The badges ("TCL: 877 pass", "97.9%") are real, but they describe
+quality *within the scope we've built*. They do not describe how much of
+Valkey we've built. That's what this page is for.
+
+If you're evaluating whether valkey-rs can replace `redis-server` /
+`valkey-server` in your stack, **read this before the README**.
+
+## TL;DR
+
+- **What works**: a single-node Redis/Valkey server speaking RESP2/RESP3
+  over TCP and Unix sockets, with the standard data types (string, list,
+  hash, set, zset, stream), transactions (MULTI/EXEC/WATCH), basic pub/sub,
+  RDB persistence (bidirectional with upstream), and EVAL/EVALSHA scripting.
+  Existing Redis clients connect without changes.
+- **What does not work yet**: clustering, replication (no replica
+  conformance), Sentinel, modules (RedisJSON / RedisSearch / etc.), TLS,
+  I/O threads, AOF (partial), ACL (partial), and a long tail of newer
+  Valkey 9.0 / Redis 7+ features (HGETDEL, SET IFEQ, LCS, DUMP/RESTORE,
+  HELLO availability-zone, import-mode, etc.).
+- **Drop-in readiness**: it can replace a *single-node, basic-types,
+  no-replication* Redis. It cannot replace a Redis Cluster, a
+  replica/sentinel HA setup, or anything using modules.
+
+## Where we are by the numbers
+
+Three independent views of "how close are we" tell three different stories,
+and you should look at all three.
+
+### View 1 — Test pass rate (within surveyed scope)
+
+| Oracle | Result |
+|---|---|
+| Upstream Tcl, 13 surveyed unit files | **877 / 896 individual tests pass (97.9%)** |
+| Wire-diff RESP corpus | **21 / 21 byte-exact** |
+| RDB bidirectional (we save → C loads; C saves → we load) | **378 / 378** |
+
+This is the strong story. Within the slice we've decided to build, the
+behavior matches upstream Valkey closely enough to satisfy upstream's own
+test harness. Source: [`docs/CONFORMANCE.md`](CONFORMANCE.md).
+
+### View 2 — Coverage of upstream's tests
+
+Upstream Valkey has roughly **4,300 individual `test "..." { }` blocks**
+across 245 `.tcl` files. We currently sweep **~13 unit files** containing
+~940 individual tests. That's:
+
+| Slice | Tests | Share of upstream |
+|---|---:|---:|
+| Swept | ~940 | ~22% |
+| Pass within swept | 877 | ~20% |
+
+The remaining ~78% of upstream's tested behavior is either deferred
+(performance / infrastructure files like `bitops`, `bitfield`, `geo`,
+`hyperloglog`, `scripting`, `scan`, `sort`, `dump`, `info`) or out of
+scope by design (clustering, modules, replication, TLS, IO threads,
+MPTCP, Sentinel).
+
+### View 3 — Code surface
+
+| | LoC |
+|---|---:|
+| Upstream Valkey C source (`reference/valkey/src/`, `.c` + `.h`) | 180,348 |
+| valkey-rs Rust source (`crates/`) | 82,732 |
+| Ratio | **~46%** |
+
+After excluding subsystems we haven't ported (modules, separate CLI,
+clustering, sentinel, replication, ACL, RDB/AOF, TLS, streams, HLL, debug,
+benchmark, fuzzer), the comparable scope is roughly 101k C vs 83k Rust —
+**~82% of the equivalent C surface**, where the small reduction comes
+from no headers in Rust, RAII replacing manual alloc/free, and pattern
+matching replacing tag dispatch.
+
+The headline-misleading lesson: the 180k → 83k ratio is *not* a 2× win
+for Rust. It's mostly "we haven't built it yet."
+
+## What subsystems are entirely missing
+
+Numbers are upstream `src/` LoC and signal how much surface area remains.
+
+| Subsystem | Upstream LoC | Status here | Impact if you need it |
+|---|---:|---|---|
+| **Clustering** (`cluster_*.c`) | ~11,200 | Out of scope by design (single-node only) | Cannot drop in for a Redis Cluster deployment. |
+| **Modules API** (`module.c` + header) | ~18,200 | Out of scope by design | RedisJSON, RedisSearch, RedisBloom, RedisGraph, etc. **cannot** load. The C ABI is not exposed. |
+| **Replication** (`replication.c`) | ~5,800 | Backbone exists; not gated, not in CI | No replica conformance. Don't use as primary or replica in an HA setup. |
+| **Sentinel** (`sentinel.c`) | ~5,400 | Not ported (separate process upstream) | Sentinel-managed failover is not supported. |
+| **ACL** (`acl.c`) | ~3,500 | Partial / not swept | If you rely on user-based authz beyond the legacy `requirepass`, expect gaps. |
+| **AOF** (`aof.c`) | ~2,900 | Partial | RDB persistence works (378/378 bidirectional); AOF is not gated to the same standard. |
+| **TLS** (`tls.c`) | ~2,000 | Deferred post-1.0 | Plain TCP only. Put a TLS terminator in front (haproxy, envoy, nginx) if you need it. |
+| **I/O threads** (`io-threads`) | n/a | Deferred post-1.0 | Single-threaded I/O. Adequate for many workloads, not all. |
+| **Streams consumer groups, newer edges** | ~4,000 (`t_stream.c`) | Partial — `stream-cgroups` is 36 pass / 28 fail | XADD/XREAD/XACK/XCLAIM work; newer consumer-group lifecycle edges fail. |
+| **HyperLogLog** | ~2,100 | Commands present, unit file unswept | PFADD/PFCOUNT/PFMERGE listed as supported but `unit/hyperloglog.tcl` is not in the gated sweep. |
+| **DEBUG command** | ~2,600 | Partial — Tcl tests using `needs:debug` are filtered out | Affects only Tcl-suite expansion, not application code. |
+| **Valkey 9.0 / Redis 7.4+ additions** | scattered | Mostly missing | HGETDEL, SET IFEQ, LCS, HELLO availability-zone, MSETEX edge semantics — listed as deliberate gaps in CONFORMANCE.md. |
+
+## Drop-in readiness — decision table
+
+| You're running... | Can valkey-rs replace it today? |
+|---|---|
+| Single-node Redis as a cache (GET/SET/INCR + TTLs) | **Likely yes** — exercise your real workload first; this is the strongest slice. |
+| Single-node with hashes / sets / zsets / lists | **Likely yes** — `unit/type/set` and `unit/type/zset` are full pass; `string`/`list`/`hash` have specific documented gaps. |
+| Streams (XADD/XREAD/consumer groups) | **Maybe** — basic ops work; consumer-group lifecycle edges fail. Test your specific group workflows. |
+| Transactions (MULTI/EXEC/WATCH) | **Mostly yes** — `unit/multi` is 12 pass / 5 fail. |
+| Pub/Sub | **Mostly yes** — `unit/pubsub` is 22 pass / 6 fail. Sharded pub/sub (`SSUBSCRIBE`) supported on single-node only. |
+| Scripting (EVAL / EVALSHA / Lua) | **Partial** — basic scripts work; `unit/scripting.tcl` not in the gated sweep. Don't rely on advanced Lua features. |
+| RDB-based persistence | **Yes** — 378/378 bidirectional pass. |
+| AOF-based persistence | **Not yet** — partial implementation, not gated. |
+| Redis Cluster (multi-shard, slot-routed) | **No.** Out of scope by design. |
+| Replication / Sentinel HA | **No.** Backbone exists; conformance not established. |
+| RedisJSON / RedisSearch / RedisBloom / Modules | **No.** Module ABI is not exposed. Won't happen pre-1.0. |
+| TLS-terminated client connections | **Not in-process.** Use a TLS terminator. |
+
+The honest framing: **valkey-rs today is roughly "Redis 2.6 + most of Redis
+6/7's data-type surface, single-node, no extension API."** That covers a
+surprising amount of real-world usage, but it is not the same thing as
+"drop-in for Redis everywhere."
+
+## What this means for the roadmap
+
+The priority order is set by the harness's pilot strategy, not by any
+single user's adoption blockers:
+
+1. **Performance to parity** (in progress — see the dashboard at
+   `harness/bench/history/` and `docs/BENCHMARKS.md`). Throughput ratios
+   are climbing past 1.0x on the surveyed workloads.
+2. **Replication conformance** — backbone exists; needs a multi-node
+   integration sweep before it's claimable.
+3. **AOF parity** to match the RDB story.
+4. **Wider Tcl sweep** — bring `bitops`, `bitfield`, `geo`, `hyperloglog`,
+   `scripting`, `scan`, `sort`, `dump`, `info` into the gated baseline.
+5. **TLS, I/O threads, ACL deeper** — post-1.0.
+6. **Clustering, modules, Sentinel** — explicitly out of scope. If they
+   ever happen it will be a separate project decision, not a default
+   roadmap item.
+
+The endgame for the wider harness is **nginx in safe Rust**, not feature
+parity with every Valkey extension. Valkey is a *pilot* for the harness;
+finishing every long-tail Valkey subsystem is not the same goal as
+finishing the harness.
+
+## How to verify all of this yourself
+
+```bash
+# 1. Wire-diff smoke (21/21)
+bash harness/oracle/smoke.sh --skip-build
+
+# 2. RDB bidirectional (378/378)
+python3 harness/oracle/rdb-diff --direction=all
+
+# 3. Run any single upstream Tcl unit file against our binary
+bash harness/oracle/setup_tcl_runner.sh --skip-build
+cd reference/valkey && VALKEY_BIN_DIR=$(pwd)/../../target/debug \
+  tclsh tests/test_helper.tcl --single unit/type/zset \
+  --clients 1 --skip-leaks --tags "-needs:repl -needs:debug" \
+  --durable --quiet
+
+# 4. LoC breakdown (the numbers in this doc)
+find reference/valkey/src -maxdepth 1 \( -name '*.c' -o -name '*.h' \) -print0 \
+  | xargs -0 wc -l | tail -1
+find crates -name '*.rs' -print0 | xargs -0 wc -l | tail -1
+
+# 5. Individual upstream test count
+grep -rE '^\s*test\s+\{|^\s*test\s+"' reference/valkey/tests --include='*.tcl' | wc -l
+```
+
+If any of those numbers disagree with this doc, this doc is wrong and
+should be updated — not the other way around.

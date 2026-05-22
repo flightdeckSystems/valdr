@@ -16,11 +16,13 @@ series.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -33,6 +35,7 @@ REFERENCE_REL = Path("reference/valkey")
 
 
 class BenchKind(Enum):
+    LEGACY = "legacy"
     MATRIX = "matrix"
     HOTSPOTS = "hotspots"
     CALLTREE = "calltree"
@@ -98,6 +101,10 @@ def short_commit(commit: str) -> str:
     return git_text(["rev-parse", "--short", commit])
 
 
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def artifact_files(worktree: Path) -> set[Path]:
     files: set[Path] = set()
     for rel in (RESULTS_REL, PROFILES_REL):
@@ -153,6 +160,21 @@ def remove_worktree(worktree: Path) -> None:
 
 
 def kind_command(kind: BenchKind, args: argparse.Namespace) -> list[str]:
+    if kind is BenchKind.LEGACY:
+        return [
+            "bash",
+            "harness/bench/run.sh",
+            "--requests",
+            str(args.legacy_requests),
+            "--clients",
+            str(args.legacy_clients),
+            "--pipeline",
+            str(args.legacy_pipeline),
+            "--payload",
+            str(args.legacy_payload),
+            "--tests",
+            args.legacy_tests,
+        ]
     if kind is BenchKind.MATRIX:
         return ["bash", "harness/bench/run-profile-matrix.sh"]
     if kind is BenchKind.HOTSPOTS:
@@ -175,6 +197,8 @@ def kind_command(kind: BenchKind, args: argparse.Namespace) -> list[str]:
 
 
 def kind_script_rel(kind: BenchKind) -> Path:
+    if kind is BenchKind.LEGACY:
+        return Path("harness/bench/run.sh")
     if kind is BenchKind.MATRIX:
         return Path("harness/bench/run-profile-matrix.sh")
     if kind is BenchKind.HOTSPOTS:
@@ -185,6 +209,8 @@ def kind_script_rel(kind: BenchKind) -> Path:
 
 
 def result_globs(kind: BenchKind, commit: str) -> list[str]:
+    if kind is BenchKind.LEGACY:
+        return [f"*-{commit}.tsv"]
     if kind is BenchKind.MATRIX:
         return [f"*-{commit}-profile-matrix.tsv"]
     if kind is BenchKind.HOTSPOTS:
@@ -209,6 +235,29 @@ def benchmark_env(args: argparse.Namespace) -> dict[str, str]:
     return env
 
 
+def write_manifest(args: argparse.Namespace, results: list[BackfillResult]) -> Path:
+    manifest = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "runner_commit": short_commit("HEAD"),
+        "runner_from_current": bool(args.runner_from_current),
+        "kinds": [kind.value for kind in [BenchKind(value) for value in (args.kind or [BenchKind.MATRIX.value])]],
+        "results": [
+            {
+                "target_commit": result.commit,
+                "kind": result.kind.value,
+                "skipped": result.skipped,
+                "copied": [str(path) for path in result.copied],
+            }
+            for result in results
+        ],
+    }
+    path = ROOT / RESULTS_REL / f"{utc_stamp()}-backfill-manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
 def run_kind(
     *,
     worktree: Path,
@@ -221,10 +270,24 @@ def run_kind(
         print(f"==> {commit_short} {kind.value}: skip existing")
         return BackfillResult(commit_short, kind, [], skipped=True)
 
-    script = worktree / kind_script_rel(kind)
+    script_rel = kind_script_rel(kind)
+    script = worktree / script_rel
+    if args.runner_from_current:
+        current_script = ROOT / script_rel
+        if not current_script.exists():
+            raise RuntimeError(f"current checkout is missing runner script: {script_rel}")
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current_script, script)
+
     if not script.exists():
-        print(f"==> {commit_short} {kind.value}: skip missing {kind_script_rel(kind)}")
+        print(f"==> {commit_short} {kind.value}: skip missing {script_rel}")
         return BackfillResult(commit_short, kind, [], skipped=True)
+
+    if kind is BenchKind.LEGACY:
+        # Older versions of harness/bench/run.sh required the release binary to
+        # exist before the script started. Build explicitly so backfill can
+        # replay those commits without depending on the script's current shape.
+        run(["cargo", "build", "--release", "-p", "redis-server"], cwd=worktree, env=env)
 
     before = artifact_files(worktree)
     print(f"==> {commit_short} {kind.value}")
@@ -261,6 +324,35 @@ def parse_args() -> argparse.Namespace:
         help="Benchmark kind to run. Defaults to matrix.",
     )
     parser.add_argument(
+        "--legacy-requests",
+        type=int,
+        default=300_000,
+        help="Request count for --kind legacy (harness/bench/run.sh).",
+    )
+    parser.add_argument(
+        "--legacy-clients",
+        type=int,
+        default=50,
+        help="Client count for --kind legacy (harness/bench/run.sh).",
+    )
+    parser.add_argument(
+        "--legacy-pipeline",
+        type=int,
+        default=100,
+        help="Pipeline depth for --kind legacy (harness/bench/run.sh).",
+    )
+    parser.add_argument(
+        "--legacy-payload",
+        type=int,
+        default=64,
+        help="Payload bytes for --kind legacy (harness/bench/run.sh).",
+    )
+    parser.add_argument(
+        "--legacy-tests",
+        default="set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,lrange_100,lrange_300,mset,ping_mbulk",
+        help="Comma-separated test list for --kind legacy.",
+    )
+    parser.add_argument(
         "--suite",
         choices=["smoke", "big"],
         default="smoke",
@@ -287,6 +379,16 @@ def parse_args() -> argparse.Namespace:
         "--skip-existing",
         action="store_true",
         help="Skip a kind when matching result artifacts already exist.",
+    )
+    parser.add_argument(
+        "--runner-from-current",
+        action="store_true",
+        help=(
+            "Copy the selected benchmark runner script from the current checkout "
+            "into each historical worktree before running it. The target binary "
+            "is still rebuilt from the historical commit; only the measurement "
+            "tooling is backfilled from the current checkout."
+        ),
     )
     parser.add_argument(
         "--env",
@@ -333,7 +435,9 @@ def main() -> int:
 
     copied_total = sum(len(result.copied) for result in all_results)
     skipped_total = sum(1 for result in all_results if result.skipped)
+    manifest = write_manifest(args, all_results)
     print(f"backfill complete: {len(all_results)} run(s), {copied_total} artifact(s), {skipped_total} skipped")
+    print(f"manifest: {manifest.relative_to(ROOT)}")
     return 0
 
 

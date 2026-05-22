@@ -26,6 +26,14 @@ RDB load/save:   [████████████████████] 
 [Run the same comparison](docs/CONFORMANCE.md#reproducing), or read the full
 [conformance matrix](docs/CONFORMANCE.md).
 
+> **Thinking about adopting?** The 97.9% above is the pass rate *within
+> the slice we've built*, not coverage of all upstream Valkey behavior.
+> Before you wire valkey-rs into anything load-bearing, read
+> [**Scope and gaps**](docs/SCOPE_AND_GAPS.md) — it spells out what is
+> and isn't here today (no clustering, no modules, no in-process TLS,
+> replication backbone not gated, …) and gives a decision table for
+> common deployment shapes.
+
 Other useful numbers:
 
 | Check | Result |
