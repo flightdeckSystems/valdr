@@ -37,6 +37,7 @@ packets = [
   "runtime-owner-baseline-hotspots",
   "runtime-owner-0-faithful-map",
   "runtime-owner-1-canary-corpus",
+  "runtime-owner-1b-fix-canary-divergences",
   "runtime-owner-post-canary-oracle",
   "runtime-owner-2-scaffold-types",
   "runtime-owner-post-scaffold-oracle",
