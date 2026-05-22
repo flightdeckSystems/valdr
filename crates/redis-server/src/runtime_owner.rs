@@ -1,8 +1,8 @@
-//! RuntimeOwner std nonblocking plain-TCP experiment.
+//! RuntimeOwner mio readiness plain-TCP path.
 //!
 //! This module names the owner-loop vocabulary from
 //! `harness/architecture/object-vocabulary.tsv` and implements the bounded
-//! std-only owner loop approved by
+//! `mio` owner loop approved by
 //! `harness/architecture/decisions/runtime-ownership.md`.
 //!
 //! The transitional DB model is intentional: command dispatch still locks the
@@ -10,14 +10,16 @@
 //! client parser state, per-slot foreign payload receivers, and ordinary reply
 //! flushing, but it does not create a second live `Vec<RedisDb>`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener as StdTcpListener, TcpStream as StdTcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::time::Duration;
 
+use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
+use mio::{Events, Interest, Poll, Registry as MioRegistry, Token};
 use redis_core::client_info::client_info_registry;
 use redis_core::databases::global_databases;
 use redis_core::metrics::server_metrics;
@@ -30,6 +32,9 @@ const DEFAULT_DATABASE_COUNT: u32 = 16;
 const DEFAULT_EVENT_CAPACITY: usize = 1024;
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 const MAX_COMMANDS_PER_SLOT_TICK: usize = 128;
+const LISTENER_TOKEN: Token = Token(0);
+const SLOT_TOKEN_BASE: usize = 1;
+const POLL_TIMEOUT: Duration = Duration::from_millis(2);
 
 /// Typed key into the future RuntimeOwner client-slot table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -53,11 +58,11 @@ impl SlotId {
     }
 }
 
-/// Abstract poller handle.
+/// Readiness-poller handle for the owner-loop path.
 ///
-/// The concrete readiness backend is intentionally absent here. Choosing
-/// `mio`, `polling`, `tokio`, or a raw platform poller is still a
-/// TODO(human) decision in the runtime-ownership architecture doc.
+/// `runtime-owner-8-mio-poller-owner-loop` installs `mio` for plain TCP only.
+/// TLS remains on the existing thread-per-connection path, and raw platform
+/// poller code stays outside this packet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PollDriverHandle {
     installed: bool,
@@ -69,6 +74,13 @@ impl PollDriverHandle {
         Self {
             installed: false,
             epoch: 0,
+        }
+    }
+
+    pub const fn mio(epoch: u64) -> Self {
+        Self {
+            installed: true,
+            epoch,
         }
     }
 
@@ -211,9 +223,10 @@ impl ClientWriteBuffer {
 pub struct ClientSlot {
     id: SlotId,
     client: Client,
-    stream: Option<TcpStream>,
+    stream: Option<MioTcpStream>,
     foreign_rx: Option<Receiver<Vec<u8>>>,
     write_buffer: ClientWriteBuffer,
+    writable_interest: bool,
     closed: bool,
     close_after_flush: bool,
 }
@@ -226,6 +239,7 @@ impl ClientSlot {
             stream: None,
             foreign_rx: None,
             write_buffer: ClientWriteBuffer::new(),
+            writable_interest: false,
             closed: false,
             close_after_flush: false,
         }
@@ -234,7 +248,7 @@ impl ClientSlot {
     fn with_stream(
         id: SlotId,
         client: Client,
-        stream: TcpStream,
+        stream: MioTcpStream,
         foreign_rx: Receiver<Vec<u8>>,
     ) -> Self {
         Self {
@@ -243,6 +257,7 @@ impl ClientSlot {
             stream: Some(stream),
             foreign_rx: Some(foreign_rx),
             write_buffer: ClientWriteBuffer::new(),
+            writable_interest: false,
             closed: false,
             close_after_flush: false,
         }
@@ -363,7 +378,14 @@ impl OwnerCommandResult {
     }
 }
 
-/// Owner of normal plain-TCP command execution for the std experiment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SlotDispatchOutcome {
+    progressed: bool,
+    queued_write: bool,
+    reschedule: bool,
+}
+
+/// Owner of normal plain-TCP command execution for the mio readiness path.
 ///
 /// This is still transitional: it owns accepted plain-TCP sockets and client
 /// slots, but dispatch reaches live keyspace state through `global_databases()`
@@ -373,6 +395,8 @@ pub struct RuntimeOwner {
     poll_driver: PollDriverHandle,
     slots: Vec<Option<ClientSlot>>,
     free_slots: Vec<SlotId>,
+    continuation_queue: VecDeque<SlotId>,
+    queued_continuations: HashSet<SlotId>,
     database_count: u32,
     events: VecDeque<RuntimeEvent>,
 }
@@ -385,6 +409,8 @@ impl RuntimeOwner {
             poll_driver: PollDriverHandle::abstract_placeholder(),
             slots: Vec::new(),
             free_slots: Vec::new(),
+            continuation_queue: VecDeque::new(),
+            queued_continuations: HashSet::new(),
             events: VecDeque::new(),
         }
     }
@@ -446,7 +472,7 @@ impl RuntimeOwner {
     fn insert_connected_client(
         &mut self,
         client: Client,
-        stream: TcpStream,
+        stream: MioTcpStream,
         foreign_rx: Receiver<Vec<u8>>,
     ) -> Option<SlotId> {
         if let Some(slot_id) = self.free_slots.pop() {
@@ -466,7 +492,7 @@ impl RuntimeOwner {
     }
 
     pub fn run_plain_tcp(
-        listener: TcpListener,
+        listener: StdTcpListener,
         shutdown: Arc<AtomicBool>,
         next_client_id: Arc<AtomicU64>,
         registry: Arc<Mutex<PubSubRegistry>>,
@@ -478,49 +504,90 @@ impl RuntimeOwner {
             eprintln!("redis-server: set_nonblocking(true) failed: {}", e);
         }
 
+        let mut listener = MioTcpListener::from_std(listener);
+        let mut poll = match Poll::new() {
+            Ok(poll) => poll,
+            Err(e) => {
+                eprintln!("redis-server: mio Poll::new failed: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = poll
+            .registry()
+            .register(&mut listener, LISTENER_TOKEN, Interest::READABLE)
+        {
+            eprintln!("redis-server: mio listener registration failed: {}", e);
+            return;
+        }
+        let mut events = Events::with_capacity(DEFAULT_EVENT_CAPACITY);
         let config = RuntimeOwnerConfig::disabled()
             .with_enabled(true)
             .with_database_count(global_databases().count() as u32);
         let mut owner = RuntimeOwner::new(config);
-        eprintln!("redis-server: RuntimeOwner plain TCP loop enabled");
+        owner.poll_driver = PollDriverHandle::mio(1);
+        eprintln!("redis-server: RuntimeOwner mio plain TCP loop enabled");
 
         while !shutdown.load(Ordering::SeqCst) {
             let mut progressed = false;
-            progressed |= owner.accept_ready(&listener, &next_client_id, &registry);
-            progressed |= owner.drain_foreign_payloads();
-            progressed |= owner.read_ready_clients(&registry, &server);
-            progressed |= owner.flush_pending_writes();
-            progressed |= owner.cleanup_closed_clients(&registry);
 
-            if !progressed {
-                thread::yield_now();
+            progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+
+            let timeout = if owner.has_scheduled_commands() {
+                Some(Duration::from_millis(0))
+            } else {
+                Some(POLL_TIMEOUT)
+            };
+            match poll.poll(&mut events, timeout) {
+                Ok(()) => {}
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    eprintln!("redis-server: mio poll failed: {}", e);
+                    break;
+                }
             }
+
+            progressed |= owner.handle_poll_events(
+                &events,
+                &listener,
+                poll.registry(),
+                &next_client_id,
+                &registry,
+                &server,
+            );
+            progressed |= owner.drain_foreign_payloads(poll.registry());
+            progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
+            progressed |= owner.cleanup_closed_clients(poll.registry(), &registry);
+
+            let _ = progressed;
         }
 
-        owner.close_all_clients(&registry);
+        owner.close_all_clients(poll.registry(), &registry);
     }
 
     fn accept_ready(
         &mut self,
-        listener: &TcpListener,
+        listener: &MioTcpListener,
+        poll_registry: &MioRegistry,
         next_client_id: &Arc<AtomicU64>,
         registry: &Arc<Mutex<PubSubRegistry>>,
     ) -> bool {
         let mut progressed = false;
         loop {
             match listener.accept() {
-                Ok((mut stream, peer_addr)) => {
+                Ok((stream, peer_addr)) => {
                     progressed = true;
                     let metrics = server_metrics();
                     let current = metrics.connected_clients.load(Ordering::Relaxed);
                     let limit = redis_commands::connection::get_max_clients();
                     if current >= limit {
                         metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                        let mut stream: StdTcpStream = stream.into();
                         let _ = stream.write_all(b"-ERR max number of clients reached\r\n");
                         drop(stream);
                         continue;
                     }
 
+                    let stream: StdTcpStream = stream.into();
                     if let Err(e) = stream.set_nodelay(true) {
                         eprintln!("redis-server: set_nodelay failed: {}", e);
                     }
@@ -537,6 +604,13 @@ impl RuntimeOwner {
                             continue;
                         }
                     };
+                    if let Err(e) = conn_stream.set_nonblocking(true) {
+                        eprintln!(
+                            "redis-server: cloned client set_nonblocking(true) failed: {}",
+                            e
+                        );
+                    }
+                    let mio_stream = MioTcpStream::from_std(stream);
 
                     let id = next_client_id.fetch_add(1, Ordering::Relaxed);
                     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -559,19 +633,39 @@ impl RuntimeOwner {
                     client.addr = Some(peer);
                     client.authenticated_user = super::determine_initial_user();
 
-                    if self.insert_connected_client(client, stream, rx).is_some() {
-                        metrics.on_connect();
-                        metrics
-                            .total_connections_received
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        if let Ok(mut guard) = registry.lock() {
-                            guard.drop_client(id);
+                    let slot_id = match self.insert_connected_client(client, mio_stream, rx) {
+                        Some(slot_id) => slot_id,
+                        None => {
+                            if let Ok(mut guard) = registry.lock() {
+                                guard.drop_client(id);
+                            }
+                            if let Ok(mut guard) = client_info_registry().lock() {
+                                guard.deregister(id);
+                            }
+                            metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                            continue;
                         }
-                        if let Ok(mut guard) = client_info_registry().lock() {
-                            guard.deregister(id);
+                    };
+
+                    metrics.on_connect();
+                    metrics
+                        .total_connections_received
+                        .fetch_add(1, Ordering::Relaxed);
+
+                    if let Some(slot) = self.slot_mut(slot_id) {
+                        if let Some(stream) = slot.stream.as_mut() {
+                            if let Err(e) = poll_registry.register(
+                                stream,
+                                token_for_slot(slot_id),
+                                client_interest(false),
+                            ) {
+                                eprintln!(
+                                    "redis-server: mio client registration failed for {}: {}",
+                                    peer_addr, e
+                                );
+                                slot.mark_closed();
+                            }
                         }
-                        metrics.rejected_connections.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -615,8 +709,135 @@ impl RuntimeOwner {
         self.slot_mut(slot_id).map(ClientSlot::take_pending_write)
     }
 
-    fn drain_foreign_payloads(&mut self) -> bool {
+    fn has_scheduled_commands(&self) -> bool {
+        !self.continuation_queue.is_empty()
+    }
+
+    fn schedule_command_continuation(&mut self, slot_id: SlotId) {
+        if self.queued_continuations.insert(slot_id) {
+            self.continuation_queue.push_back(slot_id);
+        }
+    }
+
+    fn pop_command_continuation(&mut self) -> Option<SlotId> {
+        let slot_id = self.continuation_queue.pop_front()?;
+        self.queued_continuations.remove(&slot_id);
+        Some(slot_id)
+    }
+
+    fn handle_poll_events(
+        &mut self,
+        events: &Events,
+        listener: &MioTcpListener,
+        poll_registry: &MioRegistry,
+        next_client_id: &Arc<AtomicU64>,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
         let mut progressed = false;
+        let mut read_buf = [0u8; READ_BUFFER_SIZE];
+
+        for event in events.iter() {
+            if event.token() == LISTENER_TOKEN {
+                if event.is_readable() {
+                    progressed |=
+                        self.accept_ready(listener, poll_registry, next_client_id, registry);
+                }
+                continue;
+            }
+
+            let slot_id = match slot_id_from_token(event.token()) {
+                Some(slot_id) => slot_id,
+                None => continue,
+            };
+            let idx = slot_id.as_index();
+
+            if event.is_readable() {
+                progressed |= self.read_slot(idx, &mut read_buf);
+                let outcome = self.dispatch_slot_commands(idx, registry, server);
+                progressed |= outcome.progressed;
+                if outcome.queued_write {
+                    progressed |= self.ensure_writable_interest(poll_registry, slot_id);
+                }
+                if outcome.reschedule {
+                    self.schedule_command_continuation(slot_id);
+                }
+            }
+
+            if event.is_writable() {
+                progressed |= self.flush_slot_pending_write(idx, poll_registry);
+            }
+
+            if event.is_error() || event.is_read_closed() || event.is_write_closed() {
+                if let Some(slot) = self.slot_mut(slot_id) {
+                    if slot.write_buffer.is_empty() {
+                        slot.mark_closed();
+                    } else {
+                        slot.mark_close_after_flush();
+                    }
+                }
+            }
+        }
+
+        progressed
+    }
+
+    fn dispatch_scheduled_commands(
+        &mut self,
+        poll_registry: &MioRegistry,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+        server: &Arc<redis_core::RedisServer>,
+    ) -> bool {
+        let mut progressed = false;
+        let initial_len = self.continuation_queue.len();
+        for _ in 0..initial_len {
+            let slot_id = match self.pop_command_continuation() {
+                Some(slot_id) => slot_id,
+                None => break,
+            };
+            let outcome = self.dispatch_slot_commands(slot_id.as_index(), registry, server);
+            progressed |= outcome.progressed;
+            if outcome.queued_write {
+                progressed |= self.ensure_writable_interest(poll_registry, slot_id);
+            }
+            if outcome.reschedule {
+                self.schedule_command_continuation(slot_id);
+            }
+        }
+        progressed
+    }
+
+    fn ensure_writable_interest(&mut self, poll_registry: &MioRegistry, slot_id: SlotId) -> bool {
+        let slot = match self.slot_mut(slot_id) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.write_buffer.is_empty() || slot.writable_interest || slot.closed {
+            return false;
+        }
+        let stream = match slot.stream.as_mut() {
+            Some(stream) => stream,
+            None => {
+                slot.mark_closed();
+                return false;
+            }
+        };
+        match poll_registry.reregister(stream, token_for_slot(slot_id), client_interest(true)) {
+            Ok(()) => {
+                slot.writable_interest = true;
+                true
+            }
+            Err(e) => {
+                eprintln!("redis-server: mio writable reregister failed: {}", e);
+                slot.mark_closed();
+                true
+            }
+        }
+    }
+
+    fn drain_foreign_payloads(&mut self, poll_registry: &MioRegistry) -> bool {
+        let mut progressed = false;
+        let mut writable_slots = Vec::new();
         for slot in self.slots.iter_mut().flatten() {
             loop {
                 let recv_result = match slot.foreign_rx.as_mut() {
@@ -626,6 +847,7 @@ impl RuntimeOwner {
                 match recv_result {
                     Ok(payload) => {
                         slot.queue_write_owned(payload);
+                        writable_slots.push(slot.id());
                         progressed = true;
                     }
                     Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -634,19 +856,8 @@ impl RuntimeOwner {
                 }
             }
         }
-        progressed
-    }
-
-    fn read_ready_clients(
-        &mut self,
-        registry: &Arc<Mutex<PubSubRegistry>>,
-        server: &Arc<redis_core::RedisServer>,
-    ) -> bool {
-        let mut progressed = false;
-        let mut read_buf = [0u8; READ_BUFFER_SIZE];
-        for idx in 0..self.slots.len() {
-            progressed |= self.read_slot(idx, &mut read_buf);
-            progressed |= self.dispatch_slot_commands(idx, registry, server);
+        for slot_id in writable_slots {
+            self.ensure_writable_interest(poll_registry, slot_id);
         }
         progressed
     }
@@ -695,13 +906,13 @@ impl RuntimeOwner {
         idx: usize,
         registry: &Arc<Mutex<PubSubRegistry>>,
         server: &Arc<redis_core::RedisServer>,
-    ) -> bool {
+    ) -> SlotDispatchOutcome {
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
             Some(slot) => slot,
-            None => return false,
+            None => return SlotDispatchOutcome::default(),
         };
         if slot.closed || slot.close_after_flush || slot.client.query_buf.is_empty() {
-            return false;
+            return SlotDispatchOutcome::default();
         }
 
         let db0 = global_databases().get(0);
@@ -771,6 +982,10 @@ impl RuntimeOwner {
             }
         }
 
+        let reschedule = commands == MAX_COMMANDS_PER_SLOT_TICK
+            && consumed_total < slot.client.query_buf.len()
+            && has_complete_command(&slot.client.query_buf[consumed_total..]);
+
         if consumed_total > 0 {
             if consumed_total >= slot.client.query_buf.len() {
                 slot.client.query_buf.clear();
@@ -781,6 +996,7 @@ impl RuntimeOwner {
         drop(batch_db0_guard);
 
         let reply = slot.client.drain_reply();
+        let queued_write = !reply.is_empty();
         if !reply.is_empty() {
             slot.queue_write_owned(reply);
         }
@@ -789,37 +1005,66 @@ impl RuntimeOwner {
             super::update_client_info_snapshot(&slot.client, &last_cmd_name);
         }
 
-        saw_command || consumed_total > 0
+        SlotDispatchOutcome {
+            progressed: saw_command || consumed_total > 0,
+            queued_write,
+            reschedule,
+        }
     }
 
-    fn flush_pending_writes(&mut self) -> bool {
+    fn flush_slot_pending_write(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
         let mut progressed = false;
-        for slot in self.slots.iter_mut().flatten() {
-            if slot.write_buffer.is_empty() {
-                continue;
-            }
-            let (stream, buffer) = match (slot.stream.as_mut(), &mut slot.write_buffer) {
-                (Some(stream), buffer) => (stream, buffer),
-                (None, _) => {
-                    slot.mark_closed();
-                    continue;
+        let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
+            Some(slot) => slot,
+            None => return false,
+        };
+        if slot.write_buffer.is_empty() {
+            if slot.writable_interest {
+                let token = token_for_slot(slot.id());
+                if let Some(stream) = slot.stream.as_mut() {
+                    if poll_registry
+                        .reregister(stream, token, client_interest(false))
+                        .is_ok()
+                    {
+                        slot.writable_interest = false;
+                    }
                 }
-            };
-            while !buffer.is_empty() {
-                match stream.write(buffer.as_bytes()) {
-                    Ok(0) => {
+            }
+            return false;
+        }
+        let (stream, buffer) = match (slot.stream.as_mut(), &mut slot.write_buffer) {
+            (Some(stream), buffer) => (stream, buffer),
+            (None, _) => {
+                slot.mark_closed();
+                return false;
+            }
+        };
+        while !buffer.is_empty() {
+            match stream.write(buffer.as_bytes()) {
+                Ok(0) => {
+                    slot.mark_closed();
+                    break;
+                }
+                Ok(n) => {
+                    buffer.consume_front(n);
+                    progressed = true;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    slot.mark_closed();
+                    break;
+                }
+            }
+        }
+        if slot.write_buffer.is_empty() && slot.writable_interest {
+            let token = token_for_slot(slot.id());
+            if let Some(stream) = slot.stream.as_mut() {
+                match poll_registry.reregister(stream, token, client_interest(false)) {
+                    Ok(()) => slot.writable_interest = false,
+                    Err(e) => {
+                        eprintln!("redis-server: mio readable reregister failed: {}", e);
                         slot.mark_closed();
-                        break;
-                    }
-                    Ok(n) => {
-                        buffer.consume_front(n);
-                        progressed = true;
-                    }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => {
-                        slot.mark_closed();
-                        break;
                     }
                 }
             }
@@ -827,7 +1072,11 @@ impl RuntimeOwner {
         progressed
     }
 
-    fn cleanup_closed_clients(&mut self, registry: &Arc<Mutex<PubSubRegistry>>) -> bool {
+    fn cleanup_closed_clients(
+        &mut self,
+        poll_registry: &MioRegistry,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+    ) -> bool {
         let mut to_remove = Vec::new();
         for slot in self.slots.iter().flatten() {
             if slot.closed || (slot.close_after_flush && slot.write_buffer.is_empty()) {
@@ -837,21 +1086,60 @@ impl RuntimeOwner {
 
         let progressed = !to_remove.is_empty();
         for slot_id in to_remove {
-            if let Some(slot) = self.remove_client(slot_id) {
+            self.queued_continuations.remove(&slot_id);
+            if let Some(mut slot) = self.remove_client(slot_id) {
+                if let Some(stream) = slot.stream.as_mut() {
+                    let _ = poll_registry.deregister(stream);
+                }
                 cleanup_slot(slot, registry);
             }
         }
         progressed
     }
 
-    fn close_all_clients(&mut self, registry: &Arc<Mutex<PubSubRegistry>>) {
+    fn close_all_clients(
+        &mut self,
+        poll_registry: &MioRegistry,
+        registry: &Arc<Mutex<PubSubRegistry>>,
+    ) {
         let ids: Vec<SlotId> = self.slots.iter().flatten().map(ClientSlot::id).collect();
         for slot_id in ids {
-            if let Some(slot) = self.remove_client(slot_id) {
+            self.queued_continuations.remove(&slot_id);
+            if let Some(mut slot) = self.remove_client(slot_id) {
+                if let Some(stream) = slot.stream.as_mut() {
+                    let _ = poll_registry.deregister(stream);
+                }
                 cleanup_slot(slot, registry);
             }
         }
     }
+}
+
+fn token_for_slot(slot_id: SlotId) -> Token {
+    Token(SLOT_TOKEN_BASE + slot_id.as_index())
+}
+
+fn slot_id_from_token(token: Token) -> Option<SlotId> {
+    token
+        .0
+        .checked_sub(SLOT_TOKEN_BASE)
+        .and_then(SlotId::from_index)
+}
+
+fn client_interest(writable: bool) -> Interest {
+    if writable {
+        Interest::READABLE.add(Interest::WRITABLE)
+    } else {
+        Interest::READABLE
+    }
+}
+
+fn has_complete_command(bytes: &[u8]) -> bool {
+    let mut argv: Vec<RedisString> = Vec::new();
+    matches!(
+        parse_inline_or_multibulk_into(bytes, &mut argv),
+        Ok(Some(_))
+    )
 }
 
 fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
@@ -877,6 +1165,14 @@ mod tests {
         let slot_id = SlotId::new(42);
         assert_eq!(slot_id.as_u32(), 42);
         assert_eq!(slot_id.as_index(), 42);
+        assert_eq!(slot_id_from_token(token_for_slot(slot_id)), Some(slot_id));
+        assert_eq!(slot_id_from_token(LISTENER_TOKEN), None);
+    }
+
+    #[test]
+    fn complete_command_probe_distinguishes_partial_buffers() {
+        assert!(has_complete_command(b"*1\r\n$4\r\nPING\r\n"));
+        assert!(!has_complete_command(b"*1\r\n$4\r\nPI"));
     }
 
     #[test]
@@ -1007,7 +1303,7 @@ mod tests {
 //   todos:         0
 //   port_notes:    3
 //   unsafe_blocks: 0
-//   notes:         Std nonblocking plain-TCP owner loop. PollDriverHandle is
-//                  still abstract; no concrete poller dependency, command
-//                  fast path, or owner-owned live DB migration is introduced.
+//   notes:         Mio readiness plain-TCP owner loop with stable slot tokens.
+//                  No command fast path or owner-owned live DB migration is
+//                  introduced.
 // --------------------------------------------------------------------------

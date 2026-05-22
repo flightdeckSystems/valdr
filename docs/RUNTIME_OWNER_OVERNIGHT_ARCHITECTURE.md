@@ -135,6 +135,26 @@ DB list remains behind `global_databases()`; sharding and I/O threads remain
 out of scope; background semantics stay live; no benchmark-only command path is
 allowed.
 
+## Implementation Update: runtime-owner-8
+
+The plain-TCP owner loop now uses `mio::Poll` and stable slot tokens instead of
+the std nonblocking linear accept/read/write scan. The listener token accepts
+until `WouldBlock`; client readable tokens drain socket reads, parse RESP with
+`parse_inline_or_multibulk_into`, and dispatch through the existing
+`CommandContext::with_server` plus `redis_commands::dispatch` path. No command
+fast path was added.
+
+Per-slot write buffers now drive writable readiness: the owner registers
+writable interest only while bytes are pending and removes it when the buffer
+drains. Foreign pub/sub, blocked wakeup, WAIT, and replication bytes still
+arrive through per-slot mpsc receivers; the owner drains those receivers after
+poll returns on a short bounded timeout and writes the socket itself.
+
+The transitional DB storage rule is unchanged. `RuntimeOwner` continues to use
+`global_databases()` handles for live keyspace state and does not create an
+owner-owned `Vec<RedisDb>`. TLS remains on the existing thread-per-connection
+path.
+
 ## Overnight Strategy
 
 Do the lowest-blast-radius owner-loop step first:

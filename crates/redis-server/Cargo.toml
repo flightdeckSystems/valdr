@@ -11,6 +11,7 @@ redis-protocol = { workspace = true }
 redis-core = { workspace = true }
 redis-commands = { workspace = true }
 libc = { workspace = true }
+mio = { workspace = true }
 rustls = { workspace = true }
 
 [[bin]]

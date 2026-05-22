@@ -144,6 +144,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "mio"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+dependencies = [
+ "libc",
+ "log",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "mlua"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,6 +291,7 @@ name = "redis-server"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "mio",
  "redis-commands",
  "redis-core",
  "redis-protocol",

@@ -1,7 +1,7 @@
 # Runtime Owner Next Push
 
-Status: `runtime-owner-7-poller-architecture` approves the bounded
-`runtime-owner-8-mio-poller-owner-loop` packet.
+Status: `runtime-owner-8-mio-poller-owner-loop` implementation landed; the
+post-poller oracle and benchmark runners remain the evidence gate.
 
 This document scopes the next large harness run after the std nonblocking
 `RuntimeOwner` loop. The previous run proved the big architecture move was
@@ -100,6 +100,22 @@ Why this first:
 - If `cargo check --workspace`, focused tests, or full wire-smoke cannot be
   restored, stop with `TODO(architect)` instead of weakening compatibility.
 
+Implementation update:
+
+- `mio` is now a workspace dependency with `os-poll` and `net`.
+- The default plain-TCP `RuntimeOwner` loop uses `mio::Poll`, `mio::Events`,
+  listener token `0`, and stable slot-derived client tokens.
+- Listener readiness accepts until `WouldBlock`; readable client tokens drain
+  socket reads and dispatch through `parse_inline_or_multibulk_into`,
+  `CommandContext::with_server`, and `redis_commands::dispatch`.
+- Writable interest is registered only while a slot write buffer has pending
+  bytes, and is removed again once the buffer drains.
+- Slots that hit `MAX_COMMANDS_PER_SLOT_TICK` with a complete command still in
+  `query_buf` are queued for owner-loop continuation without waiting for a new
+  socket readiness edge.
+- Foreign payload receivers are still per-slot mpsc channels; the owner drains
+  them after poll returns on a short bounded timeout and owns all socket writes.
+
 ## Explicit non-goals for the next run
 
 - No benchmark-only GET/SET/PING/INCR fast paths.
@@ -142,7 +158,7 @@ The new queue begins after `runtime-owner-5-post-polish-hotspots`.
      - blocks with a better packet graph.
 
 7. `runtime-owner-8-mio-poller-owner-loop`
-   - Bounded implementation packet.
+   - Done in this implementation packet.
    - Adds the `mio` poller dependency and rewires only plain-TCP
      readiness/writeback.
 
@@ -184,12 +200,8 @@ python3 ../port-harness/loop/run-loop.py \
   --max-same-packet-failures 2
 ```
 
-The next selected packet should be `runtime-owner-6-current-oracle`. If the
-first selected packet is anything else, stop and inspect `harness/work-packets.jsonl`
-plus `harness/evidence/ledger.jsonl` before dispatching.
-
-After this architecture packet, the next selected packet should be
-`runtime-owner-8-mio-poller-owner-loop`. If the loop selects anything else,
+After this implementation packet, the next selected packet should be
+`runtime-owner-8-post-poller-oracle`. If the loop selects anything else,
 inspect `harness/work-packets.jsonl` and `harness/evidence/ledger.jsonl` before
 dispatching.
 

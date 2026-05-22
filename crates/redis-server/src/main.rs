@@ -1,6 +1,6 @@
 //! `redis-server` binary entry point — Wave A scaffolding.
 //!
-//! Plain TCP binds a port and runs through the std nonblocking
+//! Plain TCP binds a port and runs through the `mio` readiness-backed
 //! `RuntimeOwner` loop: one owner accepts sockets, parses RESP requests,
 //! dispatches through `redis-commands`, and flushes replies.
 //!
@@ -9,7 +9,7 @@
 //! re-acquiring the subscriber's transport from a foreign thread.
 //!
 //! Out of scope for Wave A:
-//!   * Real poller dependency (no `mio` / `tokio` yet; std nonblocking only).
+//!   * Tokio/raw pollers; plain TCP uses `mio`, TLS keeps the older path.
 //!   * Multi-DB routing (every command sees DB 0).
 //!   * Replication, cluster, persistence, modules.
 
@@ -1401,7 +1401,7 @@ fn queue_error_reply(client: &mut Client, err: &RedisError) {
 //   todos:         0
 //   port_notes:    1
 //   unsafe_blocks: 0
-//   notes:         Plain TCP now enters the std nonblocking RuntimeOwner loop.
+//   notes:         Plain TCP now enters the mio RuntimeOwner loop.
 //                  TLS stays on the existing per-connection thread path with
 //                  mpsc foreign payload delivery. SIGINT handler is a no-op
 //                  stub.
