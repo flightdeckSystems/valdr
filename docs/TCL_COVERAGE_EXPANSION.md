@@ -121,6 +121,19 @@ This remains telemetry. The follow-up `tcl-post-scan-survey` runner must
 refresh whether `unit/scan` now reaches a counted summary or exposes the next
 frontier in scan cursor fidelity or score formatting.
 
+## BITFIELD Overflow Packet
+
+`tcl-bitfield-overflow-stability` is scoped to BITFIELD overflow parsing and
+arithmetic stability in `crates/redis-commands/src/bitops.rs`. The
+implementation mirrors `reference/valkey/src/bitops.c:350-640` and
+`:1210-1418` for signed minimum integer parsing, unsigned overflow pre-checks
+using wrapping arithmetic, and `OVERFLOW FAIL` returning null without writing
+when a SET value is outside the declared bitfield range.
+
+This remains telemetry. The follow-up `tcl-post-bitfield-survey` runner must
+refresh whether `unit/bitfield` now reaches a counted summary or exposes the
+next BITFIELD frontier.
+
 ## What This Says About "Spark Skeleton" Work
 
 Do not use cheap agents to mass-author trusted command behavior. The useful

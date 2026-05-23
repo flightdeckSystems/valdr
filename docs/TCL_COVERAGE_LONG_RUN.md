@@ -75,6 +75,18 @@ cluster-slot scanning, HSCAN/SSCAN implementations, or sorted-set storage.
 The follow-up `tcl-post-scan-survey` runner remains the telemetry gate for the
 refreshed `unit/scan` frontier.
 
+## BITFIELD Packet Note
+
+`tcl-bitfield-overflow-stability` targets only BITFIELD integer parsing and
+overflow behavior in `crates/redis-commands/src/bitops.rs`, matching
+`reference/valkey/src/bitops.c:350-640` and `:1210-1418`. It accepts the exact
+signed 64-bit minimum value, keeps unsigned overflow checks in wrapping
+arithmetic before range comparison, and makes `OVERFLOW FAIL` on SET use the
+SET value's overflow status instead of an INCRBY-style old-plus-new check.
+
+The follow-up `tcl-post-bitfield-survey` runner remains the telemetry gate for
+the refreshed `unit/bitfield` frontier.
+
 ## Why These Four
 
 `unit/geo` is first because it reaches `Test Summary`, so the pass/fail count is

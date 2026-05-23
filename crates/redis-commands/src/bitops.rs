@@ -134,8 +134,8 @@ pub(crate) fn check_unsigned_bitfield_overflow(
     } else {
         (1u64 << bits) - 1
     };
-    let maxincr = (max - value) as i64;
-    let minincr = -(value as i64);
+    let maxincr = max.wrapping_sub(value) as i64;
+    let minincr = 0u64.wrapping_sub(value) as i64;
 
     let compute_wrap = || -> u64 {
         let mask: u64 = if bits == 64 { 0 } else { u64::MAX << bits };
@@ -231,17 +231,25 @@ fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
     if digits.is_empty() {
         return None;
     }
-    let mut val: i64 = 0;
+    let mut val: u64 = 0;
     for &b in digits {
         if !b.is_ascii_digit() {
             return None;
         }
-        val = val.checked_mul(10)?.checked_add((b - b'0') as i64)?;
+        val = val.checked_mul(10)?.checked_add((b - b'0') as u64)?;
     }
     if neg {
-        val.checked_neg()
+        if val == (1u64 << 63) {
+            Some(i64::MIN)
+        } else if val <= i64::MAX as u64 {
+            Some(-(val as i64))
+        } else {
+            None
+        }
+    } else if val <= i64::MAX as u64 {
+        Some(val as i64)
     } else {
-        Some(val)
+        None
     }
 }
 
@@ -835,25 +843,26 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             ctx.reply_integer(val)?;
         } else if op.sign {
             let oldval = get_signed_bitfield(&bytes, op.offset, op.bits as u64);
-            let (overflow_dir, wrapped) =
-                check_signed_bitfield_overflow(oldval, op.incr, op.bits as u64, op.owtype);
-            let overflowed = overflow_dir != 0;
-            let (newval, retval) = if op.opcode == BitfieldOpCode::IncrBy {
+            let (newval, retval, overflowed) = if op.opcode == BitfieldOpCode::IncrBy {
+                let (overflow_dir, wrapped) =
+                    check_signed_bitfield_overflow(oldval, op.incr, op.bits as u64, op.owtype);
+                let overflowed = overflow_dir != 0;
                 let nv = if overflowed {
                     wrapped
                 } else {
                     oldval.wrapping_add(op.incr)
                 };
-                (nv, nv)
+                (nv, nv, overflowed)
             } else {
                 let (set_overflow, set_wrapped) =
                     check_signed_bitfield_overflow(op.incr, 0, op.bits as u64, op.owtype);
+                let overflowed = set_overflow != 0;
                 let nv = if set_overflow != 0 {
                     set_wrapped
                 } else {
                     op.incr
                 };
-                (nv, oldval)
+                (nv, oldval, overflowed)
             };
 
             let fail_now = overflowed && op.owtype == OverflowType::Fail;
@@ -868,23 +877,24 @@ fn bitfield_generic(ctx: &mut CommandContext, readonly: bool) -> RedisResult<()>
             }
         } else {
             let oldval = get_unsigned_bitfield(&bytes, op.offset, op.bits as u64);
-            let (overflow_dir, wrapped) =
-                check_unsigned_bitfield_overflow(oldval, op.incr, op.bits as u64, op.owtype);
-            let overflowed = overflow_dir != 0;
-            let (newval, retval) = if op.opcode == BitfieldOpCode::IncrBy {
+            let (newval, retval, overflowed) = if op.opcode == BitfieldOpCode::IncrBy {
+                let (overflow_dir, wrapped) =
+                    check_unsigned_bitfield_overflow(oldval, op.incr, op.bits as u64, op.owtype);
+                let overflowed = overflow_dir != 0;
                 let raw = oldval.wrapping_add(op.incr as u64);
                 let nv = if overflowed { wrapped } else { raw };
-                (nv, nv)
+                (nv, nv, overflowed)
             } else {
                 let setval = op.incr as u64;
                 let (set_overflow, set_wrapped) =
                     check_unsigned_bitfield_overflow(setval, 0, op.bits as u64, op.owtype);
+                let overflowed = set_overflow != 0;
                 let nv = if set_overflow != 0 {
                     set_wrapped
                 } else {
                     setval
                 };
-                (nv, oldval)
+                (nv, oldval, overflowed)
             };
 
             let fail_now = overflowed && op.owtype == OverflowType::Fail;
@@ -936,6 +946,112 @@ mod tests {
 
     fn set_args(client: &mut Client, args: &[&[u8]]) {
         client.set_args(args.iter().map(|arg| rs(arg)).collect());
+    }
+
+    #[test]
+    fn parse_i64_accepts_exact_min_value() {
+        assert_eq!(
+            parse_i64_from_bytes(b"-9223372036854775808"),
+            Some(i64::MIN)
+        );
+        assert_eq!(parse_i64_from_bytes(b"9223372036854775808"), None);
+        assert_eq!(parse_i64_from_bytes(b"-9223372036854775809"), None);
+    }
+
+    #[test]
+    fn unsigned_overflow_check_handles_out_of_range_values_without_panicking() {
+        assert_eq!(
+            check_unsigned_bitfield_overflow(300, 0, 8, OverflowType::Fail),
+            (1, 0)
+        );
+        assert_eq!(
+            check_unsigned_bitfield_overflow(1u64 << 63, 0, 63, OverflowType::Fail),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn bitfield_unsigned_set_overflow_fail_keeps_existing_value() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        db.set_key(rs(b"bits"), RedisObject::new_raw_string(&[42]), 0);
+        set_args(
+            &mut client,
+            &[
+                b"BITFIELD",
+                b"bits",
+                b"OVERFLOW",
+                b"FAIL",
+                b"SET",
+                b"u8",
+                b"0",
+                b"-1",
+                b"GET",
+                b"u8",
+                b"0",
+            ],
+        );
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        bitfield_command(&mut ctx).unwrap();
+
+        assert_eq!(client.drain_reply(), b"*2\r\n$-1\r\n:42\r\n");
+    }
+
+    #[test]
+    fn bitfield_signed_set_overflow_fail_uses_set_value_overflow() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        db.set_key(rs(b"bits"), RedisObject::new_raw_string(&[10]), 0);
+        set_args(
+            &mut client,
+            &[
+                b"BITFIELD",
+                b"bits",
+                b"OVERFLOW",
+                b"FAIL",
+                b"SET",
+                b"i8",
+                b"0",
+                b"-129",
+                b"GET",
+                b"i8",
+                b"0",
+            ],
+        );
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        bitfield_command(&mut ctx).unwrap();
+
+        assert_eq!(client.drain_reply(), b"*2\r\n$-1\r\n:10\r\n");
+    }
+
+    #[test]
+    fn bitfield_signed_i64_accepts_min_value() {
+        let mut client = Client::new(1);
+        let mut db = RedisDb::new(0);
+        set_args(
+            &mut client,
+            &[
+                b"BITFIELD",
+                b"bits",
+                b"SET",
+                b"i64",
+                b"0",
+                b"-9223372036854775808",
+                b"GET",
+                b"i64",
+                b"0",
+            ],
+        );
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        bitfield_command(&mut ctx).unwrap();
+
+        assert_eq!(
+            client.drain_reply(),
+            b"*2\r\n:0\r\n:-9223372036854775808\r\n"
+        );
     }
 
     #[test]
@@ -1006,5 +1122,5 @@ mod tests {
 //   todos:         0
 //   port_notes:    0
 //   unsafe_blocks: 0
-//   notes:         Safe bitmap command port; BITFIELD arithmetic remains under Tcl frontier coverage.
+//   notes:         Safe bitmap command port; BITFIELD overflow arithmetic covered by Tcl frontier tests.
 // ──────────────────────────────────────────────────────────────────────────
