@@ -1,0 +1,88 @@
+{
+  "captured_ts": "2026-05-23T02:53:23.497024Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "cargo check -p redis-commands: clean",
+      "ok": true
+    },
+    "cargo_check_workspace": {
+      "detail": "cargo check --workspace: clean",
+      "ok": true
+    },
+    "cargo_test_redis-commands_geo": {
+      "detail": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s",
+      "ok": true
+    },
+    "no_out_of_scope_changes": {
+      "detail": "no changed files outside packet targets",
+      "ok": true
+    },
+    "oracle_rust_vs_reference": {
+      "detail": "oracle --diff: 22/22 fixtures pass",
+      "ok": true
+    },
+    "target_files_modified": {
+      "detail": "perf-fixer touched 3/3 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "all touched Rust targets carry PORT STATUS trailers",
+      "ok": true
+    }
+  },
+  "harness_context": {
+    "commit": "4d3a347",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/geo.rs",
+      " M docs/TCL_COVERAGE_EXPANSION.md",
+      " M docs/TCL_COVERAGE_LONG_RUN.md",
+      " M harness/evidence/ledger.jsonl",
+      " M harness/history.jsonl",
+      "?? harness/evidence/runs/20260523T023957Z-4d3a347-perf-fixer-tcl-geo-edge-semantics.json"
+    ],
+    "run_id": "loop-4640de6d1b1b70d2",
+    "target_commit": "4d3a347fbba8108f9421ef3b3100a652a05fefb6",
+    "tree_hash": "3a6e1c887c024aeefd199d29ead907ea3c132fd7afaaf55d3bea2d8e666f06d3"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-geo-edge-semantics",
+  "prompt_hash": "75d91b273269833f",
+  "role": "perf-fixer",
+  "runtime_metadata": {
+    "approval": "never",
+    "cmd": [
+      "codex",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--cd",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--add-dir",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--sandbox",
+      "workspace-write",
+      "--json",
+      "--output-last-message",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T023958Z-codex-perf-fixer-tcl-geo-edge-semantics.last.txt",
+      "-"
+    ],
+    "finished_at": "2026-05-23T02:49:36Z",
+    "last_message_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T023958Z-codex-perf-fixer-tcl-geo-edge-semantics.last.txt",
+    "model": null,
+    "packet": "tcl-geo-edge-semantics",
+    "profile": null,
+    "project": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+    "prompt_source": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/next-prompt.md",
+    "return_code": 0,
+    "role": "perf-fixer",
+    "runtime": "codex",
+    "sandbox": "workspace-write",
+    "started_at": "2026-05-23T02:39:58Z",
+    "stderr_tail": "2026-05-23T02:46:06.161473Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/geo.rs:\n                let xy = decode_geohash(score).ok_or_else(|| geo_member_decode_error(&member))?;\n",
+    "transcript_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T023958Z-codex-perf-fixer-tcl-geo-edge-semantics.jsonl"
+  },
+  "transcript_bytes": 643872,
+  "transcript_preview": " +378,8 @@ fn as_zset(obj: Option<&RedisObject>) -> RedisResult<Option<&InlineZSet>> {\\n fn zset_score_from_obj(obj: &RedisObject, member: &[u8]) -> RedisResult<f64> {\\n     let zset = obj.zset().ok_or_else(RedisError::wrong_type)?;\\n     let key = RedisString::from_bytes(member);\\n-    zset.score(&key).ok_or_else(|| RedisError::runtime(b\\\"member does not exist\\\"))\\n+    zset.score(&key)\\n+        .ok_or_else(|| geo_member_missing_error(member))\\n }\\n \\n // \u2500\u2500 ZADD helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n@@ -509,11 +538,10 @@ pub fn georadius_generic(\\n             let zobj = ctx.db().lookup_key_read(&src_key);\\n             match zobj {\\n                 Some(z) => zset_score_from_obj(z, &member)?,\\n-                None => return Err(RedisError::runtime(b\\\"member does not exist\\\")),\\n+                None => return Err(geo_member_missing_error(&member)),\\n             }\\n         };\\n-        let xy = decode_geohash(score)\\n-            .ok_or_else(|| RedisError::runtime(b\\\"failed to decode member geohash\\\"))?;\\n+        let xy = decode_geohash(score).ok_or_else(|| geo_member_decode_error(&member))?;\\n         shape.xy = xy;\\n         let (conversion, radius) = extract_distance_or_reply(ctx, base_args - 2)?;\\n         shape.conversion = conversion;\\n@@ -526,7 +554,7 @@ pub fn georadius_generic(\\n             base_args = 2;\\n         }\\n     } else {\\n-        return Err(RedisError::runtime(b\\\"Unknown georadius search type\\\"));\\n+        return Err(geo_err(b\\\"Unknown georadius search type\\\"));\\n     }\\n \\n     let mut withdist = false;\\n@@ -563,7 +591,7 @@ pub fn georadius_generic(\\n             let cnt_raw = ctx.arg(base_args + i + 1)?.as_bytes().to_vec();\\n             count = parse_geo_i64(&cnt_raw)?;\\n             if count <= 0 {\\n-                return Err(RedisError::runtime(b\\\"COUNT must be > 0\\\"));\\n+                return Err(geo_err(b\\\"COUNT must be > 0\\\"));\\n             }\\n             i += 1;\\n         } else if arg.eq_ignore_ascii_case(b\\\"store\\\")\\n@@ -599,11 +627,10 @@ pub fn georadius_generic(\\n                     let zobj = ctx.db().lookup_key_read(&src_key);\\n                     match zobj {\\n                         Some(z) => zset_score_from_obj(z, &member)?,\\n-                        None => return Err(RedisError::runtime(b\\\"member does not exist\\\")),\\n+                        None => return Err(geo_member_missing_error(&member)),\\n                     }\\n                 };\\n-                let xy = decode_geohash(score)\\n-                    .ok_or_else(|| RedisError::runtime(b\\\"failed to decode member geohash\\\"))?;\\n+                let xy = decode_geohash(score).ok_or_else(|| geo_member_decode_error(&member))?;\\n                 shape.xy = xy;\\n             }\\n             frommember = true;\\n@@ -648,11 +675,11 @@ pub fn georadius_generic(\\n             && !fromloc\\n         {\\n             let nv_raw = ctx.arg(base_args + i + 1)?.as_bytes().to_vec();\\n-            let num_vertices = parse_geo_i32(&nv_raw)\\n-                .map_err(|_| RedisError::runtime(b\\\"invalid number of vertices\\\"))?;\\n+            let num_vertices =\\n+                parse_geo_i32(&nv_raw).map_err(|_| geo_err(b\\\"invalid number of vertices\\\"))?;\\n             let possible = remaining.saturating_sub(i + 2) / 2;\\n             if num_vertices < 3 || (possible as i32) < num_vertices {\\n-                return Err(RedisError::runtime(\\n+                return Err(geo_err(\\n                     b\\\"GEOSEARCH BYPOLYGON must have at least 3 vertices\\\",\\n                 ));\\n             }\\n@@ -680,23 +707,33 @@ pub fn georadius_generic(\\n         } else {\\n             b\\\"STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options\\\"\\n         };\\n-        return Err(RedisError::runtime(msg));\\n+        return Err(geo_err(msg));\\n     }\\n \\n     if flags & GEOSEARCH_FLAG != 0 && !frommember && !fromloc && !bypolygon {\\n-        return Err(RedisError::runtime(\\n-            b\\\"exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH\\\",\\n-        ));\\n+        let cmd = ctx.command_name();\\n+        let mut msg = Vec::with_capacity(\\n+            b\\\"exactly one of FROMMEMBER or FROMLONLAT can be specified for \\\".len() + cmd.len(),\\n+        );\\n+        msg.extend_from_slice(b\\\"exactly one of FROMMEMBER or FROMLONLAT can be specified for \\\");\\n+        msg.extend_from_slice(cmd);\\n+        return Err(geo_err(msg));\\n     }\\n \\n     if flags & GEOSEARCH_FLAG != 0 && !byradius && !bybox && !bypolygon {\\n-        return Err(RedisError::runtime(\\n-            b\\\"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for GEOSEARCH\\\",\\n-        ));\\n+        let cmd = ctx.command_name();\\n+        let mut msg = Vec::with_capacity(\\n+            b\\\"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for \\\".len() + cmd.len(),\\n+        );\\n+        msg.extend_from_slice(\\n+            b\\\"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for \\\",\\n+        );\\n+        msg.extend_from_slice(cmd);\\n+        return Err(geo_err(msg));\\n     }\\n \\n     if any && count == 0 {\\n-        return Err(RedisError::runtime(b\\\"the ANY argument requires COUNT argument\\\"));\\n+        return Err(geo_err(b\\\"the ANY argument requires COUNT argument\\\"));\\n     }\\n \\n     if !zobj_present {\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.updated\",\"item\":{\"id\":\"item_4\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Read packet inputs and current geo/docs surfaces\",\"completed\":true},{\"text\":\"Reproduce focused TCL geo failure\",\"completed\":true},{\"text\":\"Patch scoped geo/docs behavior\",\"completed\":true},{\"text\":\"Run focused and broader gates\",\"completed\":true},{\"text\":\"Write evidence artifact and final notes\",\"completed\":true}]}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_117\",\"type\":\"agent_message\",\"text\":\"Implemented `tcl-geo-edge-semantics`.\\n\\nChanged [geo.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/geo.rs:89) to restore Valkey-style GEO error payloads from `reference/valkey/src/geo.c:533-864`: missing member errors now include `ERR member <member> does not exist`, COUNT/ANY/store/BYPOLYGON validation errors get the `ERR` payload prefix, and GEOSEARCH missing FROM/BY errors use the actual command name. Normal command dispatch was not bypassed.\\n\\nUpdated [TCL_COVERAGE_EXPANSION.md](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/docs/TCL_COVERAGE_EXPANSION.md:81), [TCL_COVERAGE_LONG_RUN.md](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/docs/TCL_COVERAGE_LONG_RUN.md:48), and wrote the reserved evidence artifact at [20260523T023957Z-4d3a347-perf-fixer-tcl-geo-edge-semantics.json](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/evidence/runs/20260523T023957Z-4d3a347-perf-fixer-tcl-geo-edge-semantics.json:1).\\n\\nVerification:\\n- `cargo check -p redis-commands` passed with existing warnings.\\n- `cargo check --workspace` passed with existing warnings.\\n- `bash harness/oracle/smoke.sh --skip-build` was blocked by sandbox loopback bind denial.\\n- Focused `unit/geo` TCL survey was also blocked by the same socket-bind restriction, so post-fix counted TCL results still need `tcl-post-geo-survey` on a runner host.\\n- `rustfmt --check crates/redis-commands/src/geo.rs` still reports pre-existing formatting drift; I did not run broad formatting.\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_4\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Read packet inputs and current geo/docs surfaces\",\"completed\":true},{\"text\":\"Reproduce focused TCL geo failure\",\"completed\":true},{\"text\":\"Patch scoped geo/docs behavior\",\"completed\":true},{\"text\":\"Run focused and broader gates\",\"completed\":true},{\"text\":\"Write evidence artifact and final notes\",\"completed\":true}]}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":8090684,\"cached_input_tokens\":7888384,\"output_tokens\":23427,\"reasoning_output_tokens\":9301}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T023958Z-codex-perf-fixer-tcl-geo-edge-semantics.jsonl"
+}

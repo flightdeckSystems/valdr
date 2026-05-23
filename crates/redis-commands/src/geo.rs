@@ -87,6 +87,33 @@ fn parse_geo_i32(bytes: &[u8]) -> Result<i32, RedisError> {
         .ok_or_else(RedisError::not_integer)
 }
 
+fn geo_err(msg: impl AsRef<[u8]>) -> RedisError {
+    let msg = msg.as_ref();
+    let mut out = Vec::with_capacity(b"ERR ".len() + msg.len());
+    out.extend_from_slice(b"ERR ");
+    out.extend_from_slice(msg);
+    RedisError::runtime(out)
+}
+
+fn geo_member_missing_error(member: &[u8]) -> RedisError {
+    let mut out =
+        Vec::with_capacity(b"ERR member ".len() + member.len() + b" does not exist".len());
+    out.extend_from_slice(b"ERR member ");
+    out.extend_from_slice(member);
+    out.extend_from_slice(b" does not exist");
+    RedisError::runtime(out)
+}
+
+fn geo_member_decode_error(member: &[u8]) -> RedisError {
+    let mut out = Vec::with_capacity(
+        b"ERR failed to decode, member ".len() + member.len() + b" is not a valid geohash".len(),
+    );
+    out.extend_from_slice(b"ERR failed to decode, member ");
+    out.extend_from_slice(member);
+    out.extend_from_slice(b" is not a valid geohash");
+    RedisError::runtime(out)
+}
+
 /// Parse longitude and latitude from two consecutive command arguments.
 /// C: geo.c:108-120, extractLongLatOrReply.
 fn extract_long_lat_or_reply(
@@ -121,7 +148,9 @@ fn extract_unit_or_reply(unit: &[u8]) -> Result<f64, RedisError> {
     } else if unit.eq_ignore_ascii_case(b"mi") {
         Ok(1609.34)
     } else {
-        Err(RedisError::runtime(b"unsupported unit provided. please use M, KM, FT, MI"))
+        Err(geo_err(
+            b"unsupported unit provided. please use M, KM, FT, MI",
+        ))
     }
 }
 
@@ -133,10 +162,9 @@ fn extract_distance_or_reply(
     arg_base: usize,
 ) -> Result<(f64, f64), RedisError> {
     let dist_raw = ctx.arg(arg_base)?.as_bytes().to_vec();
-    let distance =
-        parse_geo_f64(&dist_raw).map_err(|_| RedisError::runtime(b"need numeric radius"))?;
+    let distance = parse_geo_f64(&dist_raw).map_err(|_| geo_err(b"need numeric radius"))?;
     if distance < 0.0 {
-        return Err(RedisError::runtime(b"radius cannot be negative"));
+        return Err(geo_err(b"radius cannot be negative"));
     }
     let unit_raw = ctx.arg(arg_base + 1)?.as_bytes().to_vec();
     let to_meters = extract_unit_or_reply(&unit_raw)?;
@@ -151,11 +179,11 @@ fn extract_box_or_reply(
     arg_base: usize,
 ) -> Result<(f64, f64, f64), RedisError> {
     let w_raw = ctx.arg(arg_base)?.as_bytes().to_vec();
-    let w = parse_geo_f64(&w_raw).map_err(|_| RedisError::runtime(b"need numeric width"))?;
+    let w = parse_geo_f64(&w_raw).map_err(|_| geo_err(b"need numeric width"))?;
     let h_raw = ctx.arg(arg_base + 1)?.as_bytes().to_vec();
-    let h = parse_geo_f64(&h_raw).map_err(|_| RedisError::runtime(b"need numeric height"))?;
+    let h = parse_geo_f64(&h_raw).map_err(|_| geo_err(b"need numeric height"))?;
     if h < 0.0 || w < 0.0 {
-        return Err(RedisError::runtime(b"height or width cannot be negative"));
+        return Err(geo_err(b"height or width cannot be negative"));
     }
     let unit_raw = ctx.arg(arg_base + 2)?.as_bytes().to_vec();
     let to_meters = extract_unit_or_reply(&unit_raw)?;
@@ -350,7 +378,8 @@ fn as_zset(obj: Option<&RedisObject>) -> RedisResult<Option<&InlineZSet>> {
 fn zset_score_from_obj(obj: &RedisObject, member: &[u8]) -> RedisResult<f64> {
     let zset = obj.zset().ok_or_else(RedisError::wrong_type)?;
     let key = RedisString::from_bytes(member);
-    zset.score(&key).ok_or_else(|| RedisError::runtime(b"member does not exist"))
+    zset.score(&key)
+        .ok_or_else(|| geo_member_missing_error(member))
 }
 
 // ── ZADD helper ───────────────────────────────────────────────────────────────
@@ -509,11 +538,10 @@ pub fn georadius_generic(
             let zobj = ctx.db().lookup_key_read(&src_key);
             match zobj {
                 Some(z) => zset_score_from_obj(z, &member)?,
-                None => return Err(RedisError::runtime(b"member does not exist")),
+                None => return Err(geo_member_missing_error(&member)),
             }
         };
-        let xy = decode_geohash(score)
-            .ok_or_else(|| RedisError::runtime(b"failed to decode member geohash"))?;
+        let xy = decode_geohash(score).ok_or_else(|| geo_member_decode_error(&member))?;
         shape.xy = xy;
         let (conversion, radius) = extract_distance_or_reply(ctx, base_args - 2)?;
         shape.conversion = conversion;
@@ -526,7 +554,7 @@ pub fn georadius_generic(
             base_args = 2;
         }
     } else {
-        return Err(RedisError::runtime(b"Unknown georadius search type"));
+        return Err(geo_err(b"Unknown georadius search type"));
     }
 
     let mut withdist = false;
@@ -563,7 +591,7 @@ pub fn georadius_generic(
             let cnt_raw = ctx.arg(base_args + i + 1)?.as_bytes().to_vec();
             count = parse_geo_i64(&cnt_raw)?;
             if count <= 0 {
-                return Err(RedisError::runtime(b"COUNT must be > 0"));
+                return Err(geo_err(b"COUNT must be > 0"));
             }
             i += 1;
         } else if arg.eq_ignore_ascii_case(b"store")
@@ -599,11 +627,10 @@ pub fn georadius_generic(
                     let zobj = ctx.db().lookup_key_read(&src_key);
                     match zobj {
                         Some(z) => zset_score_from_obj(z, &member)?,
-                        None => return Err(RedisError::runtime(b"member does not exist")),
+                        None => return Err(geo_member_missing_error(&member)),
                     }
                 };
-                let xy = decode_geohash(score)
-                    .ok_or_else(|| RedisError::runtime(b"failed to decode member geohash"))?;
+                let xy = decode_geohash(score).ok_or_else(|| geo_member_decode_error(&member))?;
                 shape.xy = xy;
             }
             frommember = true;
@@ -648,11 +675,11 @@ pub fn georadius_generic(
             && !fromloc
         {
             let nv_raw = ctx.arg(base_args + i + 1)?.as_bytes().to_vec();
-            let num_vertices = parse_geo_i32(&nv_raw)
-                .map_err(|_| RedisError::runtime(b"invalid number of vertices"))?;
+            let num_vertices =
+                parse_geo_i32(&nv_raw).map_err(|_| geo_err(b"invalid number of vertices"))?;
             let possible = remaining.saturating_sub(i + 2) / 2;
             if num_vertices < 3 || (possible as i32) < num_vertices {
-                return Err(RedisError::runtime(
+                return Err(geo_err(
                     b"GEOSEARCH BYPOLYGON must have at least 3 vertices",
                 ));
             }
@@ -680,23 +707,33 @@ pub fn georadius_generic(
         } else {
             b"STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options"
         };
-        return Err(RedisError::runtime(msg));
+        return Err(geo_err(msg));
     }
 
     if flags & GEOSEARCH_FLAG != 0 && !frommember && !fromloc && !bypolygon {
-        return Err(RedisError::runtime(
-            b"exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH",
-        ));
+        let cmd = ctx.command_name();
+        let mut msg = Vec::with_capacity(
+            b"exactly one of FROMMEMBER or FROMLONLAT can be specified for ".len() + cmd.len(),
+        );
+        msg.extend_from_slice(b"exactly one of FROMMEMBER or FROMLONLAT can be specified for ");
+        msg.extend_from_slice(cmd);
+        return Err(geo_err(msg));
     }
 
     if flags & GEOSEARCH_FLAG != 0 && !byradius && !bybox && !bypolygon {
-        return Err(RedisError::runtime(
-            b"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for GEOSEARCH",
-        ));
+        let cmd = ctx.command_name();
+        let mut msg = Vec::with_capacity(
+            b"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for ".len() + cmd.len(),
+        );
+        msg.extend_from_slice(
+            b"exactly one of BYRADIUS, BYBOX and BYPOLYGON can be specified for ",
+        );
+        msg.extend_from_slice(cmd);
+        return Err(geo_err(msg));
     }
 
     if any && count == 0 {
-        return Err(RedisError::runtime(b"the ANY argument requires COUNT argument"));
+        return Err(geo_err(b"the ANY argument requires COUNT argument"));
     }
 
     if !zobj_present {

@@ -45,6 +45,14 @@ tcl-bitfield-overflow-stability
 tcl-post-bitfield-survey
 ```
 
+## GEO Packet Note
+
+`tcl-geo-edge-semantics` targets only GEO option/error edge semantics in
+`crates/redis-commands/src/geo.rs`. It does not broaden GEO performance work or
+zset behavior. The follow-up `tcl-post-geo-survey` runner remains required to
+refresh the official `unit/geo` count because local implementation verification
+was limited by loopback bind denial in the Codex sandbox.
+
 ## Why These Four
 
 `unit/geo` is first because it reaches `Test Summary`, so the pass/fail count is

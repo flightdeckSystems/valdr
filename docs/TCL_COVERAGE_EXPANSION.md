@@ -78,6 +78,22 @@ Summary:
 | `unit/dump` | no summary | `DUMP`: unknown command | Medium/large, product valuable |
 | `unit/slowlog` | no summary | `FUNCTION LOAD` missing in scripting slowlog block | Split from core slowlog edges |
 
+## GEO Edge Packet
+
+`tcl-geo-edge-semantics` is scoped to `crates/redis-commands/src/geo.rs` and
+the `unit/geo` counted failures from
+`harness/evidence/runs/20260523T022906Z-edb96a4-runner-tcl-survey-unswept.json`.
+The implementation mirrors `reference/valkey/src/geo.c:533-864` error payload
+semantics for the reported edge cases: missing members, missing
+`FROMMEMBER`/`FROMLONLAT`, missing `BYRADIUS`/`BYBOX`/`BYPOLYGON`, `ANY`
+without `COUNT`, non-positive `COUNT`, store-option incompatibility, and
+`BYPOLYGON` vertex-count validation.
+
+This is still telemetry, not a public conformance claim. The local sandbox used
+for the implementation could not bind the upstream TCL helper ports, so
+`tcl-post-geo-survey` remains the typed evidence gate that must refresh the
+post-fix `unit/geo` count on a runner host with loopback bind permission.
+
 ## What This Says About "Spark Skeleton" Work
 
 Do not use cheap agents to mass-author trusted command behavior. The useful
