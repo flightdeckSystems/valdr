@@ -353,6 +353,50 @@ packet = "runtime-owner-15-regression-incr-p100"
 runner = "regress-core-p100-incr"
 
 [[criterion]]
+id = "tcl-coverage-long-run-packets"
+kind = "packets_completed"
+required = false
+packets = [
+  "tcl-survey-unswept",
+  "tcl-geo-edge-semantics",
+  "tcl-post-geo-survey",
+  "tcl-bitops-bitcount-bitpos-edges",
+  "tcl-post-bitops-survey",
+  "tcl-scan-zscan-noscores",
+  "tcl-post-scan-survey",
+  "tcl-bitfield-overflow-stability",
+  "tcl-post-bitfield-survey",
+]
+
+[[criterion]]
+id = "tcl-post-geo-survey"
+kind = "runner_latest_pass"
+required = false
+packet = "tcl-post-geo-survey"
+runner = "tcl-survey-unswept"
+
+[[criterion]]
+id = "tcl-post-bitops-survey"
+kind = "runner_latest_pass"
+required = false
+packet = "tcl-post-bitops-survey"
+runner = "tcl-survey-unswept"
+
+[[criterion]]
+id = "tcl-post-scan-survey"
+kind = "runner_latest_pass"
+required = false
+packet = "tcl-post-scan-survey"
+runner = "tcl-survey-unswept"
+
+[[criterion]]
+id = "tcl-post-bitfield-survey"
+kind = "runner_latest_pass"
+required = false
+packet = "tcl-post-bitfield-survey"
+runner = "tcl-survey-unswept"
+
+[[criterion]]
 id = "no-ready-auto-packets"
 kind = "no_ready_packets"
 required = false
