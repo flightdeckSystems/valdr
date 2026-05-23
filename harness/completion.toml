@@ -428,7 +428,7 @@ runner = "tcl-survey-unswept"
 [[criterion]]
 id = "tcl-conformance-frontier-v2-packets"
 kind = "packets_completed"
-required = true
+required = false
 packets = [
   "tcl-core-frontier-baseline-v2",
   "tcl-sort-connection-metadata-v2",
@@ -445,6 +445,28 @@ packets = [
 [[criterion]]
 id = "tcl-conformance-frontier-v2-final-survey"
 kind = "runner_latest_pass"
-required = true
+required = false
 packet = "tcl-core-expanded-survey-v1"
+runner = "tcl-survey-core"
+
+[[criterion]]
+id = "tcl-conformance-frontier-v3-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "tcl-frontier-v3-baseline",
+  "tcl-sort-final-five-v3",
+  "tcl-post-sort-final-survey-v3",
+  "tcl-scripting-conversion-select-v3",
+  "tcl-post-scripting-conversion-survey-v3",
+  "tcl-scripting-wait-waitaof-v3",
+  "tcl-post-scripting-wait-survey-v3",
+  "tcl-core-expanded-survey-v2",
+]
+
+[[criterion]]
+id = "tcl-conformance-frontier-v3-final-survey"
+kind = "runner_latest_pass"
+required = true
+packet = "tcl-core-expanded-survey-v2"
 runner = "tcl-survey-core"
