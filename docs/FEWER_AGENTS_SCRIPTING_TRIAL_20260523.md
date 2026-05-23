@@ -1,7 +1,8 @@
 # Fewer-Agents Scripting Trial - 2026-05-23
 
 Status: trial plan for adapting the nginx fewer-agents throughput experiment to
-the Redis/Valkey TCL conformance frontier.
+the Redis/Valkey TCL conformance frontier. Bronze has now been executed once
+through a Spark Builder plus main-supervisor review.
 
 ## Why This Trial Exists
 
@@ -239,3 +240,49 @@ supervisor.
 4. Dispatch/read-only Auditor if the Builder claims green.
 5. Commit only after objective evidence lands.
 ```
+
+## Bronze Execution Result
+
+Run date: 2026-05-23.
+
+What happened:
+
+- Spark scout agents were useful for selecting the lane. The strongest scout
+  result matched the existing v3 packet graph: scripting reply conversion and
+  selected-DB restoration first, WAIT/WAITAOF second.
+- One Spark Builder edited the Bronze packet surface directly:
+  `crates/redis-commands/src/eval.rs`,
+  `crates/redis-commands/src/connection.rs`, and
+  `crates/redis-core/src/command_context.rs`.
+- Main-supervisor review compared the reply conversion against
+  `reference/valkey/src/modules/lua/script_lua.c` and corrected the RESP3
+  double/null Lua shapes before accepting the patch.
+
+Evidence:
+
+```bash
+cargo check -p redis-commands
+cargo test -p redis-commands eval_select_does_not_leak_db -- --nocapture
+cargo test -p redis-commands resp3_double_and_null_reply_shapes_match_lua_bridge -- --nocapture
+python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 150 --files unit/scripting
+```
+
+Focused TCL result:
+
+```text
+unit/scripting now reaches the planned Silver frontier:
+  failure: EVAL - Scripts do not block on wait
+  abort:   EVAL - Scripts do not block on waitaof / unknown command 'waitaof'
+```
+
+Design learning:
+
+- Fewer agents can work when the packet already has a precise source-shaped
+  lane. The Builder moved real code and did not need translator/compiler-fixer
+  handoff.
+- The Builder also broadened scope into RESP3 reply conversion. That was
+  directionally right but contained one upstream mismatch. The method therefore
+  still needs a main-supervisor or Auditor source-read pass before commit.
+- The next best trial is Silver as another single Builder packet, with explicit
+  instruction to keep `WAIT`/`WAITAOF` inside normal dispatch and to avoid a
+  broad replication implementation.

@@ -612,6 +612,21 @@ impl<'a> CommandContext<'a> {
         self.db.as_ref().id
     }
 
+    /// Update the visible selected DB index for this context.
+    ///
+    /// This keeps both `client.db_index` and the internal OwnerList routing
+    /// cursor in sync when the selected DB is changed while reusing a shared
+    /// DB slice.
+    pub fn set_selected_db_index(&mut self, index: u32) {
+        if let DbStorage::OwnerList {
+            selected_index, ..
+        } = &mut self.db
+        {
+            *selected_index = index;
+        }
+        self.client.db_index = index;
+    }
+
     /// Return a handle to a non-selected DB from the live DB list.
     ///
     /// `Ok(None)` means the requested index is the currently borrowed DB and

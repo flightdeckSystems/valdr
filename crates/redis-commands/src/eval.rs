@@ -40,12 +40,19 @@ use crate::dispatch::dispatch_command_name;
 /// Used as an intermediate before the value is converted to a Lua value.
 #[derive(Debug, Clone)]
 enum ReplyValue {
+    Null,
     Nil,
     SimpleString(Vec<u8>),
     Error(Vec<u8>),
     Integer(i64),
     Bulk(Vec<u8>),
+    Bool(bool),
+    Double(f64),
+    BigNumber(Vec<u8>),
+    VerbatimString { format: Vec<u8>, data: Vec<u8> },
     Array(Vec<ReplyValue>),
+    Map(Vec<ReplyValue>),
+    Set(Vec<ReplyValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -142,8 +149,19 @@ impl ParserCallbacks for ReplyBuilder {
             }
         }
     }
-    fn on_set(&mut self, cursor: &mut ParserCursor<'_>, len: i64, proto: &[u8]) {
-        self.on_array(cursor, len, proto);
+    fn on_set(&mut self, cursor: &mut ParserCursor<'_>, len: i64, _proto: &[u8]) {
+        let mut items: Vec<ReplyValue> = Vec::with_capacity(len.max(0) as usize);
+        for _ in 0..len {
+            let mut tmp = ReplyBuilder::new();
+            if cursor.parse_next(&mut tmp).is_err() {
+                self.errored = true;
+                return;
+            }
+            if let Some(v) = tmp.out {
+                items.push(v);
+            }
+        }
+        self.deliver(ReplyValue::Set(items));
     }
     fn on_map(&mut self, cursor: &mut ParserCursor<'_>, len: i64, _proto: &[u8]) {
         let pair_count = len.max(0) * 2;
@@ -158,19 +176,22 @@ impl ParserCallbacks for ReplyBuilder {
                 items.push(v);
             }
         }
-        self.deliver(ReplyValue::Array(items));
+        self.deliver(ReplyValue::Map(items));
     }
     fn on_bool(&mut self, val: bool, _proto: &[u8]) {
-        self.deliver(ReplyValue::Integer(if val { 1 } else { 0 }));
+        self.deliver(ReplyValue::Bool(val));
     }
     fn on_double(&mut self, val: f64, _proto: &[u8]) {
-        self.deliver(ReplyValue::Bulk(format!("{}", val).into_bytes()));
+        self.deliver(ReplyValue::Double(val));
     }
     fn on_big_number(&mut self, data: &[u8], _proto: &[u8]) {
-        self.deliver(ReplyValue::Bulk(data.to_vec()));
+        self.deliver(ReplyValue::BigNumber(data.to_vec()));
     }
-    fn on_verbatim_string(&mut self, _format: &[u8], data: &[u8], _proto: &[u8]) {
-        self.deliver(ReplyValue::Bulk(data.to_vec()));
+    fn on_verbatim_string(&mut self, format: &[u8], data: &[u8], _proto: &[u8]) {
+        self.deliver(ReplyValue::VerbatimString {
+            format: format.to_vec(),
+            data: data.to_vec(),
+        });
     }
     fn on_attribute(&mut self, cursor: &mut ParserCursor<'_>, len: i64, _proto: &[u8]) {
         let pair_count = len.max(0) * 2;
@@ -183,7 +204,7 @@ impl ParserCallbacks for ReplyBuilder {
         }
     }
     fn on_null(&mut self, _proto: &[u8]) {
-        self.deliver(ReplyValue::Nil);
+        self.deliver(ReplyValue::Null);
     }
     fn on_parse_error(&mut self) {
         self.errored = true;
@@ -196,6 +217,7 @@ impl ParserCallbacks for ReplyBuilder {
 /// become 1-indexed Lua tables.
 fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
     match value {
+        ReplyValue::Null => Ok(LuaValue::Nil),
         ReplyValue::Nil => Ok(LuaValue::Boolean(false)),
         ReplyValue::SimpleString(s) => {
             let t = lua.create_table()?;
@@ -208,6 +230,25 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
             Ok(LuaValue::Table(t))
         }
         ReplyValue::Integer(n) => Ok(LuaValue::Integer(*n)),
+        ReplyValue::Bool(v) => Ok(LuaValue::Boolean(*v)),
+        ReplyValue::Double(n) => {
+            let t = lua.create_table()?;
+            t.raw_set("double", *n)?;
+            Ok(LuaValue::Table(t))
+        }
+        ReplyValue::BigNumber(n) => {
+            let t = lua.create_table()?;
+            t.raw_set("big_number", lua.create_string(n)?)?;
+            Ok(LuaValue::Table(t))
+        }
+        ReplyValue::VerbatimString { format, data } => {
+            let t = lua.create_table()?;
+            let verbatim_table = lua.create_table()?;
+            verbatim_table.raw_set("string", lua.create_string(data)?)?;
+            verbatim_table.raw_set("format", lua.create_string(format)?)?;
+            t.raw_set("verbatim_string", verbatim_table)?;
+            Ok(LuaValue::Table(t))
+        }
         ReplyValue::Bulk(b) => Ok(LuaValue::String(lua.create_string(b)?)),
         ReplyValue::Array(items) => {
             let t = lua.create_table()?;
@@ -216,6 +257,30 @@ fn reply_to_lua(lua: &Lua, value: &ReplyValue) -> mlua::Result<LuaValue> {
                 t.raw_set(i as i64 + 1, v)?;
             }
             Ok(LuaValue::Table(t))
+        }
+        ReplyValue::Map(items) => {
+            let out = lua.create_table()?;
+            let map = lua.create_table()?;
+            for pair in items.chunks(2) {
+                if pair.len() != 2 {
+                    continue;
+                }
+                let key = reply_to_lua(lua, &pair[0])?;
+                let value = reply_to_lua(lua, &pair[1])?;
+                map.raw_set(key, value)?;
+            }
+            out.raw_set("map", map)?;
+            Ok(LuaValue::Table(out))
+        }
+        ReplyValue::Set(items) => {
+            let out = lua.create_table()?;
+            let set = lua.create_table()?;
+            for item in items {
+                let value = reply_to_lua(lua, item)?;
+                set.raw_set(value, true)?;
+            }
+            out.raw_set("set", set)?;
+            Ok(LuaValue::Table(out))
         }
     }
 }
@@ -892,6 +957,7 @@ fn run_loaded_function(
     keys: &[RedisString],
     argv: &[RedisString],
 ) -> RedisResult<()> {
+    let original_db = ctx.selected_db_index();
     let (_, library_body) = parse_function_library_header(&library.code)?;
     let lua = Lua::new();
     install_sandbox(&lua)
@@ -1033,6 +1099,8 @@ fn run_loaded_function(
         callback.call::<LuaValue>((keys_table, argv_table))
     });
 
+    ctx.set_selected_db_index(original_db);
+
     match script_result {
         Ok(value) => {
             let mut out: Vec<u8> = Vec::new();
@@ -1158,6 +1226,7 @@ fn run_script(
     keys: &[RedisString],
     argv: &[RedisString],
 ) -> RedisResult<()> {
+    let original_db = ctx.selected_db_index();
     let lua = Lua::new();
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
@@ -1260,6 +1329,8 @@ fn run_script(
             .set_name("user_script")
             .eval::<LuaValue>()
     });
+
+    ctx.set_selected_db_index(original_db);
 
     match script_result {
         Ok(value) => {
@@ -1525,6 +1596,10 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use redis_core::{pubsub_registry::PubSubRegistry, RedisDb, RedisServer};
+
     use super::*;
 
     #[test]
@@ -1546,6 +1621,49 @@ mod tests {
     fn normalise_sha_rejects_non_hex() {
         assert!(normalise_sha(b"short").is_none());
         assert!(normalise_sha(b"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
+    }
+
+    #[test]
+    fn eval_select_does_not_leak_db() {
+        let server = Arc::new(RedisServer::default());
+        let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
+        let mut client = redis_core::Client::new(7);
+        client.db_index = 10;
+        client.set_args(vec![
+            RedisString::from_bytes(b"EVAL"),
+            RedisString::from_bytes(b"return redis.call('select', '9')"),
+            RedisString::from_bytes(b"0"),
+        ]);
+        let mut dbs: Vec<RedisDb> = (0..16).map(RedisDb::new).collect();
+        let mut ctx = redis_core::CommandContext::with_server_and_db_list(
+            &mut client,
+            &mut dbs,
+            server,
+            pubsub,
+        );
+        eval_command(&mut ctx).unwrap();
+        assert_eq!(client.db_index, 10);
+        assert_eq!(client.drain_reply(), b"+OK\r\n");
+    }
+
+    #[test]
+    fn resp3_double_and_null_reply_shapes_match_lua_bridge() {
+        let lua = Lua::new();
+
+        let double = reply_to_lua(&lua, &ReplyValue::Double(1.25)).unwrap();
+        match double {
+            LuaValue::Table(t) => assert_eq!(t.raw_get::<f64>("double").unwrap(), 1.25),
+            other => panic!("expected table for RESP3 double, got {other:?}"),
+        }
+
+        assert!(matches!(
+            reply_to_lua(&lua, &ReplyValue::Null).unwrap(),
+            LuaValue::Nil
+        ));
+        assert!(matches!(
+            reply_to_lua(&lua, &ReplyValue::Nil).unwrap(),
+            LuaValue::Boolean(false)
+        ));
     }
 }
 

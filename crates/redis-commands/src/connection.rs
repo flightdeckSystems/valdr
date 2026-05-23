@@ -79,7 +79,7 @@ pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let idx = parse_i64_strict(raw.as_bytes())
         .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
     let idx = ctx.validate_db_index(idx)?;
-    ctx.client_mut().db_index = idx;
+    ctx.set_selected_db_index(idx);
     ctx.reply_simple_string(b"OK")
 }
 
