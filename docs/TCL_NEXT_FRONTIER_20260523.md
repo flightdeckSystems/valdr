@@ -2,6 +2,10 @@
 
 Status: packet plan for the next conformance push after commit `80f7dd5`.
 
+Scope note: this file is about a focused frontier runner. It is not the full
+upstream-suite count. Full-suite accounting is tracked in
+[`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md).
+
 ## Evidence Baseline
 
 Latest focused survey evidence:

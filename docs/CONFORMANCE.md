@@ -14,8 +14,27 @@ For each oracle, the numbers below are the **post-cleanup-wave-8** state
 |---|---|
 | **Wire-diff smoke** (23 RESP corpus scripts vs upstream Valkey, byte-exact) | **23 / 23 PASS** ✅ |
 | **RDB bidirectional oracle** (we save → C loads; C saves → we load) | **378 / 378 PASS** ✅ |
-| **Upstream Valkey TCL suite** (~13 unit files surveyed) | **~98%** pass rate, see below |
+| **Upstream Valkey TCL suite** | Scoped evidence only: historical core survey plus focused frontier telemetry; full denominator is 4,299 test blocks |
 | **`unsafe` budget** | **5 documented blocks**, all wrapping `fork(2)` / `waitpid(2)` semantics |
+
+## TCL Suite Accounting
+
+Do not read any single TCL number as "the whole upstream suite" unless it uses
+the full denominator.
+
+On this checkout, the full upstream suite is 245 `.tcl` files and 4,299
+`test` blocks under `reference/valkey/tests/`. The long-term conformance goal
+is to report against that denominator. The current numbers are scoped:
+
+| View | Status |
+|---|---|
+| Historical core unit survey | ~877 pass / ~73 fail, cleanup-wave baseline |
+| Latest focused frontier telemetry | 266 counted pass / 0 counted fail, 1 file without summary |
+| `tcl-survey-core` file inventory | 15 selected single-node files, 1,160 source test blocks |
+| Full upstream inventory | 245 files, 4,299 test blocks |
+
+See [`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md) for
+the reporting rules and expansion plan.
 
 ## Wire-diff smoke
 
@@ -120,24 +139,25 @@ The manual `tcl-survey-unswept` runner now sweeps the next frontier:
 `unit/scripting`, `unit/scan`, `unit/sort`, `unit/dump`, `unit/info`,
 `unit/slowlog`.
 
-Latest focused run: **173 counted passes / 0 counted failures**, 0 timed out,
-4 files without summary. Counted-green files are `unit/bitops`,
-`unit/bitfield`, `unit/geo`, `unit/scan`, and `unit/dump`. Remaining
-no-summary frontiers are `PFDEBUG`, `FUNCTION LOAD`, and `SORT`.
+Latest focused run: **266 counted passes / 0 counted failures**, 0 timed out,
+1 file without summary. Counted-green files include `unit/bitops`,
+`unit/bitfield`, `unit/geo`, `unit/hyperloglog`, `unit/scan`, `unit/sort`,
+`unit/dump`, and `unit/slowlog`. The remaining no-summary frontier in that run
+is `unit/scripting`.
 
 See `docs/TCL_COVERAGE_EXPANSION.md`. That runner records abort/no-summary
 cases separately from counted pass/fail cases so packet generation does not
 hide behind a single aggregate number.
 
-Not in scope for the surveyed run:
+Outside the current scoped claim, but still part of the full-suite goal:
 
-- `unit/cluster` — deliberate gap (single-node only)
-- `unit/moduleapi` — we don't expose the C ABI for loadable modules
+- `unit/cluster` — needs cluster/product decision and runner support
+- `unit/moduleapi` — needs module-ABI product decision
 - `unit/replication` requires multi-node infrastructure (Session 3
   established our backbone but full replication conformance isn't yet
   swept)
-- `unit/tls`, `unit/io-threads`, `unit/mptcp`, etc. — perf /
-  infrastructure edges deferred for post-1.0
+- `unit/tls`, `unit/io-threads`, `unit/mptcp`, etc. — infrastructure edges
+  deferred from the current product claim
 
 ## Command coverage
 

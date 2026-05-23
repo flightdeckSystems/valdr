@@ -5,6 +5,14 @@ README. The badges ("TCL: 877 pass", "97.9%") are real, but they describe
 quality *within the scope we've built*. They do not describe how much of
 Valkey we've built. That's what this page is for.
 
+There are two separate goals:
+
+- **Current claim:** accurately describe the scoped single-node behavior that
+  is already backed by oracles.
+- **Conformance target:** grow the denominator to the full upstream Valkey TCL
+  suite, currently 4,299 `test` blocks across 245 `.tcl` files. See
+  [`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md).
+
 If you're evaluating whether valkey-rs can replace `redis-server` /
 `valkey-server` in your stack, **read this before the README**.
 
@@ -33,7 +41,8 @@ and you should look at all three.
 
 | Oracle | Result |
 |---|---|
-| Upstream Tcl, 13 surveyed unit files | **877 / 896 individual tests pass (97.9%)** |
+| Upstream Tcl, historical scoped core survey | **~877 pass / ~73 fail** across the cleanup-wave core unit slice |
+| Upstream Tcl, latest focused frontier telemetry | **266 counted pass / 0 counted fail**, 1 file without summary |
 | Wire-diff RESP corpus | **23 / 23 byte-exact** |
 | RDB bidirectional (we save → C loads; C saves → we load) | **378 / 378** |
 
@@ -43,21 +52,24 @@ test harness. Source: [`docs/CONFORMANCE.md`](CONFORMANCE.md).
 
 ### View 2 — Coverage of upstream's tests
 
-Upstream Valkey has roughly **4,300 individual `test "..." { }` blocks**
-across 245 `.tcl` files. We currently sweep **~13 unit files** containing
-~940 individual tests. That's:
+Upstream Valkey has **4,299 individual `test "..." { }` blocks** across
+245 `.tcl` files in this checkout. The old headline number was from a scoped
+single-node survey, not the full suite. The focused frontier runner we just
+use for packet work is smaller still.
 
 | Slice | Tests | Share of upstream |
 |---|---:|---:|
-| Swept | ~940 | ~22% |
-| Pass within swept | 877 | ~20% |
+| Full upstream inventory | 4,299 | 100% |
+| Historical scoped core survey | ~950 counted | ~22% |
+| Pass within historical scoped survey | ~877 | ~20% |
+| Latest focused frontier telemetry | 266 counted passes | ~6% |
+| `tcl-survey-core` source inventory | 1,160 source test blocks | ~27% |
 
-The remaining ~78% of upstream's tested behavior is either deferred
-(performance / infrastructure files like `hyperloglog`, `scripting`, `sort`,
-`info`) or out of scope by design (clustering, modules, replication, TLS, IO
-threads, MPTCP, Sentinel). The latest frontier wave brought `bitops`,
-`bitfield`, `geo`, `scan`, and `dump` to counted-green under the current
-deny-tag policy.
+The remaining upstream surface is not supposed to disappear from the
+accounting. Some areas need implementation work; some need multi-node or
+specialized runners; some may become explicit product-decision exclusions. The
+goal is to make those rows visible against the full-suite denominator instead
+of only reporting the green scoped subset.
 
 ### View 3 — Code surface
 
@@ -123,24 +135,24 @@ surprising amount of real-world usage, but it is not the same thing as
 The priority order is set by the harness's pilot strategy, not by any
 single user's adoption blockers:
 
-1. **Performance to parity** (in progress — see the dashboard at
-   `harness/bench/history/` and `docs/BENCHMARKS.md`). Throughput ratios
-   are climbing past 1.0x on the surveyed workloads.
-2. **Replication conformance** — backbone exists; needs a multi-node
+1. **Full upstream TCL-suite accounting** — move from focused packet runners
+   to a dashboard whose denominator is all 4,299 upstream test blocks.
+2. **Performance to parity** (in progress — see the dashboard at
+   `harness/bench/history/` and `docs/BENCHMARKS.md`). Throughput ratios are
+   climbing past 1.0x on the surveyed workloads.
+3. **Replication conformance** — backbone exists; needs a multi-node
    integration sweep before it's claimable.
-3. **AOF parity** to match the RDB story.
-4. **Wider Tcl sweep** — next frontiers are `hyperloglog` (`PFDEBUG`),
-   `scripting`/`slowlog` (`FUNCTION LOAD`), `sort`, and the meaningful `info`
-   cases.
-5. **TLS, I/O threads, ACL deeper** — post-1.0.
-6. **Clustering, modules, Sentinel** — explicitly out of scope. If they
-   ever happen it will be a separate project decision, not a default
-   roadmap item.
+4. **AOF parity** to match the RDB story.
+5. **Wider Tcl sweep** — next frontiers are `hyperloglog`, `scripting`,
+   `slowlog`, `sort`, and meaningful `info` cases, then the rest of unit and
+   integration coverage.
+6. **TLS, I/O threads, ACL deeper, clustering, modules, Sentinel** — not in
+   the current scoped product claim, but they belong in full-suite accounting
+   as red, skipped-by-policy, or product-decision rows until resolved.
 
-The endgame for the wider harness is **nginx in safe Rust**, not feature
-parity with every Valkey extension. Valkey is a *pilot* for the harness;
-finishing every long-tail Valkey subsystem is not the same goal as
-finishing the harness.
+The wider harness may use Valkey as a pilot for other ports, but that does not
+make Valkey's upstream-suite accounting optional. The conformance target for
+this port is the full upstream TCL suite.
 
 ## How to verify all of this yourself
 
