@@ -405,7 +405,7 @@ selector = "auto"
 [[criterion]]
 id = "tcl-overnight-frontier-20260523-packets"
 kind = "packets_completed"
-required = true
+required = false
 packets = [
   "tcl-frontier-baseline-after-dump",
   "tcl-hll-pfdebug-dispatch",
@@ -421,6 +421,30 @@ packets = [
 [[criterion]]
 id = "tcl-overnight-frontier-final-survey"
 kind = "runner_latest_pass"
-required = true
+required = false
 packet = "tcl-post-functions-survey"
 runner = "tcl-survey-unswept"
+
+[[criterion]]
+id = "tcl-conformance-frontier-v2-packets"
+kind = "packets_completed"
+required = true
+packets = [
+  "tcl-core-frontier-baseline-v2",
+  "tcl-sort-connection-metadata-v2",
+  "tcl-post-sort-metadata-survey-v2",
+  "tcl-hll-config-selftest-v2",
+  "tcl-post-hll-config-survey-v2",
+  "tcl-slowlog-core-edges-v2",
+  "tcl-post-slowlog-core-survey-v2",
+  "tcl-functions-load-fcall-minimal-v2",
+  "tcl-post-functions-minimal-survey-v2",
+  "tcl-core-expanded-survey-v1",
+]
+
+[[criterion]]
+id = "tcl-conformance-frontier-v2-final-survey"
+kind = "runner_latest_pass"
+required = true
+packet = "tcl-core-expanded-survey-v1"
+runner = "tcl-survey-core"
