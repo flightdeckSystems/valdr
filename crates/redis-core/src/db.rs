@@ -1382,6 +1382,14 @@ pub fn scan_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             }
             type_filter = Some(ctx.arg(j + 1)?.as_bytes().to_vec());
             j += 2;
+        } else if eq_ignore_ascii_case(bytes, b"NOSCORES") {
+            return Err(RedisError::runtime(
+                b"ERR NOSCORES option can only be used in ZSCAN",
+            ));
+        } else if eq_ignore_ascii_case(bytes, b"NOVALUES") {
+            return Err(RedisError::runtime(
+                b"ERR NOVALUES option can only be used in HSCAN",
+            ));
         } else {
             return Err(RedisError::runtime(b"ERR syntax error"));
         }

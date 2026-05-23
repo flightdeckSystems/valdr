@@ -65,6 +65,16 @@ It deliberately does not touch BITFIELD. The follow-up
 `tcl-post-bitops-survey` runner remains the telemetry gate for the refreshed
 `unit/bitops` frontier.
 
+## SCAN Packet Note
+
+`tcl-scan-zscan-noscores` targets only ZSCAN `NOSCORES` parsing and reply
+shape, plus the plain-SCAN option-specific rejection inherited from
+`parseScanOptionsOrReply`. It does not change scan cursor architecture,
+cluster-slot scanning, HSCAN/SSCAN implementations, or sorted-set storage.
+
+The follow-up `tcl-post-scan-survey` runner remains the telemetry gate for the
+refreshed `unit/scan` frontier.
+
 ## Why These Four
 
 `unit/geo` is first because it reaches `Test Summary`, so the pass/fail count is

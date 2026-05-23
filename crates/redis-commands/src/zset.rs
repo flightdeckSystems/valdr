@@ -28,7 +28,7 @@
 //! TODO(architect): ZRANGEBYLEX / ZREVRANGEBYLEX / ZLEXCOUNT /
 //! ZREMRANGEBYLEX / ZRANGESTORE / ZUNIONSTORE / ZINTERSTORE /
 //! ZDIFFSTORE / ZUNION / ZINTER / ZDIFF / ZINTERCARD / ZRANDMEMBER /
-//! ZMPOP / ZSCAN / BZPOPMIN / BZPOPMAX land in follow-on rounds.
+//! ZMPOP / BZPOPMIN / BZPOPMAX land in follow-on rounds.
 
 use std::collections::HashMap;
 
@@ -1932,12 +1932,12 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_null_array()
 }
 
-/// ZSCAN key cursor [MATCH pattern] [COUNT count]
+/// ZSCAN key cursor [MATCH pattern] [COUNT count] [NOSCORES]
 ///
 /// Linear-cursor iteration over the `(member, score)` pairs of a sorted
 /// set in ascending score order. Reply shape mirrors HSCAN — a two-element
 /// array of `[next_cursor, items]` where `items` is interleaved
-/// `member, score` bulks.
+/// `member, score` bulks unless `NOSCORES` requests member-only output.
 ///
 /// TODO(architect): MATCH currently filters on member bytes only. Real
 /// Redis also surfaces the score in `OBJ_ENCODING_LISTPACK` zsets but the
@@ -1952,6 +1952,7 @@ pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: i64 = 10;
+    let mut no_scores = false;
     let mut j = 3usize;
     while j < argc {
         let opt = ctx.arg(j)?;
@@ -1972,6 +1973,13 @@ pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
             }
             count = n;
             j += 2;
+        } else if bytes.eq_ignore_ascii_case(b"NOSCORES") {
+            no_scores = true;
+            j += 1;
+        } else if bytes.eq_ignore_ascii_case(b"NOVALUES") {
+            return Err(RedisError::runtime(
+                b"ERR NOVALUES option can only be used in HSCAN",
+            ));
         } else {
             return Err(RedisError::syntax(b"syntax error"));
         }
@@ -1998,10 +2006,13 @@ pub fn zscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.reply_array_header(2usize)?;
     ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
-    ctx.reply_array_header(matched.len() * 2)?;
+    let header = if no_scores { matched.len() } else { matched.len() * 2 };
+    ctx.reply_array_header(header)?;
     for (s, m) in matched {
         ctx.reply_bulk_string(m)?;
-        ctx.reply_bulk(&format_score(s))?;
+        if !no_scores {
+            ctx.reply_bulk(&format_score(s))?;
+        }
     }
     Ok(())
 }
@@ -2484,12 +2495,47 @@ pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_core::Client;
+
+    fn arg(bytes: &[u8]) -> RedisString {
+        RedisString::from_bytes(bytes)
+    }
+
+    #[test]
+    fn zscan_noscores_omits_score_bulks() {
+        let key = arg(b"zs");
+        let mut obj = RedisObject::new_zset();
+        {
+            let z = obj.zset_mut().expect("new_zset constructs an Inline zset");
+            z.upsert(arg(b"one"), 1.0);
+            z.upsert(arg(b"two"), 2.0);
+        }
+
+        let mut db = RedisDb::new(0);
+        db.set_key(key.clone(), obj, 0);
+
+        let mut client = Client::new(1);
+        client.set_args(vec![arg(b"zscan"), key, arg(b"0"), arg(b"noscores")]);
+
+        let mut ctx = CommandContext::with_db(&mut client, &mut db);
+        zscan_command(&mut ctx).expect("ZSCAN NOSCORES should succeed");
+
+        assert_eq!(
+            ctx.client_ref().reply_buf.as_slice(),
+            b"*2\r\n$1\r\n0\r\n*2\r\n$3\r\none\r\n$3\r\ntwo\r\n"
+        );
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        src/t_zset.c
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         3
+//   todos:         5
 //   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         Round 5 byte-exact implementations for ZADD, ZSCORE,
@@ -2503,5 +2549,6 @@ pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
 //                  helper. ZRANGEBYLEX / ZREMRANGEBYLEX / ZLEXCOUNT and
 //                  ZUNIONSTORE / ZINTERSTORE / ZDIFFSTORE / ZUNION /
 //                  ZINTER / ZDIFF / ZINTERCARD / ZRANDMEMBER / ZMPOP /
-//                  ZSCAN / BZPOPMIN / BZPOPMAX land in follow-on rounds.
+//                  and ZSCAN backed by InlineZSet. BZPOPMIN / BZPOPMAX
+//                  land in follow-on rounds.
 // ──────────────────────────────────────────────────────────────────────────

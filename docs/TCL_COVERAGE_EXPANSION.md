@@ -108,6 +108,19 @@ This remains telemetry. The follow-up `tcl-post-bitops-survey` runner must
 refresh whether `unit/bitops` now reaches a counted summary or exposes the next
 frontier, likely in the deferred BITFIELD surface.
 
+## SCAN NOSCORES Packet
+
+`tcl-scan-zscan-noscores` is scoped to ZSCAN option parsing and plain-SCAN
+option rejection. The implementation mirrors
+`reference/valkey/src/db.c:1150-1405` and
+`reference/valkey/src/t_zset.c:3828-3836` for `NOSCORES`: ZSCAN accepts the
+option and emits members without score bulks, while plain SCAN rejects
+`NOSCORES` with the upstream option-specific error.
+
+This remains telemetry. The follow-up `tcl-post-scan-survey` runner must
+refresh whether `unit/scan` now reaches a counted summary or exposes the next
+frontier in scan cursor fidelity or score formatting.
+
 ## What This Says About "Spark Skeleton" Work
 
 Do not use cheap agents to mass-author trusted command behavior. The useful
