@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "kind": "packet_completed",
+  "packet": "tcl-hll-config-selftest-v2",
+  "role": "perf-fixer",
+  "prompt_hash": "0797e7d8eb9500e8",
+  "captured_ts": "2026-05-23T14:43:37Z",
+  "commit": "ae8f997",
+  "target_commit": "ae8f99744b28a24464bff065db25347f6d34920b",
+  "claim_level": "telemetry",
+  "capabilities": [
+    "official-tcl-coverage",
+    "hyperloglog",
+    "live-config"
+  ],
+  "subsystem_boundary": "HyperLogLog command dispatch and LiveConfig-backed HLL sparse promotion only; PFADD remains on the normal command path, PFCOUNT/PFMERGE representation was not rewritten, and reference sources/oracles were not changed.",
+  "targets": [
+    "crates/redis-core/src/live_config.rs",
+    "crates/redis-commands/src/connection.rs",
+    "crates/redis-commands/src/dispatch.rs",
+    "crates/redis-commands/src/hyperloglog.rs",
+    "docs/TCL_CONFORMANCE_PUSH_20260523.md",
+    "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+  ],
+  "source_ranges": [
+    {
+      "file": "reference/valkey/src/hyperloglog.c",
+      "ranges": [
+        "1875-1976"
+      ]
+    },
+    {
+      "file": "reference/valkey/src/config.c",
+      "ranges": [
+        "3470"
+      ]
+    },
+    {
+      "file": "reference/valkey/tests/unit/hyperloglog.tcl",
+      "ranges": [
+        "90-110",
+        "323-360"
+      ]
+    }
+  ],
+  "changes": [
+    "Added LiveConfig storage/readback for hll-sparse-max-bytes and wired CONFIG SET/GET to it.",
+    "Made PFADD read the sparse-to-dense promotion threshold from CommandContext live config.",
+    "Registered PFSELFTEST in the shared dispatcher, including handler-side arity, and implemented the upstream-shaped dense register and approximation self-test using the existing HLL representation.",
+    "Recorded focused HLL frontier telemetry in the TCL conformance docs."
+  ],
+  "gate_results": [
+    {
+      "name": "pre_patch_focused_tcl_hll_reproduction",
+      "command": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/hyperloglog",
+      "ok": true,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T142037Z/unit__hyperloglog.json",
+      "summary": "Reproduced unit/hyperloglog at 23 passed, 3 failed: PFSELFTEST unknown, and hll-sparse-max-bytes sparse-to-dense promotion stayed sparse."
+    },
+    {
+      "name": "cargo_check_redis_core",
+      "command": "cargo check -p redis-core",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "cargo_test_live_config_defaults",
+      "command": "cargo test -p redis-core defaults_match_documented_values -- --nocapture",
+      "ok": true,
+      "summary": "1 test passed."
+    },
+    {
+      "name": "cargo_check_redis_commands",
+      "command": "cargo check -p redis-commands",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "cargo_test_config_hll_sparse_max_bytes",
+      "command": "cargo test -p redis-commands config_hll_sparse_max_bytes_updates_live_value -- --nocapture",
+      "ok": true,
+      "summary": "1 test passed."
+    },
+    {
+      "name": "cargo_build_release_redis_server",
+      "command": "cargo build --release -p redis-server",
+      "ok": true,
+      "summary": "Passed with existing warnings; the TCL runner uses the debug redis-server binary."
+    },
+    {
+      "name": "cargo_build_debug_redis_server",
+      "command": "cargo build --bin redis-server",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "post_patch_focused_tcl_hll",
+      "command": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/hyperloglog",
+      "ok": true,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T143708Z/unit__hyperloglog.json",
+      "summary": "unit/hyperloglog reached Test Summary: 26 passed, 0 failed, 0 timed out, 0 without summary."
+    },
+    {
+      "name": "cargo_fmt_check",
+      "command": "cargo fmt --check",
+      "ok": false,
+      "summary": "Failed on pre-existing formatting drift outside packet targets, including crates/redis-commands/src/aof.rs, bloom.rs, eval.rs, and generated protocol/ds files. Left untouched per packet scope."
+    },
+    {
+      "name": "cargo_check_workspace",
+      "command": "cargo check --workspace",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "wire_smoke",
+      "command": "bash harness/oracle/smoke.sh --skip-build",
+      "ok": true,
+      "summary": "Smoke corpus: 23 scripts passed, 0 failed, 0 skipped."
+    },
+    {
+      "name": "normal_dispatch_preserved",
+      "ok": true,
+      "summary": "PFSELFTEST is registered in HANDLERS; PFADD remains on the normal dispatch/AOF/replication path; no benchmark or oracle bypass was added."
+    },
+    {
+      "name": "unsafe_budget",
+      "ok": true,
+      "summary": "No new unsafe was added."
+    },
+    {
+      "name": "port_status_trailers",
+      "ok": true,
+      "summary": "Materially edited Rust target files retain PORT STATUS trailers."
+    }
+  ],
+  "remaining_failures": [],
+  "anti_gaming_review": {
+    "normal_dispatch_path": true,
+    "reference_source_edited": false,
+    "oracle_weakened": false,
+    "benchmark_special_case": false
+  }
+}

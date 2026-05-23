@@ -19,9 +19,11 @@
 //! `dispatch_timed` function, which records duration post-handler and calls
 //! `record_slowlog_entry` defined here.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_core::commandlog::{CommandLog, CommandLogEntry, COMMANDLOG_ENTRY_MAX_ARGC, COMMANDLOG_ENTRY_MAX_STRING};
+use redis_core::monotonic::{elapsed_us, MonoTime};
 use redis_core::latency::{LatencyMonitor, LatencyReportConfig};
 use redis_core::CommandContext;
 use redis_types::{RedisResult, RedisString};
@@ -30,6 +32,14 @@ use redis_types::{RedisResult, RedisString};
 
 /// Singleton slowlog state shared across all connections.
 static SLOWLOG: OnceLock<Arc<Mutex<CommandLog>>> = OnceLock::new();
+static BLOCKED_SLOWLOG: OnceLock<Arc<Mutex<HashMap<u64, PendingBlockedSlowlogEntry>>>> =
+    OnceLock::new();
+
+struct PendingBlockedSlowlogEntry {
+    argv: Vec<RedisString>,
+    start_micros: MonoTime,
+    client_name: Option<RedisString>,
+}
 
 /// Return a handle to the global slowlog, initialising it on first call.
 pub fn global_slowlog() -> Arc<Mutex<CommandLog>> {
@@ -40,6 +50,12 @@ pub fn global_slowlog() -> Arc<Mutex<CommandLog>> {
             log.max_len = 128;
             Arc::new(Mutex::new(log))
         })
+        .clone()
+}
+
+fn blocked_slowlog_pending() -> Arc<Mutex<HashMap<u64, PendingBlockedSlowlogEntry>>> {
+    BLOCKED_SLOWLOG
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
         .clone()
 }
 
@@ -116,6 +132,51 @@ pub fn record_slowlog_entry(
     }
 }
 
+/// Remember a blocked command's original argv until the wake path completes it.
+///
+/// C Valkey skips commandlog emission while `call()` leaves the client blocked
+/// and records the command from the unblock/reprocess path instead.
+pub fn remember_blocked_slowlog_entry(
+    argv: Vec<RedisString>,
+    start_micros: MonoTime,
+    client_id: u64,
+    client_name: Option<RedisString>,
+) {
+    let handle = blocked_slowlog_pending();
+    let mut pending = match handle.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    pending.insert(
+        client_id,
+        PendingBlockedSlowlogEntry {
+            argv,
+            start_micros,
+            client_name,
+        },
+    );
+}
+
+/// Record and clear a pending blocked command after it has been unblocked.
+pub fn record_blocked_slowlog_entry(client_id: u64) {
+    let handle = blocked_slowlog_pending();
+    let pending_entry = {
+        let mut pending = match handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        pending.remove(&client_id)
+    };
+    if let Some(entry) = pending_entry {
+        record_slowlog_entry(
+            &entry.argv,
+            elapsed_us(entry.start_micros),
+            client_id,
+            entry.client_name,
+        );
+    }
+}
+
 /// Update the slowlog threshold in microseconds.
 ///
 /// Called from `CONFIG SET slowlog-log-slower-than <value>`.
@@ -184,19 +245,19 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if argc > 3 {
             return Err(redis_types::RedisError::wrong_number_of_args(b"slowlog|get"));
         }
+        let default_count: i64 = 10;
+        let requested: i64 = if argc == 3 {
+            let count_arg = ctx.arg_owned(2usize)?;
+            parse_count(count_arg.as_bytes())?
+        } else {
+            default_count
+        };
         let handle = global_slowlog();
         let log = match handle.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let default_count: i64 = 10;
-        let requested: i64 = if argc == 3 {
-            let count_arg = ctx.arg_owned(2usize)?;
-            parse_count(count_arg.as_bytes()).unwrap_or(default_count)
-        } else {
-            default_count
-        };
-        let actual_count = if requested < 0 {
+        let actual_count = if requested == -1 {
             log.entries.len()
         } else {
             (requested as usize).min(log.entries.len())
@@ -247,12 +308,41 @@ pub fn slowlog_command(ctx: &mut CommandContext) -> RedisResult<()> {
     Err(redis_types::RedisError::runtime(msg))
 }
 
-fn parse_count(bytes: &[u8]) -> Option<i64> {
+fn parse_count(bytes: &[u8]) -> Result<i64, redis_types::RedisError> {
     if bytes.is_empty() {
-        return None;
+        return Err(slowlog_count_error());
     }
-    let s = std::str::from_utf8(bytes).ok()?;
-    s.parse::<i64>().ok()
+    let (negative, digits) = if bytes[0] == b'-' {
+        (true, &bytes[1..])
+    } else {
+        (false, bytes)
+    };
+    if digits.is_empty() {
+        return Err(slowlog_count_error());
+    }
+    let mut value: i64 = 0;
+    for &byte in digits {
+        if !byte.is_ascii_digit() {
+            return Err(slowlog_count_error());
+        }
+        value = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((byte - b'0') as i64))
+            .ok_or_else(slowlog_count_error)?;
+    }
+    let parsed = if negative {
+        value.checked_neg().ok_or_else(slowlog_count_error)?
+    } else {
+        value
+    };
+    if parsed < -1 {
+        return Err(slowlog_count_error());
+    }
+    Ok(parsed)
+}
+
+fn slowlog_count_error() -> redis_types::RedisError {
+    redis_types::RedisError::runtime(b"ERR count should be greater than or equal to -1")
 }
 
 // ── Latency global ────────────────────────────────────────────────────────────
@@ -468,11 +558,12 @@ fn reply_latency_history(
 //   source:        new (OV-2 implementation)
 //   target_crate:  redis-commands
 //   confidence:    high
-//   todos:         2
+//   todos:         0
 //   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         SLOWLOG ring buffer with global OnceLock. LATENCY in-memory
 //                  map backed by redis_core::latency::LatencyMonitor. Phase B:
 //                  no internal event-collection callers; API exposed for future
-//                  hooks. SLOWLOG GET reply format matches canonical Redis 6-tuple.
+//                  hooks. SLOWLOG GET reply format matches canonical Redis 6-tuple;
+//                  blocked list commands are recorded from the wake path.
 // ──────────────────────────────────────────────────────────────────────────────

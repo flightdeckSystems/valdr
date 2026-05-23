@@ -1,0 +1,99 @@
+{
+  "captured_ts": "2026-05-23T15:43:06.110681Z",
+  "gate_results": {
+    "cargo_check_redis-commands": {
+      "detail": "skipped (earlier gate failed)",
+      "ok": null
+    },
+    "cargo_check_workspace": {
+      "detail": "skipped (earlier gate failed)",
+      "ok": null
+    },
+    "cargo_test_redis-commands_connection": {
+      "detail": "skipped (earlier gate failed)",
+      "ok": null
+    },
+    "no_out_of_scope_changes": {
+      "detail": "out-of-scope changed files: crates/redis-commands/src/hyperloglog.rs, crates/redis-commands/src/list.rs, crates/redis-commands/src/slowlog_cmd.rs, crates/redis-core/src/live_config.rs",
+      "ok": false
+    },
+    "oracle_rust_vs_reference": {
+      "detail": "skipped (earlier gate failed)",
+      "ok": null
+    },
+    "target_files_modified": {
+      "detail": "perf-fixer touched 5/5 candidate target(s)",
+      "ok": true
+    },
+    "trailer_present": {
+      "detail": "skipped (earlier gate failed)",
+      "ok": null
+    }
+  },
+  "harness_context": {
+    "commit": "ae8f997",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/eval.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M crates/redis-commands/src/list.rs",
+      " M crates/redis-commands/src/slowlog_cmd.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M docs/TCL_CONFORMANCE_PUSH_20260523.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260523T135934Z-ae8f997-perf-fixer-tcl-sort-connection-metadata-v2.json",
+      "?? harness/evidence/runs/20260523T141724Z-ae8f997-runner-tcl-post-sort-metadata-survey-v2.json",
+      "?? harness/evidence/runs/20260523T141819Z-ae8f997-perf-fixer-tcl-hll-config-selftest-v2.json",
+      "?? harness/evidence/runs/20260523T144432Z-ae8f997-runner-tcl-post-hll-config-survey-v2.json",
+      "?? harness/evidence/runs/20260523T144531Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json",
+      "?? harness/evidence/runs/20260523T151217Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json",
+      "?? harness/evidence/runs/20260523T152249Z-ae8f997-blocked-tcl-slowlog-core-edges-v2.json",
+      "?? harness/evidence/runs/20260523T152250Z-ae8f997-perf-fixer-tcl-functions-load-fcall-minimal-v2.json"
+    ],
+    "run_id": "loop-8c23b06af7378ea5",
+    "target_commit": "ae8f99744b28a24464bff065db25347f6d34920b",
+    "tree_hash": "812333c4e136d248f7e74a6fb8fb392b4ad9470e0bdc28927cc66ffb4c479caa"
+  },
+  "kind": "agent_transcript",
+  "packet": "tcl-functions-load-fcall-minimal-v2",
+  "prompt_hash": "b5654b9d1a6bb4a3",
+  "role": "perf-fixer",
+  "runtime_metadata": {
+    "approval": "never",
+    "cmd": [
+      "codex",
+      "--ask-for-approval",
+      "never",
+      "exec",
+      "--cd",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--add-dir",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+      "--sandbox",
+      "danger-full-access",
+      "--json",
+      "--output-last-message",
+      "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T152250Z-codex-perf-fixer-tcl-functions-load-fcall-minimal-v2.last.txt",
+      "-"
+    ],
+    "finished_at": "2026-05-23T15:43:05Z",
+    "last_message_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T152250Z-codex-perf-fixer-tcl-functions-load-fcall-minimal-v2.last.txt",
+    "model": null,
+    "packet": "tcl-functions-load-fcall-minimal-v2",
+    "profile": null,
+    "project": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port",
+    "prompt_source": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/next-prompt.md",
+    "return_code": 0,
+    "role": "perf-fixer",
+    "runtime": "codex",
+    "sandbox": "danger-full-access",
+    "started_at": "2026-05-23T15:22:50Z",
+    "transcript_path": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T152250Z-codex-perf-fixer-tcl-functions-load-fcall-minimal-v2.jsonl"
+  },
+  "transcript_bytes": 2063815,
+  "transcript_preview": "nd legacy CONFIG alias gap. The\\n+remaining failures are two list encoding assertions, script SORT nosort\\n+behavior, and two bad-double error-text mismatches. Treat the combined frontier\\n+as 248 counted passes, 5 counted failures, and 2 no-summary files only as a\\n+telemetry projection from the prior 10-file baseline plus focused HLL and SORT\\n+runs.\\n+\\n+Post-`tcl-slowlog-core-edges-v2` focused update:\\n+\\n+```text\\n+unit/slowlog\\n+0 counted tests due no Test Summary\\n+0 packet-scoped failures before abort\\n+0 timed out\\n+1 file aborted before Test Summary\\n+```\\n+\\n+Evidence:\\n+`harness/oracle/results/tcl-survey/20260523T150459Z/unit__slowlog.json`.\\n+This clears strict `SLOWLOG GET` count validation, blocked-command delayed\\n+logging, original blocked argv logging, and the generated `SKIP_COMMANDLOG`\\n+metadata path for `EXEC`. The remaining stop is `FUNCTION LOAD`, which belongs\\n+to the functions packet. Treat the combined frontier as unchanged for counted\\n+passes until `unit/slowlog` reaches a real Test Summary.\\n+\\n+Post-`tcl-functions-load-fcall-minimal-v2` focused update:\\n+\\n+```text\\n+unit/slowlog\\n+13 passed tests counted\\n+0 failed tests counted\\n+0 timed out\\n+0 files aborted before Test Summary\\n+\\n+unit/scripting\\n+0 counted tests due no Test Summary\\n+3 reported failures before abort\\n 0 timed out\\n-1 without summary\\n-first abort: SORT extracts STORE correctly\\n-exception: ERR Unknown COMMAND subcommand: getkeys.\\n+1 file aborted before Test Summary\\n ```\\n \\n Evidence:\\n-`harness/oracle/results/tcl-survey/20260523T054433Z/unit__sort.json`.\\n-This proves the packet cleared the unknown `SORT` command wall. The two STORE\\n-assertions immediately before the abort are connection/config metadata drift:\\n-the stored values and lengths pass, while expected quicklist/listpack encoding\\n-uses the legacy `list-max-ziplist-size` alias that `connection.rs` does not yet\\n-expose.\\n+`harness/oracle/results/tcl-survey/20260523T154121Z/unit__slowlog.json` and\\n+`harness/oracle/results/tcl-survey/20260523T154121Z/unit__scripting.json`.\\n+This clears the function-load stop for the focused slowlog tail and lets\\n+function-mode scripting run through the existing Lua bridge. The remaining\\n+scripting frontiers are `WAITAOF` command coverage and EVAL semantics, outside\\n+this packet scope.\\n \\n ## Packet Strategy\\n \\n@@ -80,28 +145,33 @@ expose.\\n      `unit/hyperloglog` survey reaches a counted summary at 23 pass / 3 fail.\\n \\n 3. `tcl-hll-config-selftest`\\n-   - Split follow-up for `PFSELFTEST` and `hll-sparse-max-bytes` promotion.\\n-     Keep PFADD, PFCOUNT, and PFMERGE semantics faithful to the stored HLL\\n+   - Applied in `tcl-hll-config-selftest-v2`. `PFSELFTEST` now exercises the\\n+     existing HLL register and approximation paths, and\\n+     `hll-sparse-max-bytes` drives PFADD sparse-to-dense promotion through\\n+     `LiveConfig`. PFCOUNT and PFMERGE semantics remain on the stored HLL\\n      representation.\\n \\n 4. `tcl-sort-wire-minimal`\\n    - Applied. `sort.rs` is compiled into the crate, `SORT` and `SORT_RO` are\\n      registered in the shared dispatcher, and minimal context helpers support\\n      BY/GET/LIMIT/ASC/DESC/ALPHA/STORE/SORT_RO STORE rejection.\\n-   - Follow-up: split `tcl-sort-connection-metadata` for `COMMAND GETKEYS` and\\n-     legacy `list-max-ziplist-size` CONFIG alias behavior in `connection.rs`.\\n+   - Follow-up `tcl-sort-connection-metadata-v2` applied. `COMMAND GETKEYS`\\n+     now reports SORT/SORT_RO key positions from command metadata, and the\\n+     legacy `list-max-ziplist-size` alias maps to the live listpack setting.\\n \\n 5. `tcl-slowlog-core-edges`\\n-   - Fix core SLOWLOG semantics that are independent of scripting functions:\\n-     count argument validation, original-argv logging where possible, and\\n-     blocking-command logging if the existing blocked-command path exposes the\\n-     right hook.\\n+   - Applied in `tcl-slowlog-core-edges-v2`. Core SLOWLOG semantics that are\\n+     independent of scripting functions now cover strict count argument\\n+     validation, delayed blocked-command logging through the list wake path,\\n+     original argv preservation for blocked commands, and generated\\n+     `SKIP_COMMANDLOG` metadata for `EXEC`.\\n \\n 6. `tcl-functions-load-fcall-minimal`\\n-   - Minimal Lua function bridge for `FUNCTION LOAD [REPLACE]` and\\n-     `FCALL`/`FCALL_RO`, backed by the existing EVAL machinery. Scope is\\n-     deliberately smaller than full Valkey functions: enough for the TCL\\n-     scripting and slowlog frontiers to start executing function-mode tests.\\n+   - Applied in `tcl-functions-load-fcall-minimal-v2`. Minimal Lua function\\n+     bridge for `FUNCTION LOAD [REPLACE]` and `FCALL`/`FCALL_RO`, backed by the\\n+     existing EVAL machinery and shared command dispatcher. Scope is\\n+     deliberately smaller than full Valkey functions: no full metadata,\\n+     persistence, engines API, async kill, listing, or cluster behavior.\\n \\n Every implementation packet is followed by the same `tcl-survey-unswept`\\n runner. The loop is allowed to stop on repeated packet failure; repeated\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n{\"type\":\"item.updated\",\"item\":{\"id\":\"item_60\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Verify current code/doc diff after implementation\",\"completed\":true},{\"text\":\"Update docs and PORT STATUS trailer for this packet\",\"completed\":true},{\"text\":\"Write reserved evidence artifact and ledger entry\",\"completed\":true},{\"text\":\"Run final focused sanity checks and summarize outcome\",\"completed\":true}]}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_131\",\"type\":\"agent_message\",\"text\":\"Completed `tcl-functions-load-fcall-minimal-v2`.\\n\\nBoundary kept to the Lua functions command surface: `FUNCTION LOAD/FLUSH/DELETE/KILL`, `FCALL`, and `FCALL_RO` now run through normal command dispatch and the existing `mlua` EVAL bridge. No reference source, oracle, benchmark path, or unsafe code was changed.\\n\\nKey edits:\\n- [eval.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/eval.rs:431): minimal `#!lua name=<library>` function registry plus `FCALL`/`FCALL_RO`.\\n- [connection.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/connection.rs:86): `FUNCTION` subcommand routing.\\n- [dispatch.rs](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/crates/redis-commands/src/dispatch.rs:1354): `FCALL` and `FCALL_RO` registered.\\n- Docs updated with latest frontier evidence.\\n- Evidence written to [20260523T152250Z-ae8f997-perf-fixer-tcl-functions-load-fcall-minimal-v2.json](/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/evidence/runs/20260523T152250Z-ae8f997-perf-fixer-tcl-functions-load-fcall-minimal-v2.json:1).\\n\\nChecks:\\n- `cargo check -p redis-commands`: pass, existing warnings.\\n- `cargo check --workspace`: pass, existing warnings.\\n- `bash harness/oracle/smoke.sh --skip-build`: 23 pass / 0 fail / 0 skip.\\n- `python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 150 --files unit/scripting,unit/slowlog`: pass telemetry; `unit/slowlog` is 13 pass / 0 fail, `unit/scripting` remains no-summary at `WAITAOF`.\\n- `jq` evidence and ledger validation: pass.\\n- `git diff --check` on packet/evidence files: pass.\\n- `cargo fmt --check`: still fails on broad pre-existing formatting drift outside packet scope; I did not run workspace-wide fmt.\"}}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_60\",\"type\":\"todo_list\",\"items\":[{\"text\":\"Verify current code/doc diff after implementation\",\"completed\":true},{\"text\":\"Update docs and PORT STATUS trailer for this packet\",\"completed\":true},{\"text\":\"Write reserved evidence artifact and ledger entry\",\"completed\":true},{\"text\":\"Run final focused sanity checks and summarize outcome\",\"completed\":true}]}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":12418302,\"cached_input_tokens\":12109568,\"output_tokens\":40799,\"reasoning_output_tokens\":16924}}\n",
+  "transcript_src": "/Users/ianmclaughlin/PycharmProjects/rustExperiments/redis-rs-port/harness/loop/state/transcripts/20260523T152250Z-codex-perf-fixer-tcl-functions-load-fcall-minimal-v2.jsonl"
+}

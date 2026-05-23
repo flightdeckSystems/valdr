@@ -38,11 +38,7 @@ use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisString};
 
 /// Sparse-encoded buffer size limit before promotion to dense.
-///
-/// Redis default is 3000 bytes. Setting this very low (e.g. 0) forces immediate
-/// dense encoding on every PFADD. We hard-code 3000 since the server config
-/// system is not yet wired into `CommandContext`.
-const HLL_SPARSE_MAX_BYTES_DEFAULT: usize = 3000;
+const HLL_SPARSE_MAX_BYTES_DEFAULT: usize = redis_core::live_config::DEFAULT_HLL_SPARSE_MAX_BYTES;
 
 /// Build the canonical HLL WRONGTYPE error payload.
 fn hll_wrong_type_error() -> RedisError {
@@ -127,6 +123,13 @@ pub const INVALID_HLL_ERR: &[u8] = b"INVALIDOBJ Corrupted HLL object detected";
 /// Number of iterations for PFSELFTEST register correctness check.
 const HLL_TEST_CYCLES: u32 = 1000;
 
+fn hll_selftest_rand(state: &mut u64) -> u32 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    (*state >> 32) as u32
+}
+
 // ── Header byte-offset constants ─────────────────────────────────────────────
 
 const HDR_MAGIC_OFF: usize = 0;
@@ -168,7 +171,7 @@ fn hll_card_read(buf: &[u8]) -> u64 {
 
 /// Write the 8-byte little-endian cached cardinality and clear the invalid bit.
 fn hll_card_write(buf: &mut [u8], card: u64) {
-    buf[HDR_CARD_OFF]     = (card & 0xff) as u8;
+    buf[HDR_CARD_OFF] = (card & 0xff) as u8;
     buf[HDR_CARD_OFF + 1] = (card >> 8 & 0xff) as u8;
     buf[HDR_CARD_OFF + 2] = (card >> 16 & 0xff) as u8;
     buf[HDR_CARD_OFF + 3] = (card >> 24 & 0xff) as u8;
@@ -292,13 +295,55 @@ pub fn murmur_hash64a(key: &[u8], seed: u32) -> u64 {
 
     let tail = &key[chunks * 8..];
     match tail.len() {
-        7 => { h ^= (tail[6] as u64) << 48; h ^= (tail[5] as u64) << 40; h ^= (tail[4] as u64) << 32; h ^= (tail[3] as u64) << 24; h ^= (tail[2] as u64) << 16; h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        6 => { h ^= (tail[5] as u64) << 40; h ^= (tail[4] as u64) << 32; h ^= (tail[3] as u64) << 24; h ^= (tail[2] as u64) << 16; h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        5 => { h ^= (tail[4] as u64) << 32; h ^= (tail[3] as u64) << 24; h ^= (tail[2] as u64) << 16; h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        4 => { h ^= (tail[3] as u64) << 24; h ^= (tail[2] as u64) << 16; h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        3 => { h ^= (tail[2] as u64) << 16; h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        2 => { h ^= (tail[1] as u64) << 8; h ^= tail[0] as u64; h = h.wrapping_mul(M); }
-        1 => { h ^= tail[0] as u64; h = h.wrapping_mul(M); }
+        7 => {
+            h ^= (tail[6] as u64) << 48;
+            h ^= (tail[5] as u64) << 40;
+            h ^= (tail[4] as u64) << 32;
+            h ^= (tail[3] as u64) << 24;
+            h ^= (tail[2] as u64) << 16;
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        6 => {
+            h ^= (tail[5] as u64) << 40;
+            h ^= (tail[4] as u64) << 32;
+            h ^= (tail[3] as u64) << 24;
+            h ^= (tail[2] as u64) << 16;
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        5 => {
+            h ^= (tail[4] as u64) << 32;
+            h ^= (tail[3] as u64) << 24;
+            h ^= (tail[2] as u64) << 16;
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        4 => {
+            h ^= (tail[3] as u64) << 24;
+            h ^= (tail[2] as u64) << 16;
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        3 => {
+            h ^= (tail[2] as u64) << 16;
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        2 => {
+            h ^= (tail[1] as u64) << 8;
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
+        1 => {
+            h ^= tail[0] as u64;
+            h = h.wrapping_mul(M);
+        }
         _ => {}
     }
 
@@ -356,26 +401,38 @@ pub fn hll_dense_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
     if HLL_REGISTERS == 16384 && HLL_BITS == 6 {
         // Fast path: process 16 registers (12 bytes) per iteration, 1024 iterations.
         for chunk in registers.chunks_exact(12) {
-            let r0  = (chunk[0] as u32 & 63) as usize;
-            let r1  = ((chunk[0] as u32 >> 6 | (chunk[1] as u32) << 2) & 63) as usize;
-            let r2  = ((chunk[1] as u32 >> 4 | (chunk[2] as u32) << 4) & 63) as usize;
-            let r3  = (chunk[2] as u32 >> 2 & 63) as usize;
-            let r4  = (chunk[3] as u32 & 63) as usize;
-            let r5  = ((chunk[3] as u32 >> 6 | (chunk[4] as u32) << 2) & 63) as usize;
-            let r6  = ((chunk[4] as u32 >> 4 | (chunk[5] as u32) << 4) & 63) as usize;
-            let r7  = (chunk[5] as u32 >> 2 & 63) as usize;
-            let r8  = (chunk[6] as u32 & 63) as usize;
-            let r9  = ((chunk[6] as u32 >> 6 | (chunk[7] as u32) << 2) & 63) as usize;
+            let r0 = (chunk[0] as u32 & 63) as usize;
+            let r1 = ((chunk[0] as u32 >> 6 | (chunk[1] as u32) << 2) & 63) as usize;
+            let r2 = ((chunk[1] as u32 >> 4 | (chunk[2] as u32) << 4) & 63) as usize;
+            let r3 = (chunk[2] as u32 >> 2 & 63) as usize;
+            let r4 = (chunk[3] as u32 & 63) as usize;
+            let r5 = ((chunk[3] as u32 >> 6 | (chunk[4] as u32) << 2) & 63) as usize;
+            let r6 = ((chunk[4] as u32 >> 4 | (chunk[5] as u32) << 4) & 63) as usize;
+            let r7 = (chunk[5] as u32 >> 2 & 63) as usize;
+            let r8 = (chunk[6] as u32 & 63) as usize;
+            let r9 = ((chunk[6] as u32 >> 6 | (chunk[7] as u32) << 2) & 63) as usize;
             let r10 = ((chunk[7] as u32 >> 4 | (chunk[8] as u32) << 4) & 63) as usize;
             let r11 = (chunk[8] as u32 >> 2 & 63) as usize;
             let r12 = (chunk[9] as u32 & 63) as usize;
             let r13 = ((chunk[9] as u32 >> 6 | (chunk[10] as u32) << 2) & 63) as usize;
             let r14 = ((chunk[10] as u32 >> 4 | (chunk[11] as u32) << 4) & 63) as usize;
             let r15 = (chunk[11] as u32 >> 2 & 63) as usize;
-            reghisto[r0]  += 1; reghisto[r1]  += 1; reghisto[r2]  += 1; reghisto[r3]  += 1;
-            reghisto[r4]  += 1; reghisto[r5]  += 1; reghisto[r6]  += 1; reghisto[r7]  += 1;
-            reghisto[r8]  += 1; reghisto[r9]  += 1; reghisto[r10] += 1; reghisto[r11] += 1;
-            reghisto[r12] += 1; reghisto[r13] += 1; reghisto[r14] += 1; reghisto[r15] += 1;
+            reghisto[r0] += 1;
+            reghisto[r1] += 1;
+            reghisto[r2] += 1;
+            reghisto[r3] += 1;
+            reghisto[r4] += 1;
+            reghisto[r5] += 1;
+            reghisto[r6] += 1;
+            reghisto[r7] += 1;
+            reghisto[r8] += 1;
+            reghisto[r9] += 1;
+            reghisto[r10] += 1;
+            reghisto[r11] += 1;
+            reghisto[r12] += 1;
+            reghisto[r13] += 1;
+            reghisto[r14] += 1;
+            reghisto[r15] += 1;
         }
     } else {
         // Generic path (non-standard register/bit counts).
@@ -412,19 +469,31 @@ pub fn hll_sparse_to_dense(buf: &mut Vec<u8>) -> Result<(), RedisError> {
         let b = buf[pos];
         if sparse_is_zero(b) {
             let run = sparse_zero_len(b);
-            if idx + run > HLL_REGISTERS { valid = false; break; }
+            if idx + run > HLL_REGISTERS {
+                valid = false;
+                break;
+            }
             idx += run;
             pos += 1;
         } else if sparse_is_xzero(b) {
-            if pos + 1 >= end { valid = false; break; }
+            if pos + 1 >= end {
+                valid = false;
+                break;
+            }
             let run = sparse_xzero_len(b, buf[pos + 1]);
-            if idx + run > HLL_REGISTERS { valid = false; break; }
+            if idx + run > HLL_REGISTERS {
+                valid = false;
+                break;
+            }
             idx += run;
             pos += 2;
         } else {
             let run = sparse_val_len(b);
             let regval = sparse_val_value(b);
-            if idx + run > HLL_REGISTERS { valid = false; break; }
+            if idx + run > HLL_REGISTERS {
+                valid = false;
+                break;
+            }
             for _ in 0..run {
                 hll_dense_set_register(&mut dense[HLL_HDR_SIZE..], idx, regval);
                 idx += 1;
@@ -514,7 +583,11 @@ pub(crate) fn hll_sparse_set(
     // Position immediately after the current opcode (None if this is the last).
     let next_pos_opt: Option<usize> = {
         let next = pos + if sparse_is_xzero(buf[pos]) { 2 } else { 1 };
-        if next < data_end { Some(next) } else { None }
+        if next < data_end {
+            Some(next)
+        } else {
+            None
+        }
     };
 
     // Cache opcode type and run length.
@@ -525,7 +598,9 @@ pub(crate) fn hll_sparse_set(
     let run_len: usize = if is_zero {
         sparse_zero_len(b)
     } else if is_xzero {
-        if pos + 1 >= data_end { return Err(RedisError::runtime(INVALID_HLL_ERR)); }
+        if pos + 1 >= data_end {
+            return Err(RedisError::runtime(INVALID_HLL_ERR));
+        }
         sparse_xzero_len(b, buf[pos + 1])
     } else {
         sparse_val_len(b)
@@ -554,7 +629,7 @@ pub(crate) fn hll_sparse_set(
                 let len = index - first;
                 if len > HLL_SPARSE_ZERO_MAX_LEN {
                     let l = len - 1;
-                    seq[seq_len]     = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
+                    seq[seq_len] = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
                     seq[seq_len + 1] = (l & 0xff) as u8;
                     seq_len += 2;
                 } else {
@@ -568,7 +643,7 @@ pub(crate) fn hll_sparse_set(
                 let len = last - index;
                 if len > HLL_SPARSE_ZERO_MAX_LEN {
                     let l = len - 1;
-                    seq[seq_len]     = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
+                    seq[seq_len] = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
                     seq[seq_len + 1] = (l & 0xff) as u8;
                     seq_len += 2;
                 } else {
@@ -698,21 +773,29 @@ pub fn hll_sparse_reg_histo(sparse_data: &[u8], reghisto: &mut [i32; 64]) -> boo
         let b = sparse_data[pos];
         if sparse_is_zero(b) {
             let run = sparse_zero_len(b);
-            if idx + run > HLL_REGISTERS { return false; }
+            if idx + run > HLL_REGISTERS {
+                return false;
+            }
             reghisto[0] += run as i32;
             idx += run;
             pos += 1;
         } else if sparse_is_xzero(b) {
-            if pos + 1 >= end { return false; }
+            if pos + 1 >= end {
+                return false;
+            }
             let run = sparse_xzero_len(b, sparse_data[pos + 1]);
-            if idx + run > HLL_REGISTERS { return false; }
+            if idx + run > HLL_REGISTERS {
+                return false;
+            }
             reghisto[0] += run as i32;
             idx += run;
             pos += 2;
         } else {
             let run = sparse_val_len(b);
             let regval = sparse_val_value(b) as usize;
-            if idx + run > HLL_REGISTERS { return false; }
+            if idx + run > HLL_REGISTERS {
+                return false;
+            }
             reghisto[regval] += run as i32;
             idx += run;
             pos += 1;
@@ -752,7 +835,9 @@ pub fn hll_raw_reg_histo(registers: &[u8], reghisto: &mut [i32; 64]) {
 
 /// sigma correction function from Ertl (arXiv:1702.01284).
 pub fn hll_sigma(mut x: f64) -> f64 {
-    if x == 1.0 { return f64::INFINITY; }
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
     let mut z_prime;
     let mut y = 1.0f64;
     let mut z = x;
@@ -761,14 +846,18 @@ pub fn hll_sigma(mut x: f64) -> f64 {
         z_prime = z;
         z += x * y;
         y += y;
-        if z_prime == z { break; }
+        if z_prime == z {
+            break;
+        }
     }
     z
 }
 
 /// tau correction function from Ertl (arXiv:1702.01284).
 pub fn hll_tau(mut x: f64) -> f64 {
-    if x == 0.0 || x == 1.0 { return 0.0; }
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
+    }
     let mut z_prime;
     let mut y = 1.0f64;
     let mut z = 1.0 - x;
@@ -777,7 +866,9 @@ pub fn hll_tau(mut x: f64) -> f64 {
         z_prime = z;
         y *= 0.5;
         z -= (1.0 - x).powi(2) * y;
-        if z_prime == z { break; }
+        if z_prime == z {
+            break;
+        }
     }
     z / 3.0
 }
@@ -826,9 +917,7 @@ pub(crate) fn hll_add(
     sparse_max_bytes: usize,
 ) -> Result<bool, RedisError> {
     match hll_encoding(buf) {
-        HLL_DENSE => {
-            Ok(hll_dense_add(&mut buf[HLL_HDR_SIZE..], ele))
-        }
+        HLL_DENSE => Ok(hll_dense_add(&mut buf[HLL_HDR_SIZE..], ele)),
         HLL_SPARSE => hll_sparse_add(buf, ele, sparse_max_bytes),
         _ => Err(RedisError::runtime(INVALID_HLL_ERR)),
     }
@@ -890,7 +979,9 @@ pub fn hll_merge(max: &mut [u8], hll_buf: &[u8]) -> Result<(), RedisError> {
                     return Err(RedisError::runtime(INVALID_HLL_ERR));
                 }
                 for _ in 0..run {
-                    if regval > max[i] { max[i] = regval; }
+                    if regval > max[i] {
+                        max[i] = regval;
+                    }
                     i += 1;
                 }
                 pos += 1;
@@ -920,8 +1011,7 @@ pub fn hll_dense_compress(reg_dense: &mut [u8], reg_raw: &[u8]) {
 /// The initial state encodes all 16384 registers as zero using XZERO opcodes.
 // C: hyperloglog.c:1603-1631, createHLLObject
 pub fn create_hll_object() -> Vec<u8> {
-    let xzero_count =
-        (HLL_REGISTERS + HLL_SPARSE_XZERO_MAX_LEN - 1) / HLL_SPARSE_XZERO_MAX_LEN;
+    let xzero_count = (HLL_REGISTERS + HLL_SPARSE_XZERO_MAX_LEN - 1) / HLL_SPARSE_XZERO_MAX_LEN;
     let sparselen = HLL_HDR_SIZE + xzero_count * 2;
     let mut buf = vec![0u8; sparselen];
 
@@ -935,7 +1025,7 @@ pub fn create_hll_object() -> Vec<u8> {
     while aux > 0 {
         let xzero = aux.min(HLL_SPARSE_XZERO_MAX_LEN);
         let l = xzero - 1;
-        buf[p]     = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
+        buf[p] = (l >> 8) as u8 | HLL_SPARSE_XZERO_BIT;
         buf[p + 1] = (l & 0xff) as u8;
         p += 2;
         aux -= xzero;
@@ -948,11 +1038,19 @@ pub fn create_hll_object() -> Vec<u8> {
 /// Returns true if valid.
 // C: hyperloglog.c:1633-1661, isHLLObjectOrReply (validation portion)
 pub fn is_hll_valid(buf: &[u8]) -> bool {
-    if buf.len() < HLL_HDR_SIZE { return false; }
-    if &buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4] != b"HYLL" { return false; }
+    if buf.len() < HLL_HDR_SIZE {
+        return false;
+    }
+    if &buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4] != b"HYLL" {
+        return false;
+    }
     let enc = buf[HDR_ENCODING_OFF];
-    if enc > HLL_MAX_ENCODING { return false; }
-    if enc == HLL_DENSE && buf.len() != HLL_DENSE_SIZE { return false; }
+    if enc > HLL_MAX_ENCODING {
+        return false;
+    }
+    if enc == HLL_DENSE && buf.len() != HLL_DENSE_SIZE {
+        return false;
+    }
     true
 }
 
@@ -1003,8 +1101,7 @@ fn pfdebug_arity_error(subcmd: &[u8]) -> RedisError {
 }
 
 fn pfdebug_unknown_subcommand(subcmd: &[u8]) -> RedisError {
-    let mut msg =
-        Vec::with_capacity(b"ERR Unknown PFDEBUG subcommand ''".len() + subcmd.len());
+    let mut msg = Vec::with_capacity(b"ERR Unknown PFDEBUG subcommand ''".len() + subcmd.len());
     msg.extend_from_slice(b"ERR Unknown PFDEBUG subcommand '");
     msg.extend_from_slice(subcmd);
     msg.push(b'\'');
@@ -1067,10 +1164,11 @@ pub fn pfadd_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     };
     let was_missing = ctx.db().lookup_key_read(key.as_bytes()).is_none();
     let mut updated = was_missing;
+    let sparse_max_bytes = ctx.live_config().hll_sparse_max_bytes();
 
     for j in 2..argc {
         let ele = ctx.arg_owned(j)?;
-        let changed = hll_add(&mut buf, ele.as_bytes(), HLL_SPARSE_MAX_BYTES_DEFAULT)?;
+        let changed = hll_add(&mut buf, ele.as_bytes(), sparse_max_bytes)?;
         if changed {
             updated = true;
         }
@@ -1148,7 +1246,8 @@ pub fn pfcount_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let card = hll_count(&buf)?;
     hll_card_write(&mut buf, card);
     let stored = RedisObject::from_string(RedisString::from_vec(buf));
-    ctx.db_mut().set_key(key, stored, redis_core::db::SETKEY_KEEPTTL);
+    ctx.db_mut()
+        .set_key(key, stored, redis_core::db::SETKEY_KEEPTTL);
     ctx.reply_integer(card as i64)
 }
 
@@ -1214,7 +1313,12 @@ pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     } else {
         for i in 0..HLL_REGISTERS {
             if max_registers[i] != 0 {
-                hll_sparse_set(&mut dest_buf, i, max_registers[i], HLL_SPARSE_MAX_BYTES_DEFAULT)?;
+                hll_sparse_set(
+                    &mut dest_buf,
+                    i,
+                    max_registers[i],
+                    HLL_SPARSE_MAX_BYTES_DEFAULT,
+                )?;
             }
         }
     }
@@ -1229,24 +1333,81 @@ pub fn pfmerge_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// PFSELFTEST
 /// Internal self-test of HLL register encoding and approximation accuracy.
 // C: hyperloglog.c:1878-1976, pfselftestCommand
-// TODO(port): Replace C rand() with a Rust RNG. The `rand` crate is the standard
-// choice but is not yet a dependency. Stubbing the random test body here.
 pub fn pfselftest_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
+    if ctx.arg_count() != 1 {
+        return Err(RedisError::wrong_number_of_args(b"pfselftest"));
+    }
+
     // Test 1: Dense register get/set round-trip.
     let mut dense_buf = vec![0u8; HLL_DENSE_SIZE];
     dense_buf[HDR_MAGIC_OFF..HDR_MAGIC_OFF + 4].copy_from_slice(b"HYLL");
     dense_buf[HDR_ENCODING_OFF] = HLL_DENSE;
-    let registers = &mut dense_buf[HLL_HDR_SIZE..];
+    let mut bytecounters = vec![0u8; HLL_REGISTERS];
+    let mut rng_state = 0x6a09_e667_f3bc_c909u64;
 
-    // TODO(port): rand() usage — replace with `rand::thread_rng()` or seeded PRNG.
-    // The test sets registers to random values and reads them back.
-    for _cycle in 0..HLL_TEST_CYCLES {
-        // placeholder: without rand, we cannot meaningfully run Test 1.
+    for _ in 0..HLL_TEST_CYCLES {
+        for (i, slot) in bytecounters.iter_mut().enumerate() {
+            let r = (hll_selftest_rand(&mut rng_state) & HLL_REGISTER_MAX as u32) as u8;
+            *slot = r;
+            hll_dense_set_register(&mut dense_buf[HLL_HDR_SIZE..], i, r);
+        }
+        for (i, expected) in bytecounters.iter().enumerate() {
+            let val = hll_dense_get_register(&dense_buf[HLL_HDR_SIZE..], i);
+            if val != *expected {
+                let msg = format!(
+                    "TESTFAILED Register {} should be {} but is {}",
+                    i, expected, val
+                );
+                return Err(RedisError::runtime(msg.as_bytes()));
+            }
+        }
     }
 
-    // Test 2: Approximation error check using unique elements.
-    // TODO(port): rand() usage for seed and element generation.
-    // Stubbed; phase-B will wire in an RNG and the full loop from the C source.
+    dense_buf[HLL_HDR_SIZE..].fill(0);
+    let mut sparse_buf = create_hll_object();
+    let relerr = 1.04f64 / (HLL_REGISTERS as f64).sqrt();
+    let mut checkpoint = 1u64;
+    let seed = hll_selftest_rand(&mut rng_state) as u64
+        | ((hll_selftest_rand(&mut rng_state) as u64) << 32);
+    let sparse_max_bytes = ctx.live_config().hll_sparse_max_bytes();
+
+    for j in 1u64..=10_000_000 {
+        let ele = j ^ seed;
+        let ele_bytes = ele.to_le_bytes();
+        hll_dense_add(&mut dense_buf[HLL_HDR_SIZE..], &ele_bytes);
+        hll_add(&mut sparse_buf, &ele_bytes, sparse_max_bytes)?;
+
+        if j == checkpoint
+            && j < (sparse_max_bytes / 2) as u64
+            && hll_encoding(&sparse_buf) != HLL_SPARSE
+        {
+            return Err(RedisError::runtime(b"TESTFAILED sparse encoding not used"));
+        }
+
+        if j == checkpoint && hll_count(&dense_buf)? != hll_count(&sparse_buf)? {
+            return Err(RedisError::runtime(b"TESTFAILED dense/sparse disagree"));
+        }
+
+        if j == checkpoint {
+            let card = hll_count(&dense_buf)?;
+            let mut abserr = checkpoint as i64 - card as i64;
+            if abserr < 0 {
+                abserr = -abserr;
+            }
+            let mut maxerr = (relerr * 6.0 * checkpoint as f64).ceil() as u64;
+            if j == 10 {
+                maxerr = 1;
+            }
+            if abserr as u64 > maxerr {
+                let msg = format!(
+                    "TESTFAILED Too big error. card:{} abserr:{}",
+                    checkpoint, abserr
+                );
+                return Err(RedisError::runtime(msg.as_bytes()));
+            }
+            checkpoint *= 10;
+        }
+    }
 
     ctx.reply_simple_string(b"OK")
 }
@@ -1300,8 +1461,10 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             converted = true;
         }
         if converted {
-            ctx.db_mut()
-                .replace_value(&key, RedisObject::from_string(RedisString::from_vec(buf.clone())));
+            ctx.db_mut().replace_value(
+                &key,
+                RedisObject::from_string(RedisString::from_vec(buf.clone())),
+            );
         }
         ctx.reply_array_header(HLL_REGISTERS as i64)?;
         for j in 0..HLL_REGISTERS {
@@ -1339,12 +1502,12 @@ pub fn pfdebug_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 //   source:        src/hyperloglog.c  (2107 lines, 27 functions)
 //   target_crate:  redis-commands
 //   confidence:    medium
-//   todos:         9
+//   todos:         8
 //   port_notes:    4
 //   unsafe_blocks: 0   (must be 0 in pilot crates)
 //   notes:         Core algorithm fully translated (MurmurHash64A, pat_len, dense/sparse
 //                  encoding, sigma/tau estimator, merge, compress). PFDEBUG uses the
-//                  stored HLL bytes for GETREG, DECODE, ENCODING, and TODENSE. SIMD paths
-//                  (AVX2/NEON) elided — scalar fallback only. pfselftest rand() dependency
-//                  remains flagged above.
+//                  stored HLL bytes for GETREG, DECODE, ENCODING, and TODENSE. PFSELFTEST
+//                  exercises dense register access and approximation bounds. SIMD paths
+//                  (AVX2/NEON) elided — scalar fallback only.
 // ──────────────────────────────────────────────────────────────────────────────

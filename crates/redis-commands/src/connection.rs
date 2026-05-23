@@ -19,6 +19,7 @@ use redis_core::notify::keyspace_events_string_to_flags;
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
+use serde_json::Value;
 
 use crate::live_config_handle;
 
@@ -84,22 +85,28 @@ pub fn select_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
 /// `FUNCTION <subcommand> [args]`.
 ///
-/// Stub for the Valkey TCL harness. The harness invokes `FUNCTION FLUSH`
-/// between every test block and a few other subcommands during setup; we do
-/// not maintain a function registry, so every subcommand returns `+OK\r\n`
-/// for `FLUSH` and a fixed shape for `LIST`/`STATS`. Anything else falls
-/// through to a syntax-style error so we keep parity with the upstream error
-/// surface for unimplemented features.
+/// Routes library-mutating subcommands into the Lua function registry in
+/// `eval.rs`. Listing and stats remain telemetry-only placeholders until the
+/// full Valkey functions API lands.
 pub fn function_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() < 2 {
         return Err(RedisError::wrong_number_of_args(b"function"));
     }
     let sub = ctx.arg_owned(1usize)?;
     let sub_bytes = sub.as_bytes();
-    if ascii_eq_ignore_case(sub_bytes, b"FLUSH")
-        || ascii_eq_ignore_case(sub_bytes, b"DELETE")
-        || ascii_eq_ignore_case(sub_bytes, b"RESTORE")
-    {
+    if ascii_eq_ignore_case(sub_bytes, b"LOAD") {
+        return crate::eval::function_load_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"FLUSH") {
+        return crate::eval::function_flush_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"DELETE") {
+        return crate::eval::function_delete_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"KILL") {
+        return crate::eval::function_kill_command(ctx);
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"RESTORE") {
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"LIST") || ascii_eq_ignore_case(sub_bytes, b"DUMP") {
@@ -211,6 +218,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("hash-max-listpack-entries", "128"),
         ("hash-max-listpack-value", "64"),
         ("list-max-listpack-size", "-2"),
+        ("list-max-ziplist-size", "-2"),
         ("list-compress-depth", "0"),
         ("set-max-intset-entries", "512"),
         ("set-max-listpack-entries", "128"),
@@ -229,7 +237,10 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("slowlog-log-slower-than", "10000"),
         ("slowlog-max-len", "128"),
         ("notify-keyspace-events", ""),
-        ("client-output-buffer-limit", "normal 0 0 0 slave 256mb 64mb 60 pubsub 32mb 8mb 60"),
+        (
+            "client-output-buffer-limit",
+            "normal 0 0 0 slave 256mb 64mb 60 pubsub 32mb 8mb 60",
+        ),
         ("proto-max-bulk-len", "536870912"),
         ("io-threads", "1"),
         ("io-threads-do-reads", "no"),
@@ -282,6 +293,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_set_value = cfg.set_max_listpack_value().to_string();
     let live_zset_entries = cfg.zset_max_listpack_entries().to_string();
     let live_zset_value = cfg.zset_max_listpack_value().to_string();
+    let live_hll_sparse_max_bytes = cfg.hll_sparse_max_bytes().to_string();
     let live_dir = cfg.rdb_dir();
     let live_dbfilename = cfg.rdb_filename();
     let live_lfu_log_factor = cfg.lfu_log_factor().to_string();
@@ -304,15 +316,35 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
         2 => "optional".to_string(),
         _ => "no".to_string(),
     };
-    let live_appendonly = if cfg.appendonly() { "yes".to_string() } else { "no".to_string() };
+    let live_appendonly = if cfg.appendonly() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
     let live_appendfsync = crate::aof::fsync_policy_str(cfg.appendfsync()).to_string();
     let live_appendfilename = cfg.appendfilename();
     let live_repl_backlog_size = cfg.repl_backlog_size().to_string();
     let live_repl_timeout = cfg.repl_timeout().to_string();
-    let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() { "yes".to_string() } else { "no".to_string() };
-    let live_slave_read_only = if cfg.slave_read_only() { "yes".to_string() } else { "no".to_string() };
-    let live_repl_diskless = if cfg.repl_diskless_sync() { "yes".to_string() } else { "no".to_string() };
-    let live_rdb_version_check = if cfg.rdb_version_check_relaxed() { "relaxed".to_string() } else { "strict".to_string() };
+    let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
+    let live_slave_read_only = if cfg.slave_read_only() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
+    let live_repl_diskless = if cfg.repl_diskless_sync() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
+    let live_rdb_version_check = if cfg.rdb_version_check_relaxed() {
+        "relaxed".to_string()
+    } else {
+        "strict".to_string()
+    };
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -328,7 +360,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "hz" => Some(live_hz_str.clone()),
             "hash-max-listpack-entries" => Some(live_hash_entries.clone()),
             "hash-max-listpack-value" => Some(live_hash_value.clone()),
-            "list-max-listpack-size" => Some(live_list_size.clone()),
+            "list-max-listpack-size" | "list-max-ziplist-size" => Some(live_list_size.clone()),
             "set-max-intset-entries" => Some(live_set_intset.clone()),
             "set-max-listpack-entries" => Some(live_set_entries.clone()),
             "set-max-listpack-value" => Some(live_set_value.clone()),
@@ -338,6 +370,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "zset-max-ziplist-value" => Some(live_zset_value.clone()),
             "hash-max-ziplist-entries" => Some(live_hash_entries.clone()),
             "hash-max-ziplist-value" => Some(live_hash_value.clone()),
+            "hll-sparse-max-bytes" => Some(live_hll_sparse_max_bytes.clone()),
             "dir" => Some(live_dir.clone()),
             "dbfilename" => Some(live_dbfilename.clone()),
             "lfu-log-factor" => Some(live_lfu_log_factor.clone()),
@@ -413,7 +446,7 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_hash_max_listpack_value(n);
             }
         }
-        b"list-max-listpack-size" => {
+        b"list-max-listpack-size" | b"list-max-ziplist-size" => {
             if let Some(n) = parse_i64_strict(value) {
                 cfg.set_list_max_listpack_size(n);
             }
@@ -441,6 +474,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"zset-max-listpack-value" | b"zset-max-ziplist-value" => {
             if let Some(n) = parse_usize_strict(value) {
                 cfg.set_zset_max_listpack_value(n);
+            }
+        }
+        b"hll-sparse-max-bytes" => {
+            if let Some(n) = parse_memsize(value).and_then(|n| usize::try_from(n).ok()) {
+                cfg.set_hll_sparse_max_bytes(n);
             }
         }
         b"slowlog-log-slower-than" => {
@@ -536,7 +574,9 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 let policy = cfg.appendfsync();
                 match crate::aof::AofWriter::open(&path, policy) {
                     Ok(w) => crate::aof::install_aof_writer(std::sync::Arc::new(w)),
-                    Err(e) => eprintln!("redis-server: failed to open AOF {}: {}", path.display(), e),
+                    Err(e) => {
+                        eprintln!("redis-server: failed to open AOF {}: {}", path.display(), e)
+                    }
                 }
             } else if !enabled && was_enabled {
                 if let Some(w) = crate::aof::aof_writer() {
@@ -554,7 +594,8 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             if let Some(policy) = crate::aof::parse_fsync_policy(value) {
                 cfg.set_appendfsync(policy);
                 if let Some(w) = crate::aof::aof_writer() {
-                    w.fsync_policy.store(policy, std::sync::atomic::Ordering::Relaxed);
+                    w.fsync_policy
+                        .store(policy, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -644,9 +685,7 @@ fn glob_match_inner(pattern: &[u8], text: &[u8]) -> bool {
         if pi < pattern.len() && pattern[pi] == b'?' {
             pi += 1;
             ti += 1;
-        } else if pi < pattern.len()
-            && ascii_lower(pattern[pi]) == ascii_lower(text[ti])
-        {
+        } else if pi < pattern.len() && ascii_lower(pattern[pi]) == ascii_lower(text[ti]) {
             pi += 1;
             ti += 1;
         } else if pi < pattern.len() && pattern[pi] == b'*' {
@@ -688,7 +727,10 @@ pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         let key = ctx.arg_owned(2usize)?;
         let key_len = key.as_bytes().len();
-        let value_len = ctx.db().lookup_key_read(key.as_bytes()).and_then(|obj| obj.string_len().ok());
+        let value_len = ctx
+            .db()
+            .lookup_key_read(key.as_bytes())
+            .and_then(|obj| obj.string_len().ok());
         match value_len {
             Some(v) => ctx.reply_integer((key_len + v + 48) as i64),
             None => ctx.reply_null_bulk(),
@@ -696,9 +738,12 @@ pub fn memory_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     } else if ascii_eq_ignore_case(sub_bytes, b"STATS") {
         ctx.reply_frame(&RespFrame::array(Vec::new()))
     } else if ascii_eq_ignore_case(sub_bytes, b"DOCTOR") {
-        ctx.reply_bulk_string(RedisString::from_bytes(b"Sam, I detected a few issues in this Valkey instance memory implants:\n"))
+        ctx.reply_bulk_string(RedisString::from_bytes(
+            b"Sam, I detected a few issues in this Valkey instance memory implants:\n",
+        ))
     } else {
-        let mut msg = Vec::with_capacity(b"ERR Unknown MEMORY subcommand: ".len() + sub_bytes.len());
+        let mut msg =
+            Vec::with_capacity(b"ERR Unknown MEMORY subcommand: ".len() + sub_bytes.len());
         msg.extend_from_slice(b"ERR Unknown MEMORY subcommand: ");
         msg.extend_from_slice(sub_bytes);
         Err(RedisError::runtime(msg))
@@ -836,7 +881,10 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return Err(RedisError::wrong_number_of_args(b"debug digest-value"));
         }
         let key = ctx.arg_owned(2usize)?;
-        let digest = match ctx.db_mut().lookup_key_read_with_flags(&key, redis_core::db::LOOKUP_NOTOUCH) {
+        let digest = match ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key, redis_core::db::LOOKUP_NOTOUCH)
+        {
             None => b"0000000000000000000000000000000000000000".to_vec(),
             Some(obj) => {
                 let mut h: u64 = 0xcbf29ce484222325;
@@ -850,7 +898,9 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(&digest));
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST") {
-        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(b"0000000000000000000000000000000000000000"));
+        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(
+            b"0000000000000000000000000000000000000000",
+        ));
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"OBJECT") {
         return ctx.reply_simple_string(b"Value at:0x0 refcount:1 encoding:raw serializedlength:1 lru:0 lru_seconds:0 type:string");
@@ -883,7 +933,8 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"CLOSE-LISTENERS-ASA") {
         return ctx.reply_simple_string(b"OK");
     }
-    let mut msg = Vec::with_capacity(b"ERR Unknown DEBUG subcommand: ".len() + sub.as_bytes().len());
+    let mut msg =
+        Vec::with_capacity(b"ERR Unknown DEBUG subcommand: ".len() + sub.as_bytes().len());
     msg.extend_from_slice(b"ERR Unknown DEBUG subcommand: ");
     msg.extend_from_slice(sub.as_bytes());
     Err(RedisError::runtime(msg))
@@ -1056,9 +1107,7 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             let opt = ctx.arg(2).ok().map(|a| a.clone());
             let val = ctx.arg(3).ok().map(|a| a.clone());
             match (opt, val) {
-                (Some(o), Some(v))
-                    if o.as_bytes().eq_ignore_ascii_case(b"ID") =>
-                {
+                (Some(o), Some(v)) if o.as_bytes().eq_ignore_ascii_case(b"ID") => {
                     parse_i64_strict(v.as_bytes()).map(|n| n as u64)
                 }
                 _ => None,
@@ -1125,13 +1174,15 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     Err(RedisError::runtime(msg))
 }
 
-/// `COMMAND` / `COMMAND COUNT`.
+/// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS`.
 ///
 /// `COMMAND` (no args) replies with an array of bulk-string command names
 /// drawn from the dispatch table. This stub omits the per-command metadata
 /// (arity/flags/key-positions/etc.); `redis-cli` accepts a names-only reply.
 ///
 /// `COMMAND COUNT` replies with the integer length of the dispatch table.
+/// `COMMAND GETKEYS` replies with keys derived from generated command metadata,
+/// with SORT/SORT_RO matching their upstream variable key parsing.
 pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() == 1 {
         let handlers = crate::dispatch::HANDLERS;
@@ -1149,10 +1200,252 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let n = crate::dispatch::HANDLERS.len() as i64;
         return ctx.reply_integer(n);
     }
-    let mut msg = Vec::with_capacity(b"ERR Unknown COMMAND subcommand: ".len() + sub.as_bytes().len());
+    if ascii_eq_ignore_case(sub.as_bytes(), b"GETKEYS") {
+        return command_getkeys(ctx);
+    }
+    let mut msg =
+        Vec::with_capacity(b"ERR Unknown COMMAND subcommand: ".len() + sub.as_bytes().len());
     msg.extend_from_slice(b"ERR Unknown COMMAND subcommand: ");
     msg.extend_from_slice(sub.as_bytes());
     Err(RedisError::runtime(msg))
+}
+
+fn command_getkeys(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() < 3 {
+        return Err(RedisError::wrong_number_of_args(b"command|getkeys"));
+    }
+    let cmd_name = ctx.arg_owned(2usize)?;
+    let spec = crate::dispatch::registered_command_spec(cmd_name.as_bytes())
+        .ok_or_else(|| RedisError::runtime(b"ERR Invalid command specified"))?;
+    let command_argc = ctx.arg_count() - 2;
+    validate_command_getkeys_arity(spec.arity, command_argc)?;
+
+    let keys = if ascii_eq_ignore_case(cmd_name.as_bytes(), b"SORT") {
+        sort_getkeys(ctx)?
+    } else if ascii_eq_ignore_case(cmd_name.as_bytes(), b"SORT_RO") {
+        vec![ctx.arg_owned(3usize)?]
+    } else {
+        command_getkeys_from_specs(ctx, spec, command_argc)?
+            .ok_or_else(|| RedisError::runtime(b"ERR Invalid arguments specified for command"))?
+    };
+    let items = keys.into_iter().map(RespFrame::bulk).collect();
+    ctx.reply_frame(&RespFrame::array(items))
+}
+
+fn validate_command_getkeys_arity(arity: i32, argc: usize) -> RedisResult<()> {
+    let invalid = if arity > 0 {
+        argc != arity as usize
+    } else if arity < 0 {
+        argc < (-arity) as usize
+    } else {
+        false
+    };
+    if invalid {
+        Err(RedisError::runtime(
+            b"ERR Invalid number of arguments specified for command",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn sort_getkeys(ctx: &CommandContext<'_>) -> RedisResult<Vec<RedisString>> {
+    let argc = ctx.arg_count() - 2;
+    let mut keys = Vec::with_capacity(2);
+    keys.push(ctx.arg_owned(3usize)?);
+    let mut store_key_index: Option<usize> = None;
+    let mut i = 2usize;
+    while i < argc {
+        let arg = ctx.arg_owned(i + 2)?;
+        let bytes = arg.as_bytes();
+        if ascii_eq_ignore_case(bytes, b"LIMIT") {
+            i += 3;
+            continue;
+        }
+        if ascii_eq_ignore_case(bytes, b"GET") || ascii_eq_ignore_case(bytes, b"BY") {
+            i += 2;
+            continue;
+        }
+        if ascii_eq_ignore_case(bytes, b"STORE") && i + 1 < argc {
+            store_key_index = Some(i + 3);
+        }
+        i += 1;
+    }
+    if let Some(index) = store_key_index {
+        keys.push(ctx.arg_owned(index)?);
+    }
+    Ok(keys)
+}
+
+fn command_getkeys_from_specs(
+    ctx: &CommandContext<'_>,
+    spec: &crate::generated::GeneratedCommandSpec,
+    command_argc: usize,
+) -> RedisResult<Option<Vec<RedisString>>> {
+    let key_specs: Value = serde_json::from_str(spec.key_specs_json)
+        .map_err(|_| RedisError::runtime(b"ERR Invalid arguments specified for command"))?;
+    let Some(specs) = key_specs.as_array() else {
+        return Ok(None);
+    };
+    if specs.is_empty() || specs.iter().all(key_spec_is_not_key) {
+        return Err(RedisError::runtime(b"ERR The command has no key arguments"));
+    }
+
+    let mut keys = Vec::new();
+    let mut unsupported = false;
+    for key_spec in specs {
+        if key_spec_is_not_key(key_spec) {
+            continue;
+        }
+        let Some(positions) = key_positions_from_spec(ctx, key_spec, command_argc)? else {
+            unsupported = true;
+            continue;
+        };
+        for pos in positions {
+            keys.push(ctx.arg_owned(2 + pos)?);
+        }
+    }
+    if keys.is_empty() && unsupported {
+        Ok(None)
+    } else {
+        Ok(Some(keys))
+    }
+}
+
+fn key_spec_is_not_key(spec: &Value) -> bool {
+    spec.get("flags")
+        .and_then(Value::as_array)
+        .map(|flags| flags.iter().any(|flag| flag.as_str() == Some("NOT_KEY")))
+        .unwrap_or(false)
+}
+
+fn key_positions_from_spec(
+    ctx: &CommandContext<'_>,
+    spec: &Value,
+    command_argc: usize,
+) -> RedisResult<Option<Vec<usize>>> {
+    let Some(start) = spec
+        .pointer("/begin_search/index/pos")
+        .and_then(Value::as_i64)
+        .and_then(nonnegative_usize)
+    else {
+        return Ok(None);
+    };
+    if let Some(range) = spec.pointer("/find_keys/range") {
+        return range_key_positions(range, start, command_argc);
+    }
+    if let Some(keynum) = spec.pointer("/find_keys/keynum") {
+        return keynum_key_positions(ctx, keynum, start, command_argc);
+    }
+    Ok(None)
+}
+
+fn range_key_positions(
+    range: &Value,
+    first: usize,
+    command_argc: usize,
+) -> RedisResult<Option<Vec<usize>>> {
+    let Some(lastkey) = range.get("lastkey").and_then(Value::as_i64) else {
+        return Ok(None);
+    };
+    let Some(step) = range
+        .get("step")
+        .and_then(Value::as_i64)
+        .and_then(nonnegative_usize)
+        .filter(|step| *step > 0)
+    else {
+        return Ok(None);
+    };
+    let last = if lastkey >= 0 {
+        first.saturating_add(lastkey as usize)
+    } else {
+        let offset = (-lastkey) as usize;
+        if offset > command_argc {
+            return Ok(Some(Vec::new()));
+        }
+        command_argc - offset
+    };
+    if first >= command_argc || last >= command_argc {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    }
+    if last < first {
+        return Ok(Some(Vec::new()));
+    }
+    let mut out = Vec::new();
+    let mut pos = first;
+    while pos <= last {
+        out.push(pos);
+        match pos.checked_add(step) {
+            Some(next) => pos = next,
+            None => break,
+        }
+    }
+    Ok(Some(out))
+}
+
+fn keynum_key_positions(
+    ctx: &CommandContext<'_>,
+    keynum: &Value,
+    begin: usize,
+    command_argc: usize,
+) -> RedisResult<Option<Vec<usize>>> {
+    let Some(keynumidx) = keynum
+        .get("keynumidx")
+        .and_then(Value::as_i64)
+        .and_then(nonnegative_usize)
+    else {
+        return Ok(None);
+    };
+    let Some(firstkey) = keynum
+        .get("firstkey")
+        .and_then(Value::as_i64)
+        .and_then(nonnegative_usize)
+    else {
+        return Ok(None);
+    };
+    let Some(step) = keynum
+        .get("step")
+        .and_then(Value::as_i64)
+        .and_then(nonnegative_usize)
+        .filter(|step| *step > 0)
+    else {
+        return Ok(None);
+    };
+    let numkeys_index = begin + keynumidx;
+    let first_key_index = begin + firstkey;
+    if numkeys_index >= command_argc || first_key_index > command_argc {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    }
+    let numkeys_arg = ctx.arg_owned(2 + numkeys_index)?;
+    let Some(numkeys) = parse_i64_strict(numkeys_arg.as_bytes()).filter(|n| *n >= 0) else {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    };
+    let numkeys = numkeys as usize;
+    let mut out = Vec::with_capacity(numkeys);
+    for idx in 0..numkeys {
+        let pos = first_key_index + idx * step;
+        if pos >= command_argc {
+            return Err(RedisError::runtime(
+                b"ERR Invalid arguments specified for command",
+            ));
+        }
+        out.push(pos);
+    }
+    Ok(Some(out))
+}
+
+fn nonnegative_usize(n: i64) -> Option<usize> {
+    if n >= 0 {
+        Some(n as usize)
+    } else {
+        None
+    }
 }
 
 /// `AUTH [username] password`.
@@ -1263,7 +1556,9 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         };
         let mut items: Vec<RespFrame> = Vec::new();
         for user in guard.users.values() {
-            items.push(RespFrame::bulk(RedisString::from_vec(user.to_rule_string())));
+            items.push(RespFrame::bulk(RedisString::from_vec(
+                user.to_rule_string(),
+            )));
         }
         return ctx.reply_frame(&RespFrame::array(items));
     }
@@ -1562,7 +1857,12 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
         }
     }
     if rule.starts_with(b"+") {
-        let cmd_name = RedisString::from_bytes(&rule[1..].iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>());
+        let cmd_name = RedisString::from_bytes(
+            &rule[1..]
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect::<Vec<_>>(),
+        );
         user.denied_commands.retain(|c| c != &cmd_name);
         if !user.allowed_commands.contains(&cmd_name) {
             user.allowed_commands.push(cmd_name);
@@ -1570,7 +1870,12 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
         return Ok(());
     }
     if rule.starts_with(b"-") {
-        let cmd_name = RedisString::from_bytes(&rule[1..].iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>());
+        let cmd_name = RedisString::from_bytes(
+            &rule[1..]
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect::<Vec<_>>(),
+        );
         user.allowed_commands.retain(|c| c != &cmd_name);
         if !user.denied_commands.contains(&cmd_name) {
             user.denied_commands.push(cmd_name);
@@ -1664,27 +1969,27 @@ fn commands_in_category(bit: u64) -> Vec<&'static [u8]> {
     for spec in crate::generated::COMMANDS.iter() {
         let matches = spec.acl_categories.iter().any(|&cat| {
             let cat_bit: u64 = match cat {
-                AclCategory::KEYSPACE    => acl_category::KEYSPACE,
-                AclCategory::READ        => acl_category::READ,
-                AclCategory::WRITE       => acl_category::WRITE,
-                AclCategory::SET         => acl_category::SET,
-                AclCategory::SORTEDSET   => acl_category::SORTEDSET,
-                AclCategory::LIST        => acl_category::LIST,
-                AclCategory::HASH        => acl_category::HASH,
-                AclCategory::STRING      => acl_category::STRING,
-                AclCategory::BITMAP      => acl_category::BITMAP,
+                AclCategory::KEYSPACE => acl_category::KEYSPACE,
+                AclCategory::READ => acl_category::READ,
+                AclCategory::WRITE => acl_category::WRITE,
+                AclCategory::SET => acl_category::SET,
+                AclCategory::SORTEDSET => acl_category::SORTEDSET,
+                AclCategory::LIST => acl_category::LIST,
+                AclCategory::HASH => acl_category::HASH,
+                AclCategory::STRING => acl_category::STRING,
+                AclCategory::BITMAP => acl_category::BITMAP,
                 AclCategory::HYPERLOGLOG => acl_category::HYPERLOGLOG,
-                AclCategory::GEO         => acl_category::GEO,
-                AclCategory::STREAM      => acl_category::STREAM,
-                AclCategory::PUBSUB      => acl_category::PUBSUB,
-                AclCategory::ADMIN       => acl_category::ADMIN,
-                AclCategory::FAST        => acl_category::FAST,
-                AclCategory::SLOW        => acl_category::SLOW,
-                AclCategory::BLOCKING    => acl_category::BLOCKING,
-                AclCategory::DANGEROUS   => acl_category::DANGEROUS,
-                AclCategory::CONNECTION  => acl_category::CONNECTION,
+                AclCategory::GEO => acl_category::GEO,
+                AclCategory::STREAM => acl_category::STREAM,
+                AclCategory::PUBSUB => acl_category::PUBSUB,
+                AclCategory::ADMIN => acl_category::ADMIN,
+                AclCategory::FAST => acl_category::FAST,
+                AclCategory::SLOW => acl_category::SLOW,
+                AclCategory::BLOCKING => acl_category::BLOCKING,
+                AclCategory::DANGEROUS => acl_category::DANGEROUS,
+                AclCategory::CONNECTION => acl_category::CONNECTION,
                 AclCategory::TRANSACTION => acl_category::TRANSACTION,
-                AclCategory::SCRIPTING   => acl_category::SCRIPTING,
+                AclCategory::SCRIPTING => acl_category::SCRIPTING,
             };
             cat_bit & bit != 0
         });
@@ -1730,7 +2035,9 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
 }
 
 fn ascii_lower(b: u8) -> u8 {
@@ -1872,6 +2179,62 @@ mod tests {
         let mut ctx = CommandContext::new(&mut c);
         client_command(&mut ctx).unwrap();
         assert_eq!(c.drain_reply(), b"$-1\r\n");
+    }
+
+    #[test]
+    fn command_getkeys_sort_reports_last_store_key() {
+        let mut c = Client::new(1);
+        c.set_args(vec![
+            RedisString::from_bytes(b"COMMAND"),
+            RedisString::from_bytes(b"GETKEYS"),
+            RedisString::from_bytes(b"sort"),
+            RedisString::from_bytes(b"abc"),
+            RedisString::from_bytes(b"store"),
+            RedisString::from_bytes(b"invalid"),
+            RedisString::from_bytes(b"store"),
+            RedisString::from_bytes(b"def"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        command_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"*2\r\n$3\r\nabc\r\n$3\r\ndef\r\n");
+    }
+
+    #[test]
+    fn command_getkeys_sort_ro_reports_input_key() {
+        let mut c = Client::new(1);
+        c.set_args(vec![
+            RedisString::from_bytes(b"COMMAND"),
+            RedisString::from_bytes(b"GETKEYS"),
+            RedisString::from_bytes(b"sort_ro"),
+            RedisString::from_bytes(b"abc"),
+        ]);
+        let mut ctx = CommandContext::new(&mut c);
+        command_command(&mut ctx).unwrap();
+        assert_eq!(c.drain_reply(), b"*1\r\n$3\r\nabc\r\n");
+    }
+
+    #[test]
+    fn config_legacy_ziplist_alias_uses_listpack_value() {
+        let cfg = Arc::new(LiveConfig::new());
+        apply_config_set(&cfg, b"list-max-ziplist-size", b"16");
+        let pairs = config_pairs_with_dynamic(&cfg);
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| { name == "list-max-listpack-size" && value == "16" }));
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| { name == "list-max-ziplist-size" && value == "16" }));
+    }
+
+    #[test]
+    fn config_hll_sparse_max_bytes_updates_live_value() {
+        let cfg = Arc::new(LiveConfig::new());
+        apply_config_set(&cfg, b"hll-sparse-max-bytes", b"30");
+        assert_eq!(cfg.hll_sparse_max_bytes(), 30);
+        let pairs = config_pairs_with_dynamic(&cfg);
+        assert!(pairs
+            .iter()
+            .any(|(name, value)| { name == "hll-sparse-max-bytes" && value == "30" }));
     }
 }
 

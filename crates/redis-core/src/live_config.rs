@@ -121,6 +121,8 @@ pub struct LiveConfig {
     pub set_max_listpack_value: AtomicUsize,
     pub zset_max_listpack_entries: AtomicUsize,
     pub zset_max_listpack_value: AtomicUsize,
+    /// Sparse HyperLogLog byte limit before promotion to dense.
+    pub hll_sparse_max_bytes: AtomicUsize,
     /// Directory where the RDB file is written (`dir` config key).
     pub rdb_dir: Mutex<String>,
     /// Filename for the RDB dump (`dbfilename` config key).
@@ -244,6 +246,9 @@ pub const DEFAULT_ZSET_MAX_LISTPACK_ENTRIES: usize = 128;
 /// Default `zset-max-listpack-value`.
 pub const DEFAULT_ZSET_MAX_LISTPACK_VALUE: usize = 64;
 
+/// Default `hll-sparse-max-bytes`.
+pub const DEFAULT_HLL_SPARSE_MAX_BYTES: usize = 3000;
+
 /// Default AOF filename.
 pub const DEFAULT_AOF_FILENAME: &str = "appendonly.aof";
 
@@ -274,6 +279,7 @@ impl Default for LiveConfig {
             set_max_listpack_value: AtomicUsize::new(DEFAULT_SET_MAX_LISTPACK_VALUE),
             zset_max_listpack_entries: AtomicUsize::new(DEFAULT_HASH_MAX_LISTPACK_ENTRIES),
             zset_max_listpack_value: AtomicUsize::new(DEFAULT_ZSET_MAX_LISTPACK_VALUE),
+            hll_sparse_max_bytes: AtomicUsize::new(DEFAULT_HLL_SPARSE_MAX_BYTES),
             rdb_dir: Mutex::new(DEFAULT_RDB_DIR.to_string()),
             rdb_filename: Mutex::new(DEFAULT_RDB_FILENAME.to_string()),
             last_save_unix: AtomicI64::new(0),
@@ -474,6 +480,14 @@ impl LiveConfig {
 
     pub fn set_zset_max_listpack_value(&self, n: usize) {
         self.zset_max_listpack_value.store(n, Ordering::Relaxed);
+    }
+
+    pub fn hll_sparse_max_bytes(&self) -> usize {
+        self.hll_sparse_max_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn set_hll_sparse_max_bytes(&self, n: usize) {
+        self.hll_sparse_max_bytes.store(n, Ordering::Relaxed);
     }
 
     /// Return the current `dir` setting for RDB/AOF files.
@@ -755,6 +769,7 @@ mod tests {
             cfg.hash_max_listpack_entries(),
             DEFAULT_HASH_MAX_LISTPACK_ENTRIES
         );
+        assert_eq!(cfg.hll_sparse_max_bytes(), DEFAULT_HLL_SPARSE_MAX_BYTES);
     }
 
     #[test]
@@ -808,5 +823,5 @@ mod tests {
 //   port_notes:    0
 //   unsafe_blocks: 0
 //   notes:         LiveConfig atomics and snapshots for command/background
-//                  runtime config reads.
+//                  runtime config reads, including HLL sparse promotion.
 // ──────────────────────────────────────────────────────────────────────────

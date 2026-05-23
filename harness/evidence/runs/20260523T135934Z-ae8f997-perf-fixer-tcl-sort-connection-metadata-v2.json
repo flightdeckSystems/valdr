@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "kind": "packet_completed",
+  "packet": "tcl-sort-connection-metadata-v2",
+  "role": "perf-fixer",
+  "prompt_hash": "3e08269edb5f4bd9",
+  "captured_ts": "2026-05-23T14:13:24Z",
+  "commit": "ae8f997",
+  "target_commit": "ae8f99744b28a24464bff065db25347f6d34920b",
+  "claim_level": "telemetry",
+  "capabilities": [
+    "official-tcl-coverage",
+    "sort",
+    "command-metadata"
+  ],
+  "subsystem_boundary": "redis-commands command metadata and CONFIG compatibility only; SORT execution, runtime ownership, reference sources, and harness oracles were not changed.",
+  "targets": [
+    "crates/redis-commands/src/connection.rs",
+    "crates/redis-commands/src/dispatch.rs",
+    "docs/TCL_CONFORMANCE_PUSH_20260523.md",
+    "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+  ],
+  "source_ranges": [
+    {
+      "file": "reference/valkey/tests/unit/sort.tcl",
+      "ranges": [
+        "37-44",
+        "111-121"
+      ]
+    },
+    {
+      "file": "reference/valkey/src/server.c",
+      "ranges": [
+        "5509-5794"
+      ]
+    },
+    {
+      "file": "reference/valkey/src/db.c",
+      "ranges": [
+        "2466-2663"
+      ]
+    }
+  ],
+  "changes": [
+    "Added dispatcher-visible generated command spec lookup for registered commands only.",
+    "Implemented COMMAND GETKEYS metadata handling, including upstream-shaped SORT and SORT_RO key extraction.",
+    "Mapped legacy list-max-ziplist-size CONFIG GET/SET to the live list-max-listpack-size value.",
+    "Recorded focused TCL frontier docs with remaining sort failures scoped as telemetry."
+  ],
+  "gate_results": [
+    {
+      "name": "pre_patch_focused_tcl_sort_reproduction",
+      "command": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/sort",
+      "ok": true,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T140236Z/unit__sort.json",
+      "summary": "Reproduced abort at SORT extracts STORE correctly: ERR Unknown COMMAND subcommand: getkeys, after two list encoding failures."
+    },
+    {
+      "name": "cargo_test_command_getkeys",
+      "command": "cargo test -p redis-commands command_getkeys -- --nocapture",
+      "ok": true,
+      "summary": "2 tests passed."
+    },
+    {
+      "name": "cargo_test_config_alias",
+      "command": "cargo test -p redis-commands config_legacy_ziplist_alias_uses_listpack_value -- --nocapture",
+      "ok": true,
+      "summary": "1 test passed."
+    },
+    {
+      "name": "cargo_check_redis_commands",
+      "command": "cargo check -p redis-commands",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "cargo_check_workspace",
+      "command": "cargo check --workspace",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "cargo_build_redis_server",
+      "command": "cargo build --bin redis-server",
+      "ok": true,
+      "summary": "Passed with existing warnings."
+    },
+    {
+      "name": "wire_smoke",
+      "command": "bash harness/oracle/smoke.sh --skip-build",
+      "ok": true,
+      "summary": "23 scripts passed, 0 failed, 0 skipped."
+    },
+    {
+      "name": "post_patch_focused_tcl_sort",
+      "command": "python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/sort",
+      "ok": true,
+      "artifact": "harness/oracle/results/tcl-survey/20260523T141126Z/unit__sort.json",
+      "summary": "unit/sort reached Test Summary: 49 passed, 5 failed, 0 timed out, 0 without summary."
+    },
+    {
+      "name": "normal_dispatch_preserved",
+      "ok": true,
+      "summary": "No benchmark-only or oracle-only dispatch bypass was added."
+    },
+    {
+      "name": "unsafe_budget",
+      "ok": true,
+      "summary": "No new unsafe was added."
+    },
+    {
+      "name": "port_status_trailers",
+      "ok": true,
+      "summary": "Materially edited Rust target files retain PORT STATUS trailers."
+    }
+  ],
+  "remaining_failures": [
+    "SORT BY key STORE: expected listpack encoding, got quicklist.",
+    "SORT BY hash field STORE: expected listpack encoding, got quicklist.",
+    "SORT sorted set BY nosort works as expected from scripts: expected sorted members, got empty arrays.",
+    "SORT will complain with numerical sorting and bad doubles (1): error text lacks ERR/double match.",
+    "SORT will complain with numerical sorting and bad doubles (2): error text lacks ERR/double match."
+  ],
+  "anti_gaming_review": {
+    "normal_dispatch_path": true,
+    "reference_source_edited": false,
+    "oracle_weakened": false,
+    "benchmark_special_case": false
+  }
+}

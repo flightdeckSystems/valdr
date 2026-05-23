@@ -1,0 +1,113 @@
+{
+  "captured_ts": "2026-05-23T15:22:49.910776Z",
+  "harness_context": {
+    "commit": "ae8f997",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M crates/redis-commands/src/list.rs",
+      " M crates/redis-commands/src/slowlog_cmd.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M docs/TCL_CONFORMANCE_PUSH_20260523.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260523T135934Z-ae8f997-perf-fixer-tcl-sort-connection-metadata-v2.json",
+      "?? harness/evidence/runs/20260523T141724Z-ae8f997-runner-tcl-post-sort-metadata-survey-v2.json",
+      "?? harness/evidence/runs/20260523T141819Z-ae8f997-perf-fixer-tcl-hll-config-selftest-v2.json",
+      "?? harness/evidence/runs/20260523T144432Z-ae8f997-runner-tcl-post-hll-config-survey-v2.json",
+      "?? harness/evidence/runs/20260523T144531Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json",
+      "?? harness/evidence/runs/20260523T151217Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json"
+    ],
+    "run_id": "loop-8c23b06af7378ea5",
+    "target_commit": "ae8f99744b28a24464bff065db25347f6d34920b",
+    "tree_hash": "114618e5e12f62b860fdd105085583a45825dce4ca8720579b916a9d951013db"
+  },
+  "kind": "packet_blocked",
+  "packet": "tcl-slowlog-core-edges-v2",
+  "reason_code": "repeated_packet_failure",
+  "role": "perf-fixer",
+  "schema_version": 1,
+  "state": {
+    "capabilities": [
+      "official-tcl-coverage",
+      "slowlog"
+    ],
+    "commit": "ae8f997",
+    "evidence_path": "harness/evidence/runs/20260523T151217Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-commands/src/dispatch.rs",
+      " M crates/redis-commands/src/hyperloglog.rs",
+      " M crates/redis-commands/src/list.rs",
+      " M crates/redis-commands/src/slowlog_cmd.rs",
+      " M crates/redis-core/src/live_config.rs",
+      " M docs/TCL_CONFORMANCE_PUSH_20260523.md",
+      " M docs/TCL_OVERNIGHT_FRONTIER_20260523.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260523T135934Z-ae8f997-perf-fixer-tcl-sort-connection-metadata-v2.json",
+      "?? harness/evidence/runs/20260523T141724Z-ae8f997-runner-tcl-post-sort-metadata-survey-v2.json",
+      "?? harness/evidence/runs/20260523T141819Z-ae8f997-perf-fixer-tcl-hll-config-selftest-v2.json",
+      "?? harness/evidence/runs/20260523T144432Z-ae8f997-runner-tcl-post-hll-config-survey-v2.json",
+      "?? harness/evidence/runs/20260523T144531Z-ae8f997-perf-fixer-tcl-slowlog-core-edges-v2.json"
+    ],
+    "mode": "perf-fixer",
+    "packet": {
+      "capabilities": [
+        "official-tcl-coverage",
+        "slowlog"
+      ],
+      "claim_level": "telemetry",
+      "cost_hint": "medium",
+      "depends_on": [
+        "tcl-core-frontier-baseline-v2"
+      ],
+      "id": "tcl-slowlog-core-edges-v2",
+      "note": "Focused SLOWLOG edge packet independent of functions. Fix count validation (`SLOWLOG GET -2`), original-argv logging for already-supported rewritten commands where the port preserves the original argv, and blocked BLPOP slowlog timing if the existing blocked-command wake path exposes a clean hook. Do not implement FUNCTION/FCALL here. Reproduce with: python3 harness/oracle/tcl-survey.py --skip-build --timeout-s 120 --files unit/slowlog.",
+      "phase": 108,
+      "resources": [
+        "slowlog",
+        "blocking",
+        "transactions",
+        "command-dispatch",
+        "oracle-results",
+        "cargo-target"
+      ],
+      "role": "perf-fixer",
+      "schema_version": 1,
+      "selector": "auto",
+      "source_ranges": [
+        "reference/valkey/src/commandlog.c:152-220",
+        "reference/valkey/tests/unit/slowlog.tcl:1-252"
+      ],
+      "targets": [
+        "crates/redis-commands/src/slowlog_cmd.rs",
+        "crates/redis-commands/src/dispatch.rs",
+        "crates/redis-commands/src/list.rs",
+        "crates/redis-commands/src/multi.rs",
+        "docs/TCL_CONFORMANCE_PUSH_20260523.md",
+        "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+      ]
+    },
+    "packet_id": "tcl-slowlog-core-edges-v2",
+    "prompt_hash": "987473f5e7759dea",
+    "role": "perf-fixer",
+    "run_id": "loop-8c23b06af7378ea5",
+    "runner_id": null,
+    "target_commit": "ae8f99744b28a24464bff065db25347f6d34920b",
+    "targets": [
+      "crates/redis-commands/src/slowlog_cmd.rs",
+      "crates/redis-commands/src/dispatch.rs",
+      "crates/redis-commands/src/list.rs",
+      "crates/redis-commands/src/multi.rs",
+      "docs/TCL_CONFORMANCE_PUSH_20260523.md",
+      "docs/TCL_OVERNIGHT_FRONTIER_20260523.md"
+    ],
+    "tree_hash": "2736b2b7b41ccb8ad429b7e861fb646837935b9093848fedc5ec609a728cc888",
+    "ts": "2026-05-23T15:12:17.244863Z"
+  },
+  "summary": "same packet failed 2 consecutive time(s); loop stopped to avoid repeated unsafe churn",
+  "worker": "supervisor"
+}

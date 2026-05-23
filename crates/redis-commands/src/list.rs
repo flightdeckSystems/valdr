@@ -299,6 +299,8 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                 let reply = encode_pop_reply(key, &value);
                 if waiter.sender.send(reply).is_err() {
                     push_one(db, key, value, side);
+                } else {
+                    crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
                 }
             } else {
                 let take = count as usize;
@@ -317,6 +319,8 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                     for v in values.into_iter().rev() {
                         push_one(db, key, v, side);
                     }
+                } else {
+                    crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
                 }
             }
         }
@@ -326,10 +330,12 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
             let dst_side = *dst_side;
             if let Some(dst_obj) = db.lookup_key_read(&dst_key) {
                 if !dst_obj.is_list() {
-                    let _ = waiter.sender.send(
+                    let wrong_type_reply =
                         b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
-                            .to_vec(),
-                    );
+                            .to_vec();
+                    if waiter.sender.send(wrong_type_reply).is_ok() {
+                        crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
+                    }
                     return;
                 }
             }
@@ -342,6 +348,7 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                 push_one(db, key, value, side);
                 return;
             }
+            crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
             push_one(db, &dst_key, value, dst_side);
             wake_blocked_for_key(db, &dst_key);
         }
@@ -1577,11 +1584,8 @@ pub fn wake_blocked_after_swapdb(db_id: u32, _unused: u32) {
 //                  LPUSHX, RPUSHX, LPOP, RPOP, LLEN, LRANGE, LINDEX,
 //                  LSET, LREM, LTRIM, LINSERT, LMOVE, RPOPLPUSH backed by
 //                  the pragmatic ListEncoding::Inline encoding from
-//                  redis-core::object. Round 10 adds non-blocking stubs
-//                  for BLPOP, BRPOP, BLMOVE, BRPOPLPUSH, BLMPOP that
-//                  short-circuit to a null reply when the source list is
-//                  empty rather than suspending the client; the real
-//                  blockForKeys infrastructure remains TODO. Phase 4 will
-//                  swap Inline for real ListPack / QuickList encodings
-//                  from redis-ds.
+//                  redis-core::object. Blocking list commands park clients in
+//                  redis-core::blocked_keys and record delayed slowlog entries
+//                  from the wake path. Phase 4 will swap Inline for real
+//                  ListPack / QuickList encodings from redis-ds.
 // ──────────────────────────────────────────────────────────────────────────

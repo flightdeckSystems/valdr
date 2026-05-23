@@ -22,7 +22,7 @@ use redis_core::monotonic::{elapsed_start, elapsed_us};
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult, RedisString};
 
-use crate::generated::{CommandFlag, COMMANDS};
+use crate::generated::{CommandFlag, GeneratedCommandSpec, COMMANDS};
 
 /// A command handler.
 pub type Handler = fn(&mut CommandContext) -> RedisResult<()>;
@@ -40,12 +40,13 @@ pub struct DispatchEntry {
 /// The generated `COMMANDS` registry is still the source of truth. We compress
 /// the handful of fields dispatch needs into this small value so each command
 /// does one generated-registry scan instead of separate scans for WRITE,
-/// NO_AUTH, DENYOOM, and ACL categories.
+/// NO_AUTH, DENYOOM, SKIP_COMMANDLOG, and ACL categories.
 #[derive(Clone, Copy, Debug, Default)]
 struct CommandMetadata {
     write: bool,
     no_auth: bool,
     denyoom: bool,
+    skip_commandlog: bool,
     acl_categories: u64,
 }
 
@@ -77,6 +78,13 @@ pub fn lookup_command(name: &[u8]) -> Option<&'static DispatchEntry> {
     lookup_runtime_command(name).map(|row| row.entry)
 }
 
+pub(crate) fn registered_command_spec(name: &[u8]) -> Option<&'static GeneratedCommandSpec> {
+    lookup_command(name)?;
+    COMMANDS
+        .iter()
+        .find(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), name))
+}
+
 fn lookup_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEntry> {
     if let Some(entry) = lookup_hot_runtime_command(name) {
         return Some(entry);
@@ -99,16 +107,12 @@ fn lookup_hot_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEnt
     let hot = hot_runtime_dispatch();
     match name {
         [a, b, c]
-            if ascii_lower(*a) == b'g'
-                && ascii_lower(*b) == b'e'
-                && ascii_lower(*c) == b't' =>
+            if ascii_lower(*a) == b'g' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
         {
             hot.get
         }
         [a, b, c]
-            if ascii_lower(*a) == b's'
-                && ascii_lower(*b) == b'e'
-                && ascii_lower(*c) == b't' =>
+            if ascii_lower(*a) == b's' && ascii_lower(*b) == b'e' && ascii_lower(*c) == b't' =>
         {
             hot.set
         }
@@ -161,8 +165,7 @@ fn runtime_dispatch_index() -> &'static RuntimeDispatchIndex {
         while cursor < rows.len() {
             let bucket = ascii_lower(rows[cursor].entry.name[0]) as usize;
             let start = cursor;
-            while cursor < rows.len()
-                && ascii_lower(rows[cursor].entry.name[0]) as usize == bucket
+            while cursor < rows.len() && ascii_lower(rows[cursor].entry.name[0]) as usize == bucket
             {
                 cursor += 1;
             }
@@ -202,9 +205,7 @@ pub fn dispatch(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             return crate::multi::queue_current_command(ctx);
         }
     }
-    if ctx.client_ref().in_pubsub_mode()
-        && !crate::pubsub::is_allowed_in_subscribe_mode(name)
-    {
+    if ctx.client_ref().in_pubsub_mode() && !crate::pubsub::is_allowed_in_subscribe_mode(name) {
         return Err(crate::pubsub::subscribe_mode_error(name));
     }
     dispatch_command_name(ctx, name)
@@ -269,36 +270,58 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     }
 
     let initial_slowlog_gate = ctx.live_config().slowlog_timing_gate();
-    let start = initial_slowlog_gate.should_time().then(elapsed_start);
+    let start =
+        (initial_slowlog_gate.should_time() && !metadata.skip_commandlog).then(elapsed_start);
     let result = (entry.handler)(ctx);
-    let elapsed_micros = start.map(elapsed_us);
+    let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
+    let elapsed_micros = if command_blocked {
+        None
+    } else {
+        start.map(elapsed_us)
+    };
     let should_record_slowlog = match elapsed_micros {
-        Some(elapsed_micros) => ctx
+        Some(elapsed_micros) if !command_blocked => ctx
             .live_config()
             .slowlog_timing_gate()
             .should_record(elapsed_micros),
-        None => false,
+        _ => false,
     };
 
-    let aof = if result.is_ok() && metadata.write {
+    let aof = if result.is_ok() && metadata.write && !command_blocked {
         crate::aof::aof_writer()
     } else {
         None
     };
-    let replication = if result.is_ok() && metadata.write && !ctx.client_ref().is_replica {
-        let repl = redis_core::replication::global_replication_state();
-        if repl.should_propagate_writes() {
-            Some(repl)
+    let replication =
+        if result.is_ok() && metadata.write && !command_blocked && !ctx.client_ref().is_replica {
+            let repl = redis_core::replication::global_replication_state();
+            if repl.should_propagate_writes() {
+                Some(repl)
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     let mut argv_snapshot: Option<Vec<RedisString>> = None;
-    if should_record_slowlog || aof.is_some() || replication.is_some() {
+    if (command_blocked && start.is_some())
+        || should_record_slowlog
+        || aof.is_some()
+        || replication.is_some()
+    {
         argv_snapshot = Some(snapshot_argv(ctx));
+    }
+
+    if command_blocked {
+        if let (Some(argv), Some(start_micros)) = (argv_snapshot.take(), start) {
+            crate::slowlog_cmd::remember_blocked_slowlog_entry(
+                argv,
+                start_micros,
+                ctx.client_ref().id(),
+                ctx.client_ref().name.clone(),
+            );
+        }
     }
 
     if should_record_slowlog {
@@ -369,16 +392,13 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
 }
 
 impl CommandMetadata {
-    fn include(
-        &mut self,
-        flags: &[CommandFlag],
-        acl_categories: &[crate::generated::AclCategory],
-    ) {
+    fn include(&mut self, flags: &[CommandFlag], acl_categories: &[crate::generated::AclCategory]) {
         for flag in flags {
             match flag {
                 CommandFlag::WRITE => self.write = true,
                 CommandFlag::NO_AUTH => self.no_auth = true,
                 CommandFlag::DENYOOM => self.denyoom = true,
+                CommandFlag::SKIP_COMMANDLOG => self.skip_commandlog = true,
                 _ => {}
             }
         }
@@ -390,27 +410,27 @@ impl CommandMetadata {
 
 fn acl_category_bits(cat: crate::generated::AclCategory) -> u64 {
     match cat {
-        crate::generated::AclCategory::KEYSPACE    => acl_category::KEYSPACE,
-        crate::generated::AclCategory::READ        => acl_category::READ,
-        crate::generated::AclCategory::WRITE       => acl_category::WRITE,
-        crate::generated::AclCategory::SET         => acl_category::SET,
-        crate::generated::AclCategory::SORTEDSET   => acl_category::SORTEDSET,
-        crate::generated::AclCategory::LIST        => acl_category::LIST,
-        crate::generated::AclCategory::HASH        => acl_category::HASH,
-        crate::generated::AclCategory::STRING      => acl_category::STRING,
-        crate::generated::AclCategory::BITMAP      => acl_category::BITMAP,
+        crate::generated::AclCategory::KEYSPACE => acl_category::KEYSPACE,
+        crate::generated::AclCategory::READ => acl_category::READ,
+        crate::generated::AclCategory::WRITE => acl_category::WRITE,
+        crate::generated::AclCategory::SET => acl_category::SET,
+        crate::generated::AclCategory::SORTEDSET => acl_category::SORTEDSET,
+        crate::generated::AclCategory::LIST => acl_category::LIST,
+        crate::generated::AclCategory::HASH => acl_category::HASH,
+        crate::generated::AclCategory::STRING => acl_category::STRING,
+        crate::generated::AclCategory::BITMAP => acl_category::BITMAP,
         crate::generated::AclCategory::HYPERLOGLOG => acl_category::HYPERLOGLOG,
-        crate::generated::AclCategory::GEO         => acl_category::GEO,
-        crate::generated::AclCategory::STREAM      => acl_category::STREAM,
-        crate::generated::AclCategory::PUBSUB      => acl_category::PUBSUB,
-        crate::generated::AclCategory::ADMIN       => acl_category::ADMIN,
-        crate::generated::AclCategory::FAST        => acl_category::FAST,
-        crate::generated::AclCategory::SLOW        => acl_category::SLOW,
-        crate::generated::AclCategory::BLOCKING    => acl_category::BLOCKING,
-        crate::generated::AclCategory::DANGEROUS   => acl_category::DANGEROUS,
-        crate::generated::AclCategory::CONNECTION  => acl_category::CONNECTION,
+        crate::generated::AclCategory::GEO => acl_category::GEO,
+        crate::generated::AclCategory::STREAM => acl_category::STREAM,
+        crate::generated::AclCategory::PUBSUB => acl_category::PUBSUB,
+        crate::generated::AclCategory::ADMIN => acl_category::ADMIN,
+        crate::generated::AclCategory::FAST => acl_category::FAST,
+        crate::generated::AclCategory::SLOW => acl_category::SLOW,
+        crate::generated::AclCategory::BLOCKING => acl_category::BLOCKING,
+        crate::generated::AclCategory::DANGEROUS => acl_category::DANGEROUS,
+        crate::generated::AclCategory::CONNECTION => acl_category::CONNECTION,
         crate::generated::AclCategory::TRANSACTION => acl_category::TRANSACTION,
-        crate::generated::AclCategory::SCRIPTING   => acl_category::SCRIPTING,
+        crate::generated::AclCategory::SCRIPTING => acl_category::SCRIPTING,
     }
 }
 
@@ -418,11 +438,7 @@ fn acl_category_bits(cat: crate::generated::AclCategory) -> u64 {
 ///
 /// Returns `Some(reply_bytes)` to short-circuit dispatch with the encoded error.
 /// Returns `None` when the command should proceed.
-fn enforce_acl_gate(
-    ctx: &CommandContext<'_>,
-    name: &[u8],
-    cmd_categories: u64,
-) -> Option<Vec<u8>> {
+fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) -> Option<Vec<u8>> {
     let default_name = RedisString::from_bytes(b"default");
     let user_name = ctx
         .client_ref()
@@ -482,8 +498,7 @@ fn is_always_allowed_for_authenticated(ctx: &CommandContext<'_>, name: &[u8]) ->
         Some(s) => s,
         None => return false,
     };
-    ascii_eq_ignore_case(sub.as_bytes(), b"WHOAMI")
-        || ascii_eq_ignore_case(sub.as_bytes(), b"HELP")
+    ascii_eq_ignore_case(sub.as_bytes(), b"WHOAMI") || ascii_eq_ignore_case(sub.as_bytes(), b"HELP")
 }
 
 /// Reject write commands from regular clients when we are operating as a
@@ -527,7 +542,10 @@ fn enforce_replica_readonly_gate(
 /// either cannot or refuses to recover memory. Returns `None` when dispatch
 /// should proceed (either we were under the limit, or eviction trimmed the
 /// keyspace back under it, or the command is exempt from DENYOOM).
-fn enforce_maxmemory_gate(ctx: &mut CommandContext<'_>, is_denyoom_command: bool) -> Option<Vec<u8>> {
+fn enforce_maxmemory_gate(
+    ctx: &mut CommandContext<'_>,
+    is_denyoom_command: bool,
+) -> Option<Vec<u8>> {
     let maxmem = ctx.live_config().maxmemory();
     if maxmem == 0 {
         return None;
@@ -604,7 +622,9 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
 }
 
 fn ascii_casecmp(a: &[u8], b: &[u8]) -> Ordering {
@@ -632,7 +652,11 @@ fn ascii_lower(b: u8) -> u8 {
 /// scaffolded but not yet implemented.
 #[allow(dead_code)]
 fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
-    let name = ctx.client_ref().arg(0).map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+    let name = ctx
+        .client_ref()
+        .arg(0)
+        .map(|s| s.as_bytes().to_vec())
+        .unwrap_or_default();
     let mut msg = Vec::with_capacity(b"ERR command not implemented yet: ".len() + name.len());
     msg.extend_from_slice(b"ERR command not implemented yet: ");
     msg.extend_from_slice(&name);
@@ -651,278 +675,1034 @@ fn unimplemented_handler(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// Wave C does the same for string commands. This avoids `todo!()` panics
 /// crashing the server during Wave A smoke testing.
 pub static HANDLERS: &[DispatchEntry] = &[
-    DispatchEntry { name: b"PING", handler: crate::connection::ping_command },
-    DispatchEntry { name: b"ECHO", handler: crate::connection::echo_command },
-    DispatchEntry { name: b"HELLO", handler: crate::connection::hello_command },
-    DispatchEntry { name: b"COMMAND", handler: crate::connection::command_command },
-    DispatchEntry { name: b"QUIT", handler: crate::connection::quit_command },
-    DispatchEntry { name: b"SHUTDOWN", handler: crate::connection::shutdown_command },
-    DispatchEntry { name: b"SELECT", handler: crate::connection::select_command },
-    DispatchEntry { name: b"CLIENT", handler: crate::connection::client_command },
-    DispatchEntry { name: b"DEBUG", handler: crate::connection::debug_command },
-    DispatchEntry { name: b"TIME", handler: crate::connection::time_command },
-    DispatchEntry { name: b"RESET", handler: crate::connection::reset_command },
-    DispatchEntry { name: b"AUTH", handler: crate::connection::auth_command },
-    DispatchEntry { name: b"ACL", handler: crate::connection::acl_command },
-    DispatchEntry { name: b"SET", handler: crate::string::set_command },
-    DispatchEntry { name: b"GET", handler: crate::string::get_command },
-    DispatchEntry { name: b"DEL", handler: redis_core::db::del_command },
-    DispatchEntry { name: b"EXISTS", handler: redis_core::db::exists_command },
-    DispatchEntry { name: b"INCR", handler: crate::string::incr_command },
-    DispatchEntry { name: b"DECR", handler: crate::string::decr_command },
-    DispatchEntry { name: b"INCRBY", handler: crate::string::incrby_command },
-    DispatchEntry { name: b"DECRBY", handler: crate::string::decrby_command },
+    DispatchEntry {
+        name: b"PING",
+        handler: crate::connection::ping_command,
+    },
+    DispatchEntry {
+        name: b"ECHO",
+        handler: crate::connection::echo_command,
+    },
+    DispatchEntry {
+        name: b"HELLO",
+        handler: crate::connection::hello_command,
+    },
+    DispatchEntry {
+        name: b"COMMAND",
+        handler: crate::connection::command_command,
+    },
+    DispatchEntry {
+        name: b"QUIT",
+        handler: crate::connection::quit_command,
+    },
+    DispatchEntry {
+        name: b"SHUTDOWN",
+        handler: crate::connection::shutdown_command,
+    },
+    DispatchEntry {
+        name: b"SELECT",
+        handler: crate::connection::select_command,
+    },
+    DispatchEntry {
+        name: b"CLIENT",
+        handler: crate::connection::client_command,
+    },
+    DispatchEntry {
+        name: b"DEBUG",
+        handler: crate::connection::debug_command,
+    },
+    DispatchEntry {
+        name: b"TIME",
+        handler: crate::connection::time_command,
+    },
+    DispatchEntry {
+        name: b"RESET",
+        handler: crate::connection::reset_command,
+    },
+    DispatchEntry {
+        name: b"AUTH",
+        handler: crate::connection::auth_command,
+    },
+    DispatchEntry {
+        name: b"ACL",
+        handler: crate::connection::acl_command,
+    },
+    DispatchEntry {
+        name: b"SET",
+        handler: crate::string::set_command,
+    },
+    DispatchEntry {
+        name: b"GET",
+        handler: crate::string::get_command,
+    },
+    DispatchEntry {
+        name: b"DEL",
+        handler: redis_core::db::del_command,
+    },
+    DispatchEntry {
+        name: b"EXISTS",
+        handler: redis_core::db::exists_command,
+    },
+    DispatchEntry {
+        name: b"INCR",
+        handler: crate::string::incr_command,
+    },
+    DispatchEntry {
+        name: b"DECR",
+        handler: crate::string::decr_command,
+    },
+    DispatchEntry {
+        name: b"INCRBY",
+        handler: crate::string::incrby_command,
+    },
+    DispatchEntry {
+        name: b"DECRBY",
+        handler: crate::string::decrby_command,
+    },
     // ── GENERIC-KEY-OPS (Round 1, agent E2) ────────────────────────────────
-    DispatchEntry { name: b"TYPE", handler: redis_core::db::type_command },
-    DispatchEntry { name: b"RENAME", handler: redis_core::db::rename_command },
-    DispatchEntry { name: b"RENAMENX", handler: redis_core::db::renamenx_command },
-    DispatchEntry { name: b"RANDOMKEY", handler: redis_core::db::randomkey_command },
-    DispatchEntry { name: b"DBSIZE", handler: redis_core::db::dbsize_command },
-    DispatchEntry { name: b"FLUSHDB", handler: redis_core::db::flushdb_command },
-    DispatchEntry { name: b"FLUSHALL", handler: redis_core::db::flushall_command },
-    DispatchEntry { name: b"TOUCH", handler: redis_core::db::touch_command },
-    DispatchEntry { name: b"UNLINK", handler: redis_core::db::unlink_command },
-    DispatchEntry { name: b"KEYS", handler: redis_core::db::keys_command },
-    DispatchEntry { name: b"COPY", handler: redis_core::db::copy_command },
-    DispatchEntry { name: b"MOVE", handler: redis_core::db::move_command },
-    DispatchEntry { name: b"SWAPDB", handler: redis_core::db::swapdb_command },
+    DispatchEntry {
+        name: b"TYPE",
+        handler: redis_core::db::type_command,
+    },
+    DispatchEntry {
+        name: b"RENAME",
+        handler: redis_core::db::rename_command,
+    },
+    DispatchEntry {
+        name: b"RENAMENX",
+        handler: redis_core::db::renamenx_command,
+    },
+    DispatchEntry {
+        name: b"RANDOMKEY",
+        handler: redis_core::db::randomkey_command,
+    },
+    DispatchEntry {
+        name: b"DBSIZE",
+        handler: redis_core::db::dbsize_command,
+    },
+    DispatchEntry {
+        name: b"FLUSHDB",
+        handler: redis_core::db::flushdb_command,
+    },
+    DispatchEntry {
+        name: b"FLUSHALL",
+        handler: redis_core::db::flushall_command,
+    },
+    DispatchEntry {
+        name: b"TOUCH",
+        handler: redis_core::db::touch_command,
+    },
+    DispatchEntry {
+        name: b"UNLINK",
+        handler: redis_core::db::unlink_command,
+    },
+    DispatchEntry {
+        name: b"KEYS",
+        handler: redis_core::db::keys_command,
+    },
+    DispatchEntry {
+        name: b"COPY",
+        handler: redis_core::db::copy_command,
+    },
+    DispatchEntry {
+        name: b"MOVE",
+        handler: redis_core::db::move_command,
+    },
+    DispatchEntry {
+        name: b"SWAPDB",
+        handler: redis_core::db::swapdb_command,
+    },
     // ── STRING (Round 1, agent E1) ─────────────────────────────────────────
-    DispatchEntry { name: b"APPEND", handler: crate::string::append_command },
-    DispatchEntry { name: b"STRLEN", handler: crate::string::strlen_command },
-    DispatchEntry { name: b"MGET", handler: crate::string::mget_command },
-    DispatchEntry { name: b"MSET", handler: crate::string::mset_command },
-    DispatchEntry { name: b"MSETNX", handler: crate::string::msetnx_command },
-    DispatchEntry { name: b"SETNX", handler: crate::string::setnx_command },
-    DispatchEntry { name: b"GETSET", handler: crate::string::getset_command },
-    DispatchEntry { name: b"GETDEL", handler: crate::string::getdel_command },
-    DispatchEntry { name: b"GETRANGE", handler: crate::string::getrange_command },
-    DispatchEntry { name: b"SETRANGE", handler: crate::string::setrange_command },
-    DispatchEntry { name: b"SUBSTR", handler: crate::string::getrange_command },
-    DispatchEntry { name: b"SETEX", handler: crate::string::setex_command },
-    DispatchEntry { name: b"PSETEX", handler: crate::string::psetex_command },
-    DispatchEntry { name: b"GETEX", handler: crate::string::getex_command },
-    DispatchEntry { name: b"MSETEX", handler: crate::string::msetex_command },
-    DispatchEntry { name: b"DELIFEQ", handler: crate::string::delifeq_command },
-    DispatchEntry { name: b"INCRBYFLOAT", handler: crate::string::incrbyfloat_command },
-    DispatchEntry { name: b"LCS", handler: crate::string::lcs_command },
+    DispatchEntry {
+        name: b"APPEND",
+        handler: crate::string::append_command,
+    },
+    DispatchEntry {
+        name: b"STRLEN",
+        handler: crate::string::strlen_command,
+    },
+    DispatchEntry {
+        name: b"MGET",
+        handler: crate::string::mget_command,
+    },
+    DispatchEntry {
+        name: b"MSET",
+        handler: crate::string::mset_command,
+    },
+    DispatchEntry {
+        name: b"MSETNX",
+        handler: crate::string::msetnx_command,
+    },
+    DispatchEntry {
+        name: b"SETNX",
+        handler: crate::string::setnx_command,
+    },
+    DispatchEntry {
+        name: b"GETSET",
+        handler: crate::string::getset_command,
+    },
+    DispatchEntry {
+        name: b"GETDEL",
+        handler: crate::string::getdel_command,
+    },
+    DispatchEntry {
+        name: b"GETRANGE",
+        handler: crate::string::getrange_command,
+    },
+    DispatchEntry {
+        name: b"SETRANGE",
+        handler: crate::string::setrange_command,
+    },
+    DispatchEntry {
+        name: b"SUBSTR",
+        handler: crate::string::getrange_command,
+    },
+    DispatchEntry {
+        name: b"SETEX",
+        handler: crate::string::setex_command,
+    },
+    DispatchEntry {
+        name: b"PSETEX",
+        handler: crate::string::psetex_command,
+    },
+    DispatchEntry {
+        name: b"GETEX",
+        handler: crate::string::getex_command,
+    },
+    DispatchEntry {
+        name: b"MSETEX",
+        handler: crate::string::msetex_command,
+    },
+    DispatchEntry {
+        name: b"DELIFEQ",
+        handler: crate::string::delifeq_command,
+    },
+    DispatchEntry {
+        name: b"INCRBYFLOAT",
+        handler: crate::string::incrbyfloat_command,
+    },
+    DispatchEntry {
+        name: b"LCS",
+        handler: crate::string::lcs_command,
+    },
     // ── LIST (Round 2) ─────────────────────────────────────────────────────
-    DispatchEntry { name: b"LPUSH", handler: crate::list::lpush_command },
-    DispatchEntry { name: b"RPUSH", handler: crate::list::rpush_command },
-    DispatchEntry { name: b"LPUSHX", handler: crate::list::lpushx_command },
-    DispatchEntry { name: b"RPUSHX", handler: crate::list::rpushx_command },
-    DispatchEntry { name: b"LPOP", handler: crate::list::lpop_command },
-    DispatchEntry { name: b"RPOP", handler: crate::list::rpop_command },
-    DispatchEntry { name: b"LLEN", handler: crate::list::llen_command },
-    DispatchEntry { name: b"LRANGE", handler: crate::list::lrange_command },
-    DispatchEntry { name: b"LINDEX", handler: crate::list::lindex_command },
-    DispatchEntry { name: b"LSET", handler: crate::list::lset_command },
-    DispatchEntry { name: b"LREM", handler: crate::list::lrem_command },
-    DispatchEntry { name: b"LTRIM", handler: crate::list::ltrim_command },
-    DispatchEntry { name: b"LINSERT", handler: crate::list::linsert_command },
-    DispatchEntry { name: b"LMOVE", handler: crate::list::lmove_command },
-    DispatchEntry { name: b"RPOPLPUSH", handler: crate::list::rpoplpush_command },
-    DispatchEntry { name: b"LPOS", handler: crate::list::lpos_command },
-    DispatchEntry { name: b"LMPOP", handler: crate::list::lmpop_command },
-    DispatchEntry { name: b"BLPOP", handler: crate::list::blpop_command },
-    DispatchEntry { name: b"BRPOP", handler: crate::list::brpop_command },
-    DispatchEntry { name: b"BLMOVE", handler: crate::list::blmove_command },
-    DispatchEntry { name: b"BRPOPLPUSH", handler: crate::list::brpoplpush_command },
-    DispatchEntry { name: b"BLMPOP", handler: crate::list::blmpop_command },
+    DispatchEntry {
+        name: b"LPUSH",
+        handler: crate::list::lpush_command,
+    },
+    DispatchEntry {
+        name: b"RPUSH",
+        handler: crate::list::rpush_command,
+    },
+    DispatchEntry {
+        name: b"LPUSHX",
+        handler: crate::list::lpushx_command,
+    },
+    DispatchEntry {
+        name: b"RPUSHX",
+        handler: crate::list::rpushx_command,
+    },
+    DispatchEntry {
+        name: b"LPOP",
+        handler: crate::list::lpop_command,
+    },
+    DispatchEntry {
+        name: b"RPOP",
+        handler: crate::list::rpop_command,
+    },
+    DispatchEntry {
+        name: b"LLEN",
+        handler: crate::list::llen_command,
+    },
+    DispatchEntry {
+        name: b"LRANGE",
+        handler: crate::list::lrange_command,
+    },
+    DispatchEntry {
+        name: b"LINDEX",
+        handler: crate::list::lindex_command,
+    },
+    DispatchEntry {
+        name: b"LSET",
+        handler: crate::list::lset_command,
+    },
+    DispatchEntry {
+        name: b"LREM",
+        handler: crate::list::lrem_command,
+    },
+    DispatchEntry {
+        name: b"LTRIM",
+        handler: crate::list::ltrim_command,
+    },
+    DispatchEntry {
+        name: b"LINSERT",
+        handler: crate::list::linsert_command,
+    },
+    DispatchEntry {
+        name: b"LMOVE",
+        handler: crate::list::lmove_command,
+    },
+    DispatchEntry {
+        name: b"RPOPLPUSH",
+        handler: crate::list::rpoplpush_command,
+    },
+    DispatchEntry {
+        name: b"LPOS",
+        handler: crate::list::lpos_command,
+    },
+    DispatchEntry {
+        name: b"LMPOP",
+        handler: crate::list::lmpop_command,
+    },
+    DispatchEntry {
+        name: b"BLPOP",
+        handler: crate::list::blpop_command,
+    },
+    DispatchEntry {
+        name: b"BRPOP",
+        handler: crate::list::brpop_command,
+    },
+    DispatchEntry {
+        name: b"BLMOVE",
+        handler: crate::list::blmove_command,
+    },
+    DispatchEntry {
+        name: b"BRPOPLPUSH",
+        handler: crate::list::brpoplpush_command,
+    },
+    DispatchEntry {
+        name: b"BLMPOP",
+        handler: crate::list::blmpop_command,
+    },
     // ── HASH (Round 3) ─────────────────────────────────────────────────────
-    DispatchEntry { name: b"HSET", handler: crate::hash::hset_command },
-    DispatchEntry { name: b"HSETNX", handler: crate::hash::hsetnx_command },
-    DispatchEntry { name: b"HGET", handler: crate::hash::hget_command },
-    DispatchEntry { name: b"HMGET", handler: crate::hash::hmget_command },
-    DispatchEntry { name: b"HMSET", handler: crate::hash::hmset_command },
-    DispatchEntry { name: b"HDEL", handler: crate::hash::hdel_command },
-    DispatchEntry { name: b"HEXISTS", handler: crate::hash::hexists_command },
-    DispatchEntry { name: b"HLEN", handler: crate::hash::hlen_command },
-    DispatchEntry { name: b"HSTRLEN", handler: crate::hash::hstrlen_command },
-    DispatchEntry { name: b"HGETALL", handler: crate::hash::hgetall_command },
-    DispatchEntry { name: b"HKEYS", handler: crate::hash::hkeys_command },
-    DispatchEntry { name: b"HVALS", handler: crate::hash::hvals_command },
-    DispatchEntry { name: b"HINCRBY", handler: crate::hash::hincrby_command },
-    DispatchEntry { name: b"HINCRBYFLOAT", handler: crate::hash::hincrbyfloat_command },
-    DispatchEntry { name: b"HRANDFIELD", handler: crate::hash::hrandfield_command },
+    DispatchEntry {
+        name: b"HSET",
+        handler: crate::hash::hset_command,
+    },
+    DispatchEntry {
+        name: b"HSETNX",
+        handler: crate::hash::hsetnx_command,
+    },
+    DispatchEntry {
+        name: b"HGET",
+        handler: crate::hash::hget_command,
+    },
+    DispatchEntry {
+        name: b"HMGET",
+        handler: crate::hash::hmget_command,
+    },
+    DispatchEntry {
+        name: b"HMSET",
+        handler: crate::hash::hmset_command,
+    },
+    DispatchEntry {
+        name: b"HDEL",
+        handler: crate::hash::hdel_command,
+    },
+    DispatchEntry {
+        name: b"HEXISTS",
+        handler: crate::hash::hexists_command,
+    },
+    DispatchEntry {
+        name: b"HLEN",
+        handler: crate::hash::hlen_command,
+    },
+    DispatchEntry {
+        name: b"HSTRLEN",
+        handler: crate::hash::hstrlen_command,
+    },
+    DispatchEntry {
+        name: b"HGETALL",
+        handler: crate::hash::hgetall_command,
+    },
+    DispatchEntry {
+        name: b"HKEYS",
+        handler: crate::hash::hkeys_command,
+    },
+    DispatchEntry {
+        name: b"HVALS",
+        handler: crate::hash::hvals_command,
+    },
+    DispatchEntry {
+        name: b"HINCRBY",
+        handler: crate::hash::hincrby_command,
+    },
+    DispatchEntry {
+        name: b"HINCRBYFLOAT",
+        handler: crate::hash::hincrbyfloat_command,
+    },
+    DispatchEntry {
+        name: b"HRANDFIELD",
+        handler: crate::hash::hrandfield_command,
+    },
     // ── SET (Round 4) ──────────────────────────────────────────────────────
-    DispatchEntry { name: b"SADD", handler: crate::set::sadd_command },
-    DispatchEntry { name: b"SREM", handler: crate::set::srem_command },
-    DispatchEntry { name: b"SMEMBERS", handler: crate::set::smembers_command },
-    DispatchEntry { name: b"SISMEMBER", handler: crate::set::sismember_command },
-    DispatchEntry { name: b"SMISMEMBER", handler: crate::set::smismember_command },
-    DispatchEntry { name: b"SCARD", handler: crate::set::scard_command },
-    DispatchEntry { name: b"SPOP", handler: crate::set::spop_command },
-    DispatchEntry { name: b"SRANDMEMBER", handler: crate::set::srandmember_command },
-    DispatchEntry { name: b"SMOVE", handler: crate::set::smove_command },
-    DispatchEntry { name: b"SINTER", handler: crate::set::sinter_command },
-    DispatchEntry { name: b"SINTERSTORE", handler: crate::set::sinterstore_command },
-    DispatchEntry { name: b"SINTERCARD", handler: crate::set::sintercard_command },
-    DispatchEntry { name: b"SUNION", handler: crate::set::sunion_command },
-    DispatchEntry { name: b"SUNIONSTORE", handler: crate::set::sunionstore_command },
-    DispatchEntry { name: b"SDIFF", handler: crate::set::sdiff_command },
-    DispatchEntry { name: b"SDIFFSTORE", handler: crate::set::sdiffstore_command },
+    DispatchEntry {
+        name: b"SADD",
+        handler: crate::set::sadd_command,
+    },
+    DispatchEntry {
+        name: b"SREM",
+        handler: crate::set::srem_command,
+    },
+    DispatchEntry {
+        name: b"SMEMBERS",
+        handler: crate::set::smembers_command,
+    },
+    DispatchEntry {
+        name: b"SISMEMBER",
+        handler: crate::set::sismember_command,
+    },
+    DispatchEntry {
+        name: b"SMISMEMBER",
+        handler: crate::set::smismember_command,
+    },
+    DispatchEntry {
+        name: b"SCARD",
+        handler: crate::set::scard_command,
+    },
+    DispatchEntry {
+        name: b"SPOP",
+        handler: crate::set::spop_command,
+    },
+    DispatchEntry {
+        name: b"SRANDMEMBER",
+        handler: crate::set::srandmember_command,
+    },
+    DispatchEntry {
+        name: b"SMOVE",
+        handler: crate::set::smove_command,
+    },
+    DispatchEntry {
+        name: b"SINTER",
+        handler: crate::set::sinter_command,
+    },
+    DispatchEntry {
+        name: b"SINTERSTORE",
+        handler: crate::set::sinterstore_command,
+    },
+    DispatchEntry {
+        name: b"SINTERCARD",
+        handler: crate::set::sintercard_command,
+    },
+    DispatchEntry {
+        name: b"SUNION",
+        handler: crate::set::sunion_command,
+    },
+    DispatchEntry {
+        name: b"SUNIONSTORE",
+        handler: crate::set::sunionstore_command,
+    },
+    DispatchEntry {
+        name: b"SDIFF",
+        handler: crate::set::sdiff_command,
+    },
+    DispatchEntry {
+        name: b"SDIFFSTORE",
+        handler: crate::set::sdiffstore_command,
+    },
     // ── TTL / EXPIRATION (Round 6) ─────────────────────────────────────────
-    DispatchEntry { name: b"EXPIRE", handler: redis_core::expire::expire_command },
-    DispatchEntry { name: b"PEXPIRE", handler: redis_core::expire::pexpire_command },
-    DispatchEntry { name: b"EXPIREAT", handler: redis_core::expire::expireat_command },
-    DispatchEntry { name: b"PEXPIREAT", handler: redis_core::expire::pexpireat_command },
-    DispatchEntry { name: b"PERSIST", handler: redis_core::expire::persist_command },
-    DispatchEntry { name: b"TTL", handler: redis_core::expire::ttl_command },
-    DispatchEntry { name: b"PTTL", handler: redis_core::expire::pttl_command },
-    DispatchEntry { name: b"EXPIRETIME", handler: redis_core::expire::expiretime_command },
-    DispatchEntry { name: b"PEXPIRETIME", handler: redis_core::expire::pexpiretime_command },
-    DispatchEntry { name: b"OBJECT", handler: redis_core::object::object_command },
+    DispatchEntry {
+        name: b"EXPIRE",
+        handler: redis_core::expire::expire_command,
+    },
+    DispatchEntry {
+        name: b"PEXPIRE",
+        handler: redis_core::expire::pexpire_command,
+    },
+    DispatchEntry {
+        name: b"EXPIREAT",
+        handler: redis_core::expire::expireat_command,
+    },
+    DispatchEntry {
+        name: b"PEXPIREAT",
+        handler: redis_core::expire::pexpireat_command,
+    },
+    DispatchEntry {
+        name: b"PERSIST",
+        handler: redis_core::expire::persist_command,
+    },
+    DispatchEntry {
+        name: b"TTL",
+        handler: redis_core::expire::ttl_command,
+    },
+    DispatchEntry {
+        name: b"PTTL",
+        handler: redis_core::expire::pttl_command,
+    },
+    DispatchEntry {
+        name: b"EXPIRETIME",
+        handler: redis_core::expire::expiretime_command,
+    },
+    DispatchEntry {
+        name: b"PEXPIRETIME",
+        handler: redis_core::expire::pexpiretime_command,
+    },
+    DispatchEntry {
+        name: b"OBJECT",
+        handler: redis_core::object::object_command,
+    },
     // ── ZSET (Round 5) ─────────────────────────────────────────────────────
-    DispatchEntry { name: b"ZADD", handler: crate::zset::zadd_command },
-    DispatchEntry { name: b"ZSCORE", handler: crate::zset::zscore_command },
-    DispatchEntry { name: b"ZMSCORE", handler: crate::zset::zmscore_command },
-    DispatchEntry { name: b"ZCARD", handler: crate::zset::zcard_command },
-    DispatchEntry { name: b"ZINCRBY", handler: crate::zset::zincrby_command },
-    DispatchEntry { name: b"ZRANGE", handler: crate::zset::zrange_command },
-    DispatchEntry { name: b"ZRANGEBYSCORE", handler: crate::zset::zrangebyscore_command },
-    DispatchEntry { name: b"ZREVRANGE", handler: crate::zset::zrevrange_command },
-    DispatchEntry { name: b"ZREVRANGEBYSCORE", handler: crate::zset::zrevrangebyscore_command },
-    DispatchEntry { name: b"ZRANK", handler: crate::zset::zrank_command },
-    DispatchEntry { name: b"ZREVRANK", handler: crate::zset::zrevrank_command },
-    DispatchEntry { name: b"ZREM", handler: crate::zset::zrem_command },
-    DispatchEntry { name: b"ZCOUNT", handler: crate::zset::zcount_command },
-    DispatchEntry { name: b"ZPOPMIN", handler: crate::zset::zpopmin_command },
-    DispatchEntry { name: b"ZPOPMAX", handler: crate::zset::zpopmax_command },
-    DispatchEntry { name: b"ZREMRANGEBYRANK", handler: crate::zset::zremrangebyrank_command },
-    DispatchEntry { name: b"ZREMRANGEBYSCORE", handler: crate::zset::zremrangebyscore_command },
+    DispatchEntry {
+        name: b"ZADD",
+        handler: crate::zset::zadd_command,
+    },
+    DispatchEntry {
+        name: b"ZSCORE",
+        handler: crate::zset::zscore_command,
+    },
+    DispatchEntry {
+        name: b"ZMSCORE",
+        handler: crate::zset::zmscore_command,
+    },
+    DispatchEntry {
+        name: b"ZCARD",
+        handler: crate::zset::zcard_command,
+    },
+    DispatchEntry {
+        name: b"ZINCRBY",
+        handler: crate::zset::zincrby_command,
+    },
+    DispatchEntry {
+        name: b"ZRANGE",
+        handler: crate::zset::zrange_command,
+    },
+    DispatchEntry {
+        name: b"ZRANGEBYSCORE",
+        handler: crate::zset::zrangebyscore_command,
+    },
+    DispatchEntry {
+        name: b"ZREVRANGE",
+        handler: crate::zset::zrevrange_command,
+    },
+    DispatchEntry {
+        name: b"ZREVRANGEBYSCORE",
+        handler: crate::zset::zrevrangebyscore_command,
+    },
+    DispatchEntry {
+        name: b"ZRANK",
+        handler: crate::zset::zrank_command,
+    },
+    DispatchEntry {
+        name: b"ZREVRANK",
+        handler: crate::zset::zrevrank_command,
+    },
+    DispatchEntry {
+        name: b"ZREM",
+        handler: crate::zset::zrem_command,
+    },
+    DispatchEntry {
+        name: b"ZCOUNT",
+        handler: crate::zset::zcount_command,
+    },
+    DispatchEntry {
+        name: b"ZPOPMIN",
+        handler: crate::zset::zpopmin_command,
+    },
+    DispatchEntry {
+        name: b"ZPOPMAX",
+        handler: crate::zset::zpopmax_command,
+    },
+    DispatchEntry {
+        name: b"ZREMRANGEBYRANK",
+        handler: crate::zset::zremrangebyrank_command,
+    },
+    DispatchEntry {
+        name: b"ZREMRANGEBYSCORE",
+        handler: crate::zset::zremrangebyscore_command,
+    },
     // ── SCAN + ZSET-EXTRAS (Round 7) ───────────────────────────────────────
-    DispatchEntry { name: b"SCAN", handler: redis_core::db::scan_command },
-    DispatchEntry { name: b"HSCAN", handler: crate::hash::hscan_command },
-    DispatchEntry { name: b"SSCAN", handler: crate::set::sscan_command },
-    DispatchEntry { name: b"ZSCAN", handler: crate::zset::zscan_command },
-    DispatchEntry { name: b"ZRANGEBYLEX", handler: crate::zset::zrangebylex_command },
-    DispatchEntry { name: b"ZREVRANGEBYLEX", handler: crate::zset::zrevrangebylex_command },
-    DispatchEntry { name: b"ZLEXCOUNT", handler: crate::zset::zlexcount_command },
-    DispatchEntry { name: b"ZREMRANGEBYLEX", handler: crate::zset::zremrangebylex_command },
-    DispatchEntry { name: b"ZUNIONSTORE", handler: crate::zset::zunionstore_command },
-    DispatchEntry { name: b"ZINTERSTORE", handler: crate::zset::zinterstore_command },
-    DispatchEntry { name: b"ZDIFFSTORE", handler: crate::zset::zdiffstore_command },
-    DispatchEntry { name: b"ZUNION", handler: crate::zset::zunion_command },
-    DispatchEntry { name: b"ZINTER", handler: crate::zset::zinter_command },
-    DispatchEntry { name: b"ZDIFF", handler: crate::zset::zdiff_command },
-    DispatchEntry { name: b"ZINTERCARD", handler: crate::zset::zintercard_command },
-    DispatchEntry { name: b"ZRANGESTORE", handler: crate::zset::zrangestore_command },
-    DispatchEntry { name: b"ZRANDMEMBER", handler: crate::zset::zrandmember_command },
-    DispatchEntry { name: b"ZMPOP", handler: crate::zset::zmpop_command },
-    DispatchEntry { name: b"BZPOPMIN", handler: crate::zset::bzpopmin_command },
-    DispatchEntry { name: b"BZPOPMAX", handler: crate::zset::bzpopmax_command },
-    DispatchEntry { name: b"BZMPOP", handler: crate::zset::bzmpop_command },
+    DispatchEntry {
+        name: b"SCAN",
+        handler: redis_core::db::scan_command,
+    },
+    DispatchEntry {
+        name: b"HSCAN",
+        handler: crate::hash::hscan_command,
+    },
+    DispatchEntry {
+        name: b"SSCAN",
+        handler: crate::set::sscan_command,
+    },
+    DispatchEntry {
+        name: b"ZSCAN",
+        handler: crate::zset::zscan_command,
+    },
+    DispatchEntry {
+        name: b"ZRANGEBYLEX",
+        handler: crate::zset::zrangebylex_command,
+    },
+    DispatchEntry {
+        name: b"ZREVRANGEBYLEX",
+        handler: crate::zset::zrevrangebylex_command,
+    },
+    DispatchEntry {
+        name: b"ZLEXCOUNT",
+        handler: crate::zset::zlexcount_command,
+    },
+    DispatchEntry {
+        name: b"ZREMRANGEBYLEX",
+        handler: crate::zset::zremrangebylex_command,
+    },
+    DispatchEntry {
+        name: b"ZUNIONSTORE",
+        handler: crate::zset::zunionstore_command,
+    },
+    DispatchEntry {
+        name: b"ZINTERSTORE",
+        handler: crate::zset::zinterstore_command,
+    },
+    DispatchEntry {
+        name: b"ZDIFFSTORE",
+        handler: crate::zset::zdiffstore_command,
+    },
+    DispatchEntry {
+        name: b"ZUNION",
+        handler: crate::zset::zunion_command,
+    },
+    DispatchEntry {
+        name: b"ZINTER",
+        handler: crate::zset::zinter_command,
+    },
+    DispatchEntry {
+        name: b"ZDIFF",
+        handler: crate::zset::zdiff_command,
+    },
+    DispatchEntry {
+        name: b"ZINTERCARD",
+        handler: crate::zset::zintercard_command,
+    },
+    DispatchEntry {
+        name: b"ZRANGESTORE",
+        handler: crate::zset::zrangestore_command,
+    },
+    DispatchEntry {
+        name: b"ZRANDMEMBER",
+        handler: crate::zset::zrandmember_command,
+    },
+    DispatchEntry {
+        name: b"ZMPOP",
+        handler: crate::zset::zmpop_command,
+    },
+    DispatchEntry {
+        name: b"BZPOPMIN",
+        handler: crate::zset::bzpopmin_command,
+    },
+    DispatchEntry {
+        name: b"BZPOPMAX",
+        handler: crate::zset::bzpopmax_command,
+    },
+    DispatchEntry {
+        name: b"BZMPOP",
+        handler: crate::zset::bzmpop_command,
+    },
     // ── BITMAP (Round 8c) ──────────────────────────────────────────────────
-    DispatchEntry { name: b"SETBIT", handler: crate::bitops::setbit_command },
-    DispatchEntry { name: b"GETBIT", handler: crate::bitops::getbit_command },
-    DispatchEntry { name: b"BITCOUNT", handler: crate::bitops::bitcount_command },
-    DispatchEntry { name: b"BITPOS", handler: crate::bitops::bitpos_command },
-    DispatchEntry { name: b"BITOP", handler: crate::bitops::bitop_command },
-    DispatchEntry { name: b"BITFIELD", handler: crate::bitops::bitfield_command },
-    DispatchEntry { name: b"BITFIELD_RO", handler: crate::bitops::bitfield_ro_command },
+    DispatchEntry {
+        name: b"SETBIT",
+        handler: crate::bitops::setbit_command,
+    },
+    DispatchEntry {
+        name: b"GETBIT",
+        handler: crate::bitops::getbit_command,
+    },
+    DispatchEntry {
+        name: b"BITCOUNT",
+        handler: crate::bitops::bitcount_command,
+    },
+    DispatchEntry {
+        name: b"BITPOS",
+        handler: crate::bitops::bitpos_command,
+    },
+    DispatchEntry {
+        name: b"BITOP",
+        handler: crate::bitops::bitop_command,
+    },
+    DispatchEntry {
+        name: b"BITFIELD",
+        handler: crate::bitops::bitfield_command,
+    },
+    DispatchEntry {
+        name: b"BITFIELD_RO",
+        handler: crate::bitops::bitfield_ro_command,
+    },
     // ── TRANSACTIONS (Round 8b) ────────────────────────────────────────────
-    DispatchEntry { name: b"MULTI", handler: crate::multi::multi_command },
-    DispatchEntry { name: b"EXEC", handler: crate::multi::exec_command },
-    DispatchEntry { name: b"DISCARD", handler: crate::multi::discard_command },
-    DispatchEntry { name: b"WATCH", handler: crate::multi::watch_command },
-    DispatchEntry { name: b"UNWATCH", handler: crate::multi::unwatch_command },
+    DispatchEntry {
+        name: b"MULTI",
+        handler: crate::multi::multi_command,
+    },
+    DispatchEntry {
+        name: b"EXEC",
+        handler: crate::multi::exec_command,
+    },
+    DispatchEntry {
+        name: b"DISCARD",
+        handler: crate::multi::discard_command,
+    },
+    DispatchEntry {
+        name: b"WATCH",
+        handler: crate::multi::watch_command,
+    },
+    DispatchEntry {
+        name: b"UNWATCH",
+        handler: crate::multi::unwatch_command,
+    },
     // ── TCL HARNESS STUBS (Round 9) ────────────────────────────────────────
-    DispatchEntry { name: b"FUNCTION", handler: crate::connection::function_command },
-    DispatchEntry { name: b"CONFIG", handler: crate::connection::config_command },
-    DispatchEntry { name: b"MEMORY", handler: crate::connection::memory_command },
+    DispatchEntry {
+        name: b"FUNCTION",
+        handler: crate::connection::function_command,
+    },
+    DispatchEntry {
+        name: b"FCALL",
+        handler: crate::eval::fcall_command,
+    },
+    DispatchEntry {
+        name: b"FCALL_RO",
+        handler: crate::eval::fcall_ro_command,
+    },
+    DispatchEntry {
+        name: b"CONFIG",
+        handler: crate::connection::config_command,
+    },
+    DispatchEntry {
+        name: b"MEMORY",
+        handler: crate::connection::memory_command,
+    },
     // ── PUB/SUB (Round 8a) ─────────────────────────────────────────────────
-    DispatchEntry { name: b"SUBSCRIBE", handler: crate::pubsub::subscribe_command },
-    DispatchEntry { name: b"UNSUBSCRIBE", handler: crate::pubsub::unsubscribe_command },
-    DispatchEntry { name: b"PSUBSCRIBE", handler: crate::pubsub::psubscribe_command },
-    DispatchEntry { name: b"PUNSUBSCRIBE", handler: crate::pubsub::punsubscribe_command },
-    DispatchEntry { name: b"PUBLISH", handler: crate::pubsub::publish_command },
-    DispatchEntry { name: b"PUBSUB", handler: crate::pubsub::pubsub_command },
+    DispatchEntry {
+        name: b"SUBSCRIBE",
+        handler: crate::pubsub::subscribe_command,
+    },
+    DispatchEntry {
+        name: b"UNSUBSCRIBE",
+        handler: crate::pubsub::unsubscribe_command,
+    },
+    DispatchEntry {
+        name: b"PSUBSCRIBE",
+        handler: crate::pubsub::psubscribe_command,
+    },
+    DispatchEntry {
+        name: b"PUNSUBSCRIBE",
+        handler: crate::pubsub::punsubscribe_command,
+    },
+    DispatchEntry {
+        name: b"PUBLISH",
+        handler: crate::pubsub::publish_command,
+    },
+    DispatchEntry {
+        name: b"PUBSUB",
+        handler: crate::pubsub::pubsub_command,
+    },
     // ── HYPERLOGLOG (Round 9 HLL) ──────────────────────────────────────────
-    DispatchEntry { name: b"PFADD", handler: crate::hyperloglog::pfadd_command },
-    DispatchEntry { name: b"PFCOUNT", handler: crate::hyperloglog::pfcount_command },
-    DispatchEntry { name: b"PFDEBUG", handler: crate::hyperloglog::pfdebug_command },
-    DispatchEntry { name: b"PFMERGE", handler: crate::hyperloglog::pfmerge_command },
+    DispatchEntry {
+        name: b"PFADD",
+        handler: crate::hyperloglog::pfadd_command,
+    },
+    DispatchEntry {
+        name: b"PFCOUNT",
+        handler: crate::hyperloglog::pfcount_command,
+    },
+    DispatchEntry {
+        name: b"PFDEBUG",
+        handler: crate::hyperloglog::pfdebug_command,
+    },
+    DispatchEntry {
+        name: b"PFMERGE",
+        handler: crate::hyperloglog::pfmerge_command,
+    },
+    DispatchEntry {
+        name: b"PFSELFTEST",
+        handler: crate::hyperloglog::pfselftest_command,
+    },
     // ── SORT (TCL frontier) ───────────────────────────────────────────────
-    DispatchEntry { name: b"SORT", handler: crate::sort::sort_command },
-    DispatchEntry { name: b"SORT_RO", handler: crate::sort::sort_ro_command },
+    DispatchEntry {
+        name: b"SORT",
+        handler: crate::sort::sort_command,
+    },
+    DispatchEntry {
+        name: b"SORT_RO",
+        handler: crate::sort::sort_ro_command,
+    },
     // ── INTROSPECTION (Round 9 INFO/CONFIG) ────────────────────────────────
-    DispatchEntry { name: b"INFO", handler: crate::info::info_command },
-    DispatchEntry { name: b"LASTSAVE", handler: crate::info::lastsave_command },
+    DispatchEntry {
+        name: b"INFO",
+        handler: crate::info::info_command,
+    },
+    DispatchEntry {
+        name: b"LASTSAVE",
+        handler: crate::info::lastsave_command,
+    },
     // ── STREAMS (Round 9) ──────────────────────────────────────────────────
-    DispatchEntry { name: b"XADD", handler: crate::stream::xadd_command },
-    DispatchEntry { name: b"XLEN", handler: crate::stream::xlen_command },
-    DispatchEntry { name: b"XRANGE", handler: crate::stream::xrange_command },
-    DispatchEntry { name: b"XREVRANGE", handler: crate::stream::xrevrange_command },
-    DispatchEntry { name: b"XDEL", handler: crate::stream::xdel_command },
-    DispatchEntry { name: b"XTRIM", handler: crate::stream::xtrim_command },
-    DispatchEntry { name: b"XREAD", handler: crate::stream::xread_command },
-    DispatchEntry { name: b"XINFO", handler: crate::stream::xinfo_command },
+    DispatchEntry {
+        name: b"XADD",
+        handler: crate::stream::xadd_command,
+    },
+    DispatchEntry {
+        name: b"XLEN",
+        handler: crate::stream::xlen_command,
+    },
+    DispatchEntry {
+        name: b"XRANGE",
+        handler: crate::stream::xrange_command,
+    },
+    DispatchEntry {
+        name: b"XREVRANGE",
+        handler: crate::stream::xrevrange_command,
+    },
+    DispatchEntry {
+        name: b"XDEL",
+        handler: crate::stream::xdel_command,
+    },
+    DispatchEntry {
+        name: b"XTRIM",
+        handler: crate::stream::xtrim_command,
+    },
+    DispatchEntry {
+        name: b"XREAD",
+        handler: crate::stream::xread_command,
+    },
+    DispatchEntry {
+        name: b"XINFO",
+        handler: crate::stream::xinfo_command,
+    },
     // ── STREAM CONSUMER GROUPS (Round 13c) ─────────────────────────────────
-    DispatchEntry { name: b"XGROUP", handler: crate::stream::xgroup_command },
-    DispatchEntry { name: b"XREADGROUP", handler: crate::stream::xreadgroup_command },
-    DispatchEntry { name: b"XACK", handler: crate::stream::xack_command },
-    DispatchEntry { name: b"XPENDING", handler: crate::stream::xpending_command },
-    DispatchEntry { name: b"XCLAIM", handler: crate::stream::xclaim_command },
-    DispatchEntry { name: b"XAUTOCLAIM", handler: crate::stream::xautoclaim_command },
-    DispatchEntry { name: b"XSETID", handler: crate::stream::xsetid_command },
+    DispatchEntry {
+        name: b"XGROUP",
+        handler: crate::stream::xgroup_command,
+    },
+    DispatchEntry {
+        name: b"XREADGROUP",
+        handler: crate::stream::xreadgroup_command,
+    },
+    DispatchEntry {
+        name: b"XACK",
+        handler: crate::stream::xack_command,
+    },
+    DispatchEntry {
+        name: b"XPENDING",
+        handler: crate::stream::xpending_command,
+    },
+    DispatchEntry {
+        name: b"XCLAIM",
+        handler: crate::stream::xclaim_command,
+    },
+    DispatchEntry {
+        name: b"XAUTOCLAIM",
+        handler: crate::stream::xautoclaim_command,
+    },
+    DispatchEntry {
+        name: b"XSETID",
+        handler: crate::stream::xsetid_command,
+    },
     // ── SLOWLOG / LATENCY (OV-2) ───────────────────────────────────────────────
-    DispatchEntry { name: b"SLOWLOG", handler: crate::slowlog_cmd::slowlog_command },
-    DispatchEntry { name: b"LATENCY", handler: crate::slowlog_cmd::latency_command },
+    DispatchEntry {
+        name: b"SLOWLOG",
+        handler: crate::slowlog_cmd::slowlog_command,
+    },
+    DispatchEntry {
+        name: b"LATENCY",
+        handler: crate::slowlog_cmd::latency_command,
+    },
     // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
-    DispatchEntry { name: b"DUMP", handler: crate::persist::dump_command },
-    DispatchEntry { name: b"RESTORE", handler: crate::persist::restore_command },
-    DispatchEntry { name: b"RESTORE-ASKING", handler: crate::persist::restore_asking_command },
-    DispatchEntry { name: b"SAVE", handler: crate::persist::save_command },
-    DispatchEntry { name: b"BGSAVE", handler: crate::persist::bgsave_command },
-    DispatchEntry { name: b"BGREWRITEAOF", handler: crate::persist::bgrewriteaof_command },
+    DispatchEntry {
+        name: b"DUMP",
+        handler: crate::persist::dump_command,
+    },
+    DispatchEntry {
+        name: b"RESTORE",
+        handler: crate::persist::restore_command,
+    },
+    DispatchEntry {
+        name: b"RESTORE-ASKING",
+        handler: crate::persist::restore_asking_command,
+    },
+    DispatchEntry {
+        name: b"SAVE",
+        handler: crate::persist::save_command,
+    },
+    DispatchEntry {
+        name: b"BGSAVE",
+        handler: crate::persist::bgsave_command,
+    },
+    DispatchEntry {
+        name: b"BGREWRITEAOF",
+        handler: crate::persist::bgrewriteaof_command,
+    },
     // ── GEO (Session 1B) ───────────────────────────────────────────────────
-    DispatchEntry { name: b"GEOADD", handler: crate::geo::geoadd_command },
-    DispatchEntry { name: b"GEODIST", handler: crate::geo::geodist_command },
-    DispatchEntry { name: b"GEOHASH", handler: crate::geo::geohash_command },
-    DispatchEntry { name: b"GEOPOS", handler: crate::geo::geopos_command },
-    DispatchEntry { name: b"GEOSEARCH", handler: crate::geo::geosearch_command },
-    DispatchEntry { name: b"GEOSEARCHSTORE", handler: crate::geo::geosearchstore_command },
-    DispatchEntry { name: b"GEORADIUS", handler: crate::geo::georadius_command },
-    DispatchEntry { name: b"GEORADIUSBYMEMBER", handler: crate::geo::georadiusbymember_command },
-    DispatchEntry { name: b"GEORADIUS_RO", handler: crate::geo::georadiusro_command },
-    DispatchEntry { name: b"GEORADIUSBYMEMBER_RO", handler: crate::geo::georadiusbymemberro_command },
+    DispatchEntry {
+        name: b"GEOADD",
+        handler: crate::geo::geoadd_command,
+    },
+    DispatchEntry {
+        name: b"GEODIST",
+        handler: crate::geo::geodist_command,
+    },
+    DispatchEntry {
+        name: b"GEOHASH",
+        handler: crate::geo::geohash_command,
+    },
+    DispatchEntry {
+        name: b"GEOPOS",
+        handler: crate::geo::geopos_command,
+    },
+    DispatchEntry {
+        name: b"GEOSEARCH",
+        handler: crate::geo::geosearch_command,
+    },
+    DispatchEntry {
+        name: b"GEOSEARCHSTORE",
+        handler: crate::geo::geosearchstore_command,
+    },
+    DispatchEntry {
+        name: b"GEORADIUS",
+        handler: crate::geo::georadius_command,
+    },
+    DispatchEntry {
+        name: b"GEORADIUSBYMEMBER",
+        handler: crate::geo::georadiusbymember_command,
+    },
+    DispatchEntry {
+        name: b"GEORADIUS_RO",
+        handler: crate::geo::georadiusro_command,
+    },
+    DispatchEntry {
+        name: b"GEORADIUSBYMEMBER_RO",
+        handler: crate::geo::georadiusbymemberro_command,
+    },
     // ── EVAL / SCRIPTING (Session 1A) ──────────────────────────────────────
-    DispatchEntry { name: b"EVAL", handler: crate::eval::eval_command },
-    DispatchEntry { name: b"EVALSHA", handler: crate::eval::evalsha_command },
-    DispatchEntry { name: b"SCRIPT", handler: crate::eval::script_command },
+    DispatchEntry {
+        name: b"EVAL",
+        handler: crate::eval::eval_command,
+    },
+    DispatchEntry {
+        name: b"EVALSHA",
+        handler: crate::eval::evalsha_command,
+    },
+    DispatchEntry {
+        name: b"SCRIPT",
+        handler: crate::eval::script_command,
+    },
     // ── REPLICATION (Session 3A / 3B) ─────────────────────────────────────
-    DispatchEntry { name: b"REPLICAOF", handler: crate::replication::replicaof_command },
-    DispatchEntry { name: b"SLAVEOF", handler: crate::replication::replicaof_command },
-    DispatchEntry { name: b"PSYNC", handler: crate::replication::psync_command },
-    DispatchEntry { name: b"SYNC", handler: crate::replication::sync_command },
-    DispatchEntry { name: b"REPLCONF", handler: crate::replication::replconf_command },
-    DispatchEntry { name: b"WAIT", handler: crate::replication::wait_command },
+    DispatchEntry {
+        name: b"REPLICAOF",
+        handler: crate::replication::replicaof_command,
+    },
+    DispatchEntry {
+        name: b"SLAVEOF",
+        handler: crate::replication::replicaof_command,
+    },
+    DispatchEntry {
+        name: b"PSYNC",
+        handler: crate::replication::psync_command,
+    },
+    DispatchEntry {
+        name: b"SYNC",
+        handler: crate::replication::sync_command,
+    },
+    DispatchEntry {
+        name: b"REPLCONF",
+        handler: crate::replication::replconf_command,
+    },
+    DispatchEntry {
+        name: b"WAIT",
+        handler: crate::replication::wait_command,
+    },
     // ── BLOOM FILTER (RedisBloom BF.* — overnight agent) ──────────────────
-    DispatchEntry { name: b"BF.RESERVE", handler: crate::bloom::bf_reserve_command },
-    DispatchEntry { name: b"BF.ADD",     handler: crate::bloom::bf_add_command },
-    DispatchEntry { name: b"BF.MADD",    handler: crate::bloom::bf_madd_command },
-    DispatchEntry { name: b"BF.EXISTS",  handler: crate::bloom::bf_exists_command },
-    DispatchEntry { name: b"BF.MEXISTS", handler: crate::bloom::bf_mexists_command },
-    DispatchEntry { name: b"BF.INSERT",  handler: crate::bloom::bf_insert_command },
-    DispatchEntry { name: b"BF.INFO",    handler: crate::bloom::bf_info_command },
+    DispatchEntry {
+        name: b"BF.RESERVE",
+        handler: crate::bloom::bf_reserve_command,
+    },
+    DispatchEntry {
+        name: b"BF.ADD",
+        handler: crate::bloom::bf_add_command,
+    },
+    DispatchEntry {
+        name: b"BF.MADD",
+        handler: crate::bloom::bf_madd_command,
+    },
+    DispatchEntry {
+        name: b"BF.EXISTS",
+        handler: crate::bloom::bf_exists_command,
+    },
+    DispatchEntry {
+        name: b"BF.MEXISTS",
+        handler: crate::bloom::bf_mexists_command,
+    },
+    DispatchEntry {
+        name: b"BF.INSERT",
+        handler: crate::bloom::bf_insert_command,
+    },
+    DispatchEntry {
+        name: b"BF.INFO",
+        handler: crate::bloom::bf_info_command,
+    },
     // ── RedisJSON (Overnight 1) ────────────────────────────────────────────
-    DispatchEntry { name: b"JSON.SET",       handler: crate::json::json_set_command },
-    DispatchEntry { name: b"JSON.GET",       handler: crate::json::json_get_command },
-    DispatchEntry { name: b"JSON.DEL",       handler: crate::json::json_del_command },
-    DispatchEntry { name: b"JSON.FORGET",    handler: crate::json::json_del_command },
-    DispatchEntry { name: b"JSON.TYPE",      handler: crate::json::json_type_command },
-    DispatchEntry { name: b"JSON.NUMINCRBY", handler: crate::json::json_numincrby_command },
-    DispatchEntry { name: b"JSON.NUMMULTBY", handler: crate::json::json_nummultby_command },
-    DispatchEntry { name: b"JSON.STRAPPEND", handler: crate::json::json_strappend_command },
-    DispatchEntry { name: b"JSON.STRLEN",    handler: crate::json::json_strlen_command },
-    DispatchEntry { name: b"JSON.OBJKEYS",   handler: crate::json::json_objkeys_command },
-    DispatchEntry { name: b"JSON.OBJLEN",    handler: crate::json::json_objlen_command },
-    DispatchEntry { name: b"JSON.ARRAPPEND", handler: crate::json::json_arrappend_command },
-    DispatchEntry { name: b"JSON.ARRLEN",    handler: crate::json::json_arrlen_command },
-    DispatchEntry { name: b"JSON.ARRINSERT", handler: crate::json::json_arrinsert_command },
-    DispatchEntry { name: b"JSON.ARRPOP",    handler: crate::json::json_arrpop_command },
-    DispatchEntry { name: b"JSON.CLEAR",     handler: crate::json::json_clear_command },
-    DispatchEntry { name: b"JSON.MGET",      handler: crate::json::json_mget_command },
+    DispatchEntry {
+        name: b"JSON.SET",
+        handler: crate::json::json_set_command,
+    },
+    DispatchEntry {
+        name: b"JSON.GET",
+        handler: crate::json::json_get_command,
+    },
+    DispatchEntry {
+        name: b"JSON.DEL",
+        handler: crate::json::json_del_command,
+    },
+    DispatchEntry {
+        name: b"JSON.FORGET",
+        handler: crate::json::json_del_command,
+    },
+    DispatchEntry {
+        name: b"JSON.TYPE",
+        handler: crate::json::json_type_command,
+    },
+    DispatchEntry {
+        name: b"JSON.NUMINCRBY",
+        handler: crate::json::json_numincrby_command,
+    },
+    DispatchEntry {
+        name: b"JSON.NUMMULTBY",
+        handler: crate::json::json_nummultby_command,
+    },
+    DispatchEntry {
+        name: b"JSON.STRAPPEND",
+        handler: crate::json::json_strappend_command,
+    },
+    DispatchEntry {
+        name: b"JSON.STRLEN",
+        handler: crate::json::json_strlen_command,
+    },
+    DispatchEntry {
+        name: b"JSON.OBJKEYS",
+        handler: crate::json::json_objkeys_command,
+    },
+    DispatchEntry {
+        name: b"JSON.OBJLEN",
+        handler: crate::json::json_objlen_command,
+    },
+    DispatchEntry {
+        name: b"JSON.ARRAPPEND",
+        handler: crate::json::json_arrappend_command,
+    },
+    DispatchEntry {
+        name: b"JSON.ARRLEN",
+        handler: crate::json::json_arrlen_command,
+    },
+    DispatchEntry {
+        name: b"JSON.ARRINSERT",
+        handler: crate::json::json_arrinsert_command,
+    },
+    DispatchEntry {
+        name: b"JSON.ARRPOP",
+        handler: crate::json::json_arrpop_command,
+    },
+    DispatchEntry {
+        name: b"JSON.CLEAR",
+        handler: crate::json::json_clear_command,
+    },
+    DispatchEntry {
+        name: b"JSON.MGET",
+        handler: crate::json::json_mget_command,
+    },
 ];
 
 #[cfg(test)]
@@ -961,8 +1741,7 @@ mod tests {
         let table = command_metadata_table();
         for pair in table.windows(2) {
             assert!(
-                ascii_casecmp(pair[0].0, pair[1].0)
-                    != Ordering::Greater,
+                ascii_casecmp(pair[0].0, pair[1].0) != Ordering::Greater,
                 "{} should sort before {}",
                 std::str::from_utf8(pair[0].0).unwrap_or("<bytes>"),
                 std::str::from_utf8(pair[1].0).unwrap_or("<bytes>")

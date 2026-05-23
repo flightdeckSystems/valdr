@@ -16,14 +16,25 @@ The post-DUMP frontier survey established a focused 10-file baseline:
 
 The HLL and SORT packets then changed the frontier:
 
-- `unit/hyperloglog` now reaches a summary at **23 pass / 3 fail**. The
-  remaining failures are `PFSELFTEST` and live `hll-sparse-max-bytes`
-  sparse-to-dense behavior.
-- `unit/sort` now reaches real SORT execution and aborts on connection metadata:
-  `COMMAND GETKEYS` for SORT/SORT_RO plus the legacy
-  `list-max-ziplist-size` CONFIG alias.
-- `unit/slowlog` and `unit/scripting` remain true subsystem frontiers, with a
-  shared dependency on minimal `FUNCTION LOAD` / `FCALL`.
+- `unit/hyperloglog` now reaches a summary at **26 pass / 0 fail** after
+  `PFSELFTEST` and live `hll-sparse-max-bytes` sparse-to-dense behavior were
+  wired through the existing HLL representation and live config path. Evidence:
+  `harness/oracle/results/tcl-survey/20260523T143708Z/unit__hyperloglog.json`.
+- `unit/sort` now reaches a counted summary at **49 pass / 5 fail** after
+  `COMMAND GETKEYS` for SORT/SORT_RO and the legacy `list-max-ziplist-size`
+  CONFIG alias were wired through normal metadata paths. Evidence:
+  `harness/oracle/results/tcl-survey/20260523T141126Z/unit__sort.json`.
+  Remaining failures are list encoding, script SORT nosort behavior, and
+  bad-double error text.
+- `unit/slowlog` now reaches a counted summary at **13 pass / 0 fail** after
+  the minimal `FUNCTION LOAD` / `FCALL` bridge was added on top of the existing
+  Lua runtime and normal dispatcher. Evidence:
+  `harness/oracle/results/tcl-survey/20260523T154121Z/unit__slowlog.json`.
+- `unit/scripting` now advances through the function-mode setup and remains a
+  true scripting frontier. The focused survey still aborts before Test Summary
+  at missing `WAITAOF`, with earlier failures in multi-bulk Lua conversion,
+  caller DB preservation around `SELECT`, and `WAIT` behavior. Evidence:
+  `harness/oracle/results/tcl-survey/20260523T154121Z/unit__scripting.json`.
 
 The earlier packet graph made a correct local decision but a bad run-level
 decision: it serialized `slowlog` and `functions` behind the old `sort` packet.

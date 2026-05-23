@@ -32,6 +32,10 @@ Packet: **`{{PACKET_ID}}`**
 - Preserve the drop-in Valkey envelope. Do not special-case benchmark commands or bypass the normal command dispatch path to improve a scoreboard.
 - Do not edit pinned reference source. Do not weaken the oracle.
 - Do not silently grow public claims. New capabilities require typed evidence.
+- Do not write `harness/evidence/ledger.jsonl`.
+- Do not write or overwrite the driver-allocated evidence path. It is reserved
+  for `record-completion.py`. Put proof in your final response and generated
+  runner output only; the harness will turn that into authoritative evidence.
 - Do not invent duplicate canonical types or APIs. Use the vocabulary files; escalate cross-cutting questions with `TODO(architect):`.
 - Keep changes scoped to the packet target files. If the packet needs another file, make the smallest typed-artifact edit that explains why.
 - Do not run workspace-wide `cargo fmt`. Use `cargo fmt --check` or format only the packet target files; broad formatting churn is a failed packet.
