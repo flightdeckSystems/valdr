@@ -1,0 +1,8 @@
+[class: byte_exact]
+[description: DUMP payload bytes and nil response for missing keys]
+[suite: smoke,persistence,dump]
+
+FLUSHDB
+SET dump:string bar
+DUMP dump:string
+DUMP dump:missing

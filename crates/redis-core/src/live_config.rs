@@ -168,6 +168,9 @@ pub struct LiveConfig {
     /// (`repl-diskless-sync`). Default `true`. No-op until Wave B wires the
     /// actual snapshot transfer.
     pub repl_diskless_sync: AtomicBool,
+    /// Accept future DUMP/RESTORE payload RDB versions
+    /// (`rdb-version-check relaxed`). Default strict.
+    pub rdb_version_check_relaxed: AtomicBool,
 }
 
 /// Default `maxclients` (matches upstream server.c).
@@ -289,6 +292,7 @@ impl Default for LiveConfig {
             repl_disable_tcp_nodelay: AtomicBool::new(false),
             slave_read_only: AtomicBool::new(true),
             repl_diskless_sync: AtomicBool::new(true),
+            rdb_version_check_relaxed: AtomicBool::new(false),
         }
     }
 }
@@ -396,8 +400,7 @@ impl LiveConfig {
 
     pub fn set_active_expire_effort(&self, effort: u8) {
         let clamped = effort.min(10);
-        self.active_expire_effort
-            .store(clamped, Ordering::Relaxed);
+        self.active_expire_effort.store(clamped, Ordering::Relaxed);
     }
 
     pub fn hz(&self) -> u32 {
@@ -690,6 +693,17 @@ impl LiveConfig {
     /// Update the repl-diskless-sync flag.
     pub fn set_repl_diskless_sync(&self, v: bool) {
         self.repl_diskless_sync.store(v, Ordering::Relaxed);
+    }
+
+    /// Whether RESTORE accepts future DUMP payload RDB versions.
+    pub fn rdb_version_check_relaxed(&self) -> bool {
+        self.rdb_version_check_relaxed.load(Ordering::Relaxed)
+    }
+
+    /// Update `rdb-version-check`: false = strict, true = relaxed.
+    pub fn set_rdb_version_check_relaxed(&self, relaxed: bool) {
+        self.rdb_version_check_relaxed
+            .store(relaxed, Ordering::Relaxed);
     }
 
     /// Snapshot of encoding thresholds — convenience for the encoding

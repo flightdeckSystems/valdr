@@ -10,7 +10,7 @@
 //!
 //! The CRC64 trailer is verified when present and non-zero.
 
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +29,7 @@ use super::header::{
     RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET,
     RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
     RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-    RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
+    RDB_DUMP_VERSION, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, RDB_VERSION,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
@@ -112,7 +112,10 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
     raw.read_to_end(&mut body)?;
 
     if body.len() < 9 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "RDB file too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "RDB file too short",
+        ));
     }
 
     let stored_crc = u64::from_le_bytes(
@@ -190,7 +193,9 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
                 read_byte(&mut reader)?;
             }
 
-            RDB_OPCODE_MODULE_AUX | RDB_OPCODE_FUNCTION2 | RDB_OPCODE_SLOT_INFO
+            RDB_OPCODE_MODULE_AUX
+            | RDB_OPCODE_FUNCTION2
+            | RDB_OPCODE_SLOT_INFO
             | RDB_OPCODE_SLOT_IMPORT => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -202,7 +207,7 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
 
             type_byte => {
                 let key_bytes = read_rdb_string(&mut reader)?;
-                let mut obj = load_value(&mut reader, type_byte)?;
+                let mut obj = load_value_payload(&mut reader, type_byte)?;
 
                 let expire = pending_expire;
                 pending_expire = EXPIRY_NONE;
@@ -232,7 +237,10 @@ pub fn load_into_dbs(dbs: &mut [RedisDb], path: &Path) -> io::Result<String> {
 /// `RDB_TYPE_HASH_ZIPLIST`, `RDB_TYPE_HASH_LISTPACK`, and `RDB_TYPE_HASH_2`
 /// return a graceful error so the caller can decide whether to skip or abort.
 /// Unknown type bytes are rejected with an unsupported error.
-fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object::RedisObject> {
+pub fn load_value_payload(
+    reader: &mut impl Read,
+    type_byte: u8,
+) -> io::Result<crate::object::RedisObject> {
     match type_byte {
         RDB_TYPE_STRING => load_string_object(reader),
         RDB_TYPE_HASH => load_hash_object(reader),
@@ -285,6 +293,65 @@ fn load_value(reader: &mut impl Read, type_byte: u8) -> io::Result<crate::object
             format!("RDB type 0x{:02x} not yet handled (Round 23+)", type_byte),
         )),
     }
+}
+
+/// Verify a `DUMP` payload footer and return the embedded RDB version.
+///
+/// Layout: `<type byte><object payload><u16 RDB version LE><u64 CRC64 LE>`.
+/// Strict mode rejects future versions other than Valkey's current no-magic
+/// DUMP version; relaxed mode accepts them, matching
+/// `CONFIG SET rdb-version-check relaxed`.
+pub fn verify_dump_payload(bytes: &[u8], relaxed_version: bool) -> io::Result<u16> {
+    if bytes.len() < 10 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DUMP payload too short",
+        ));
+    }
+
+    let footer = bytes.len() - 10;
+    let version = u16::from_le_bytes([bytes[footer], bytes[footer + 1]]);
+    let accepted_strict = version <= RDB_VERSION || version == RDB_DUMP_VERSION;
+    if version < 1 || (!relaxed_version && !accepted_strict) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DUMP payload RDB version rejected",
+        ));
+    }
+
+    let stored_crc = u64::from_le_bytes(
+        bytes[bytes.len() - 8..]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot read DUMP CRC"))?,
+    );
+    let computed_crc = crc64(0, &bytes[..bytes.len() - 8]);
+    if stored_crc != computed_crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DUMP payload CRC mismatch",
+        ));
+    }
+
+    Ok(version)
+}
+
+/// Deserialize a verified `DUMP` payload into a Redis object.
+pub fn load_dump_payload(
+    bytes: &[u8],
+    relaxed_version: bool,
+) -> io::Result<crate::object::RedisObject> {
+    verify_dump_payload(bytes, relaxed_version)?;
+    let body = &bytes[..bytes.len() - 10];
+    let mut reader = Cursor::new(body);
+    let type_byte = read_byte(&mut reader)?;
+    let obj = load_value_payload(&mut reader, type_byte)?;
+    if reader.position() != body.len() as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "trailing bytes in DUMP payload",
+        ));
+    }
+    Ok(obj)
 }
 
 /// Deserialize a `ObjectKind::Json` value from a length-prefixed UTF-8 JSON string.

@@ -27,13 +27,39 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::client::ClientId;
-use redis_core::db::RedisDb;
-use redis_core::rdb::{rdb_path, save_rdb_databases};
+use redis_core::db::{RedisDb, LOOKUP_NOTOUCH};
+use redis_core::object::{object_set_lru_or_lfu, EXPIRY_NONE};
+use redis_core::rdb::{
+    create_dump_payload, load_dump_payload, rdb_path, save_rdb_databases, verify_dump_payload,
+};
 use redis_core::replication::{global_replication_state, ReplBgsaveJob};
+use redis_core::util::mstime;
 use redis_core::CommandContext;
 use redis_types::{RedisError, RedisResult};
 
 use crate::aof::{aof_writer, write_aof_rewrite_for_dbs};
+
+fn ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
+}
+
+fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
+}
+
+fn parse_i64_strict(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse::<i64>().ok()
+}
 
 /// `SAVE` — synchronous RDB save.
 ///
@@ -63,6 +89,128 @@ pub fn save_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             format!("ERR SAVE failed: {}", e).into_bytes(),
         )),
     }
+}
+
+/// `DUMP key` — return a serialized representation of one key's value.
+pub fn dump_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() != 2 {
+        return Err(RedisError::wrong_number_of_args(b"dump"));
+    }
+
+    let key = ctx.arg_owned(1usize)?;
+    let payload = match ctx
+        .db_mut()
+        .lookup_key_read_with_flags(&key, LOOKUP_NOTOUCH)
+    {
+        Some(obj) => create_dump_payload(obj)
+            .map_err(|e| RedisError::runtime(format!("ERR DUMP failed: {}", e).into_bytes()))?,
+        None => return ctx.reply_null_bulk(),
+    };
+
+    ctx.reply_bulk(&payload)
+}
+
+/// `RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME seconds] [FREQ frequency]`.
+pub fn restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    if ctx.arg_count() < 4 {
+        return Err(RedisError::wrong_number_of_args(b"restore"));
+    }
+
+    let key = ctx.arg_owned(1usize)?;
+    let ttl_arg = ctx.arg_owned(2usize)?;
+    let payload = ctx.arg_owned(3usize)?;
+
+    let mut replace = false;
+    let mut absttl = false;
+    let mut lru_idle = -1i64;
+    let mut lfu_freq = -1i64;
+
+    let mut i = 4usize;
+    while i < ctx.arg_count() {
+        let option = ctx.arg_owned(i)?;
+        let option_bytes = option.as_bytes();
+        if ascii_eq_ignore_case(option_bytes, b"replace") {
+            replace = true;
+            i += 1;
+        } else if ascii_eq_ignore_case(option_bytes, b"absttl") {
+            absttl = true;
+            i += 1;
+        } else if ascii_eq_ignore_case(option_bytes, b"idletime")
+            && i + 1 < ctx.arg_count()
+            && lfu_freq == -1
+        {
+            let raw = ctx.arg_owned(i + 1)?;
+            let parsed = parse_i64_strict(raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+            if parsed < 0 {
+                return Err(RedisError::runtime(
+                    b"ERR Invalid IDLETIME value, must be >= 0",
+                ));
+            }
+            lru_idle = parsed;
+            i += 2;
+        } else if ascii_eq_ignore_case(option_bytes, b"freq")
+            && i + 1 < ctx.arg_count()
+            && lru_idle == -1
+        {
+            let raw = ctx.arg_owned(i + 1)?;
+            let parsed = parse_i64_strict(raw.as_bytes()).ok_or_else(RedisError::not_integer)?;
+            if !(0..=255).contains(&parsed) {
+                return Err(RedisError::runtime(
+                    b"ERR Invalid FREQ value, must be >= 0 and <= 255",
+                ));
+            }
+            lfu_freq = parsed;
+            i += 2;
+        } else {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+    }
+
+    if !replace && ctx.db_mut().lookup_key_write(&key).is_some() {
+        return Err(RedisError::runtime(
+            b"BUSYKEY Target key name already exists.",
+        ));
+    }
+
+    let ttl = parse_i64_strict(ttl_arg.as_bytes()).ok_or_else(RedisError::not_integer)?;
+    if ttl < 0 {
+        return Err(RedisError::runtime(b"ERR Invalid TTL value, must be >= 0"));
+    }
+
+    let relaxed_version = ctx.live_config().rdb_version_check_relaxed();
+    verify_dump_payload(payload.as_bytes(), relaxed_version)
+        .map_err(|_| RedisError::runtime(b"ERR DUMP payload version or checksum are wrong"))?;
+    let mut obj = load_dump_payload(payload.as_bytes(), relaxed_version)
+        .map_err(|_| RedisError::runtime(b"ERR Bad data format"))?;
+
+    let now = mstime();
+    let expire_at = if ttl == 0 {
+        EXPIRY_NONE
+    } else if absttl {
+        ttl
+    } else {
+        now.saturating_add(ttl)
+    };
+
+    if expire_at != EXPIRY_NONE && expire_at <= now {
+        if replace {
+            ctx.db_mut().delete(&key);
+        }
+        ctx.server().add_dirty(1);
+        return ctx.reply_simple_string(b"OK");
+    }
+
+    object_set_lru_or_lfu(&mut obj, lfu_freq, lru_idle);
+    ctx.db_mut()
+        .set_key_with_known_expire(key, obj, expire_at, 0);
+    ctx.server().add_dirty(1);
+    ctx.reply_simple_string(b"OK")
+}
+
+/// Cluster-internal RESTORE variant. Cluster asking state is out of scope for
+/// the single-node port, so it shares RESTORE's local behaviour.
+pub fn restore_asking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+    restore_command(ctx)
 }
 
 /// `BGSAVE [SCHEDULE]` — background RDB save.

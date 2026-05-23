@@ -12,14 +12,14 @@ For each oracle, the numbers below are the **post-cleanup-wave-8** state
 
 | Oracle | Status |
 |---|---|
-| **Wire-diff smoke** (21 RESP corpus scripts vs upstream Valkey, byte-exact) | **21 / 21 PASS** ✅ |
+| **Wire-diff smoke** (23 RESP corpus scripts vs upstream Valkey, byte-exact) | **23 / 23 PASS** ✅ |
 | **RDB bidirectional oracle** (we save → C loads; C saves → we load) | **378 / 378 PASS** ✅ |
 | **Upstream Valkey TCL suite** (~13 unit files surveyed) | **~98%** pass rate, see below |
 | **`unsafe` budget** | **5 documented blocks**, all wrapping `fork(2)` / `waitpid(2)` semantics |
 
 ## Wire-diff smoke
 
-The 21 scripts in `harness/oracle/corpus/` are sent to both
+The 23 scripts in `harness/oracle/corpus/` are sent to both
 `reference/valkey/src/valkey-server` and `target/debug/redis-server` on
 parallel sockets, and the raw RESP replies are compared byte-for-byte.
 Any single-byte divergence fails the script.
@@ -47,6 +47,8 @@ Any single-byte divergence fails the script.
 | `18-hll` | PFADD / PFCOUNT / PFMERGE |
 | `19-geo` | GEOADD / GEODIST / GEOPOS / GEOSEARCH / GEORADIUS |
 | `20-edge-cases` | 52 commands covering historical regressions (`i64::MIN` arg crashes, CONFIG RESETSTAT, MSETEX, set encoding stickiness, EXPIRE-already-expired, ziplist config aliases, etc.) |
+| `21-runtime-owner-canaries` | Runtime-owner compatibility canaries |
+| `22-dump-restore` | DUMP payload byte-exactness and missing-key nil behavior |
 
 Run: `bash harness/oracle/smoke.sh --skip-build`
 
@@ -110,19 +112,22 @@ Per-unit-file tally below is from the cleanup-wave-8 baseline.
 
 **~877 passing / ~73 failing** across these 13 unit files.
 
-### Not yet swept
+### Expanded TCL frontier
 
-These unit files are vendored but not yet run against the post-cleanup
-binary. Status from the early-session survey applies (probably slightly
-better today after wave 5/6 fixes propagated):
+The manual `tcl-survey-unswept` runner now sweeps the next frontier:
 
 `unit/bitops`, `unit/bitfield`, `unit/geo`, `unit/hyperloglog`,
-`unit/scripting`, `unit/scan`, `unit/sort`, `unit/dump`, `unit/info`
+`unit/scripting`, `unit/scan`, `unit/sort`, `unit/dump`, `unit/info`,
+`unit/slowlog`.
 
-Current telemetry for this frontier is tracked by the manual
-`tcl-survey-unswept` runner; see `docs/TCL_COVERAGE_EXPANSION.md`.
-That runner records abort/no-summary cases separately from counted pass/fail
-cases so packet generation does not hide behind a single aggregate number.
+Latest focused run: **173 counted passes / 0 counted failures**, 0 timed out,
+4 files without summary. Counted-green files are `unit/bitops`,
+`unit/bitfield`, `unit/geo`, `unit/scan`, and `unit/dump`. Remaining
+no-summary frontiers are `PFDEBUG`, `FUNCTION LOAD`, and `SORT`.
+
+See `docs/TCL_COVERAGE_EXPANSION.md`. That runner records abort/no-summary
+cases separately from counted pass/fail cases so packet generation does not
+hide behind a single aggregate number.
 
 Not in scope for the surveyed run:
 
@@ -197,9 +202,7 @@ redis.call / redis.pcall / KEYS[] / ARGV[] / SHA1HEX inside Lua
 
 ### Keyspace
 DEL • EXISTS • TYPE • RENAME • RENAMENX • KEYS • SCAN • RANDOMKEY •
-TOUCH • UNLINK • COPY • COPY DB • MOVE • DUMP*
-
-\*DUMP / RESTORE not yet implemented — listed in the roadmap.
+TOUCH • UNLINK • COPY • COPY DB • MOVE • DUMP • RESTORE • RESTORE-ASKING
 
 ### Server
 PING • ECHO • SELECT • DBSIZE • TIME • INFO • INFO keyspace • CONFIG GET •
@@ -210,7 +213,8 @@ DEBUG SET-ACTIVE-EXPIRE • DEBUG CHANGE-REPL-ID • DEBUG JMAP
 
 ### Persistence
 RDB v11 — `SAVE` (synchronous), `BGSAVE` (fork-based on Unix; thread-based
-on non-Unix), `--rdb-disabled` flag, dump.rdb load on startup.
+on non-Unix), `--rdb-disabled` flag, dump.rdb load on startup, DUMP/RESTORE
+single-key payloads with CRC/version footer validation.
 
 AOF — write per command, `appendfsync always` / `everysec` / `no`,
 fsync thread, startup replay including the stream commands (`XADD`,

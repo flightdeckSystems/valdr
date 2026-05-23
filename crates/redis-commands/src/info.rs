@@ -203,6 +203,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
+        let _ = writeln!(buf, "migrate_cached_sockets:0\r");
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
         let _ = writeln!(buf, "used_active_time_main_thread:{}\r", active_time_us);

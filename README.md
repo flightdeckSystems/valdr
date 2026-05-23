@@ -19,7 +19,7 @@ The current compatibility picture:
 
 ```text
 TCL unit survey: [███████████████████▋] 877 / 896 (97.9%)
-RESP wire diff:  [████████████████████] 21 / 21
+RESP wire diff:  [████████████████████] 23 / 23
 RDB load/save:   [████████████████████] 378 / 378
 ```
 

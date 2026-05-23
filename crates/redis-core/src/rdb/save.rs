@@ -19,7 +19,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db::RedisDb;
-use crate::object::{ObjectKind, EXPIRY_NONE};
+use crate::object::{ObjectKind, RedisObject, EXPIRY_NONE};
 
 use super::crc::crc64;
 use super::hash::save_hash_object;
@@ -73,30 +73,13 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
                 buf.write_all(&obj.expire.to_le_bytes())?;
             }
 
-            let type_byte = match &obj.kind {
-                ObjectKind::String(_) => RDB_TYPE_STRING,
-                ObjectKind::Hash(_) => RDB_TYPE_HASH,
-                ObjectKind::List(_) => RDB_TYPE_LIST,
-                ObjectKind::Set(_) => RDB_TYPE_SET,
-                ObjectKind::ZSet(_) => RDB_TYPE_ZSET_2,
-                ObjectKind::Stream(_) => RDB_TYPE_STREAM_LISTPACKS_3,
-                ObjectKind::Json(_) => RDB_TYPE_JSON_NATIVE,
-                ObjectKind::Bloom(_) => RDB_TYPE_BLOOM_NATIVE,
-                ObjectKind::Module => continue,
+            let type_byte = match rdb_type_for_object(obj) {
+                Ok(t) => t,
+                Err(_) => continue,
             };
             buf.write_all(&[type_byte])?;
             write_rdb_string(buf, key.as_bytes())?;
-            match &obj.kind {
-                ObjectKind::String(_) => save_string_object(buf, obj)?,
-                ObjectKind::Hash(_) => save_hash_object(buf, obj)?,
-                ObjectKind::List(_) => save_list_object(buf, obj)?,
-                ObjectKind::Set(_) => save_set_object(buf, obj)?,
-                ObjectKind::ZSet(_) => save_zset_object(buf, obj)?,
-                ObjectKind::Stream(_) => save_stream_object(buf, obj)?,
-                ObjectKind::Json(_) => save_json_object(buf, obj)?,
-                ObjectKind::Bloom(_) => save_bloom_object(buf, obj)?,
-                ObjectKind::Module => unreachable!(),
-            }
+            save_object_payload(buf, obj)?;
         }
     }
 
@@ -115,7 +98,10 @@ fn write_rdb_dbs_to_buf(dbs: &[RedisDb], buf: &mut Vec<u8>) -> io::Result<()> {
 /// this implementation; real Valkey will reject the file.
 fn save_json_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> io::Result<()> {
     let ObjectKind::Json(value) = &obj.kind else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected Json kind"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected Json kind",
+        ));
     };
     let json_str = serde_json::to_string(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
@@ -138,7 +124,10 @@ fn save_json_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> i
 /// this implementation; real Valkey will reject the file.
 fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> io::Result<()> {
     let ObjectKind::Bloom(bf) = &obj.kind else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected Bloom kind"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected Bloom kind",
+        ));
     };
     buf.write_all(&bf.capacity.to_le_bytes())?;
     buf.write_all(&bf.item_count.to_le_bytes())?;
@@ -147,6 +136,59 @@ fn save_bloom_object(buf: &mut impl Write, obj: &crate::object::RedisObject) -> 
     buf.write_all(&bf.expansion.to_le_bytes())?;
     buf.write_all(&[bf.nonscaling as u8])?;
     write_rdb_string(buf, &bf.bits)
+}
+
+/// Return the RDB type byte used to encode one Redis object.
+///
+/// `ObjectKind::Module` has no in-tree serializer yet, so callers get an
+/// `Unsupported` error rather than a placeholder byte.
+pub fn rdb_type_for_object(obj: &RedisObject) -> io::Result<u8> {
+    match &obj.kind {
+        ObjectKind::String(_) => Ok(RDB_TYPE_STRING),
+        ObjectKind::Hash(_) => Ok(RDB_TYPE_HASH),
+        ObjectKind::List(_) => Ok(RDB_TYPE_LIST),
+        ObjectKind::Set(_) => Ok(RDB_TYPE_SET),
+        ObjectKind::ZSet(_) => Ok(RDB_TYPE_ZSET_2),
+        ObjectKind::Stream(_) => Ok(RDB_TYPE_STREAM_LISTPACKS_3),
+        ObjectKind::Json(_) => Ok(RDB_TYPE_JSON_NATIVE),
+        ObjectKind::Bloom(_) => Ok(RDB_TYPE_BLOOM_NATIVE),
+        ObjectKind::Module => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "module object RDB payloads are not supported",
+        )),
+    }
+}
+
+/// Serialize only an object's value payload, excluding type byte, key, expiry,
+/// and DB-level opcodes.
+pub fn save_object_payload(buf: &mut impl Write, obj: &RedisObject) -> io::Result<()> {
+    match &obj.kind {
+        ObjectKind::String(_) => save_string_object(buf, obj),
+        ObjectKind::Hash(_) => save_hash_object(buf, obj),
+        ObjectKind::List(_) => save_list_object(buf, obj),
+        ObjectKind::Set(_) => save_set_object(buf, obj),
+        ObjectKind::ZSet(_) => save_zset_object(buf, obj),
+        ObjectKind::Stream(_) => save_stream_object(buf, obj),
+        ObjectKind::Json(_) => save_json_object(buf, obj),
+        ObjectKind::Bloom(_) => save_bloom_object(buf, obj),
+        ObjectKind::Module => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "module object RDB payloads are not supported",
+        )),
+    }
+}
+
+/// Create the byte payload returned by `DUMP`.
+///
+/// Layout: `<type byte><object payload><u16 RDB version LE><u64 CRC64 LE>`.
+pub fn create_dump_payload(obj: &RedisObject) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(64);
+    buf.write_all(&[rdb_type_for_object(obj)?])?;
+    save_object_payload(&mut buf, obj)?;
+    buf.write_all(&super::header::RDB_DUMP_VERSION.to_le_bytes())?;
+    let checksum = crc64(0, &buf);
+    buf.write_all(&checksum.to_le_bytes())?;
+    Ok(buf)
 }
 
 /// Save `db` to the file at `path`, using an atomic write-then-rename strategy.

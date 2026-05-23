@@ -1,6 +1,8 @@
 # TCL Coverage Long Run
 
-Status: queued 2026-05-22. This is a harness-driven conformance expansion wave.
+Status: executed 2026-05-23. This was a harness-driven conformance expansion
+wave, followed by a focused DUMP/RESTORE packet because `unit/dump` was product
+important and blocked by an unknown command.
 
 ## Goal
 
@@ -15,6 +17,7 @@ frontiers where the survey gives objective, bounded feedback:
 2. `unit/bitops` BITCOUNT/BITPOS parsing and error semantics.
 3. `unit/scan` ZSCAN `NOSCORES`.
 4. `unit/bitfield` overflow stability / connection-loss abort.
+5. `unit/dump` DUMP/RESTORE single-key RDB payload compatibility.
 
 After each implementation packet the same survey runner runs again, so progress
 is visible as ledger rows instead of prose.
@@ -43,6 +46,11 @@ tcl-post-scan-survey
 tcl-bitfield-overflow-stability
   |
 tcl-post-bitfield-survey
+  |
+  v
+tcl-dump-restore-minimal
+  |
+tcl-post-dump-survey
 ```
 
 ## GEO Packet Note
@@ -87,7 +95,19 @@ SET value's overflow status instead of an INCRBY-style old-plus-new check.
 The follow-up `tcl-post-bitfield-survey` runner remains the telemetry gate for
 the refreshed `unit/bitfield` frontier.
 
-## Why These Four
+## DUMP / RESTORE Packet Note
+
+`tcl-dump-restore-minimal` targets DUMP/RESTORE command dispatch and single-key
+RDB payload compatibility. It reuses the core RDB object serializers instead of
+hand-rolling command-local bytes, verifies the same footer shape as Valkey
+(`u16` RDB version + CRC64), supports strict/relaxed `rdb-version-check`, and
+preserves the test-visible RESTORE options: `REPLACE`, `ABSTTL`, `IDLETIME`,
+and `FREQ`.
+
+The follow-up survey proves `unit/dump` at 13/13 under the current deny-tag
+policy.
+
+## Why These Packets
 
 `unit/geo` is first because it reaches `Test Summary`, so the pass/fail count is
 not hidden behind an abort. The failure class appears to be option validation
@@ -101,15 +121,17 @@ more of the file and may recover several simple edge tests.
 This is a good test of whether the harness can drive one upstream-test frontier
 without broad sorted-set churn.
 
-`unit/bitfield` is last in this wave because the current failure is a lost
+`unit/bitfield` was last in the original wave because the current failure was a lost
 connection during overflow fuzzing. That is higher severity than a text
 mismatch, but the arithmetic surface is more delicate than the first three
 packets.
 
+`unit/dump` became the next add-on because it is user-facing/product-significant
+and the survey showed a clean unknown-command frontier rather than a broad
+architecture dependency.
+
 ## Deliberately Deferred
 
-- `unit/dump`: product-useful, but likely needs DUMP/RESTORE payload format and
-  checksum work. Do this as its own architecture packet, not as a tail-end fix.
 - `unit/sort`: `sort.rs` exists but is not wired into `lib.rs`/dispatch. It may
   be a compile/API catch-up packet before semantics. Keep it separate.
 - `unit/scripting` and slowlog's function-dependent tail: `FUNCTION LOAD`

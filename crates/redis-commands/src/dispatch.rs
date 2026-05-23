@@ -865,6 +865,9 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry { name: b"SLOWLOG", handler: crate::slowlog_cmd::slowlog_command },
     DispatchEntry { name: b"LATENCY", handler: crate::slowlog_cmd::latency_command },
     // ── PERSISTENCE (Round 18) ─────────────────────────────────────────────
+    DispatchEntry { name: b"DUMP", handler: crate::persist::dump_command },
+    DispatchEntry { name: b"RESTORE", handler: crate::persist::restore_command },
+    DispatchEntry { name: b"RESTORE-ASKING", handler: crate::persist::restore_asking_command },
     DispatchEntry { name: b"SAVE", handler: crate::persist::save_command },
     DispatchEntry { name: b"BGSAVE", handler: crate::persist::bgsave_command },
     DispatchEntry { name: b"BGREWRITEAOF", handler: crate::persist::bgrewriteaof_command },

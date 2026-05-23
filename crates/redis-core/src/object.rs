@@ -2119,26 +2119,42 @@ pub fn object_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     }
 
     let key_arg = ctx.arg(2)?.clone();
-    let exists = ctx
-        .db_mut()
-        .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
-        .is_some();
-    if !exists {
-        return Err(RedisError::runtime(b"ERR no such key"));
-    }
-
     if subcmd_bytes == b"refcount" {
+        let exists = ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
+            .is_some();
+        if !exists {
+            return Err(RedisError::runtime(b"ERR no such key"));
+        }
         ctx.reply_integer(1)?;
     } else if subcmd_bytes == b"encoding" {
-        let name: &[u8] = match ctx.db().find(&key_arg) {
-            Some(obj) => obj.encoding_name().as_bytes(),
-            None => b"none",
+        let name = match ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
+        {
+            Some(obj) => obj.encoding_name(),
+            None => return Err(RedisError::runtime(b"ERR no such key")),
         };
-        ctx.reply_bulk(name)?;
+        ctx.reply_bulk(name.as_bytes())?;
     } else if subcmd_bytes == b"idletime" {
-        ctx.reply_integer(0)?;
+        let idle = match ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
+        {
+            Some(obj) => obj.lru_idle_secs() as i64,
+            None => return Err(RedisError::runtime(b"ERR no such key")),
+        };
+        ctx.reply_integer(idle)?;
     } else if subcmd_bytes == b"freq" {
-        ctx.reply_integer(0)?;
+        let freq = match ctx
+            .db_mut()
+            .lookup_key_read_with_flags(&key_arg, crate::db::LOOKUP_NOTOUCH)
+        {
+            Some(obj) => obj.lfu_frequency() as i64,
+            None => return Err(RedisError::runtime(b"ERR no such key")),
+        };
+        ctx.reply_integer(freq)?;
     } else {
         return Err(RedisError::runtime(b"ERR unknown subcommand or wrong number of arguments"));
     }

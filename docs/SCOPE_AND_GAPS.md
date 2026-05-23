@@ -18,7 +18,7 @@ If you're evaluating whether valkey-rs can replace `redis-server` /
 - **What does not work yet**: clustering, replication (no replica
   conformance), Sentinel, modules (RedisJSON / RedisSearch / etc.), TLS,
   I/O threads, AOF (partial), ACL (partial), and a long tail of newer
-  Valkey 9.0 / Redis 7+ features (HGETDEL, SET IFEQ, LCS, DUMP/RESTORE,
+  Valkey 9.0 / Redis 7+ features (HGETDEL, SET IFEQ, LCS,
   HELLO availability-zone, import-mode, etc.).
 - **Drop-in readiness**: it can replace a *single-node, basic-types,
   no-replication* Redis. It cannot replace a Redis Cluster, a
@@ -34,7 +34,7 @@ and you should look at all three.
 | Oracle | Result |
 |---|---|
 | Upstream Tcl, 13 surveyed unit files | **877 / 896 individual tests pass (97.9%)** |
-| Wire-diff RESP corpus | **21 / 21 byte-exact** |
+| Wire-diff RESP corpus | **23 / 23 byte-exact** |
 | RDB bidirectional (we save → C loads; C saves → we load) | **378 / 378** |
 
 This is the strong story. Within the slice we've decided to build, the
@@ -53,10 +53,11 @@ across 245 `.tcl` files. We currently sweep **~13 unit files** containing
 | Pass within swept | 877 | ~20% |
 
 The remaining ~78% of upstream's tested behavior is either deferred
-(performance / infrastructure files like `bitops`, `bitfield`, `geo`,
-`hyperloglog`, `scripting`, `scan`, `sort`, `dump`, `info`) or out of
-scope by design (clustering, modules, replication, TLS, IO threads,
-MPTCP, Sentinel).
+(performance / infrastructure files like `hyperloglog`, `scripting`, `sort`,
+`info`) or out of scope by design (clustering, modules, replication, TLS, IO
+threads, MPTCP, Sentinel). The latest frontier wave brought `bitops`,
+`bitfield`, `geo`, `scan`, and `dump` to counted-green under the current
+deny-tag policy.
 
 ### View 3 — Code surface
 
@@ -128,8 +129,9 @@ single user's adoption blockers:
 2. **Replication conformance** — backbone exists; needs a multi-node
    integration sweep before it's claimable.
 3. **AOF parity** to match the RDB story.
-4. **Wider Tcl sweep** — bring `bitops`, `bitfield`, `geo`, `hyperloglog`,
-   `scripting`, `scan`, `sort`, `dump`, `info` into the gated baseline.
+4. **Wider Tcl sweep** — next frontiers are `hyperloglog` (`PFDEBUG`),
+   `scripting`/`slowlog` (`FUNCTION LOAD`), `sort`, and the meaningful `info`
+   cases.
 5. **TLS, I/O threads, ACL deeper** — post-1.0.
 6. **Clustering, modules, Sentinel** — explicitly out of scope. If they
    ever happen it will be a separate project decision, not a default
@@ -143,7 +145,7 @@ finishing the harness.
 ## How to verify all of this yourself
 
 ```bash
-# 1. Wire-diff smoke (21/21)
+# 1. Wire-diff smoke (23/23)
 bash harness/oracle/smoke.sh --skip-build
 
 # 2. RDB bidirectional (378/378)

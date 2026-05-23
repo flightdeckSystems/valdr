@@ -24,8 +24,12 @@ pub mod string;
 pub mod varint;
 pub mod zset;
 
-pub use load::{load_into, load_into_dbs};
-pub use save::{save_rdb, save_rdb_databases};
+pub use load::{
+    load_dump_payload, load_into, load_into_dbs, load_value_payload, verify_dump_payload,
+};
+pub use save::{
+    create_dump_payload, rdb_type_for_object, save_object_payload, save_rdb, save_rdb_databases,
+};
 
 use std::path::PathBuf;
 

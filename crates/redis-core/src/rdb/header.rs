@@ -12,6 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::varint::{write_len, RDB_ENC_INT16, RDB_ENC_INT32, RDB_ENCVAL};
 
 pub const RDB_VERSION: u16 = 11;
+/// Valkey's no-magic DUMP/RESTORE payload version.
+///
+/// Full files use `REDIS0011` for cross-version compatibility with the RDB
+/// corpus. DUMP payloads have no magic prefix, so Valkey 8.x identifies the
+/// payload by this version footer instead.
+pub const RDB_DUMP_VERSION: u16 = 80;
 pub const RDB_MAGIC_REDIS: &[u8] = b"REDIS";
 pub const RDB_MAGIC_VALKEY: &[u8] = b"VALKEY";
 

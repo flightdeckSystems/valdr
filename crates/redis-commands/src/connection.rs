@@ -201,6 +201,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("save", ""),
         ("dir", "./"),
         ("dbfilename", "dump.rdb"),
+        ("rdb-version-check", "strict"),
         ("tcp-backlog", "511"),
         ("tcp-keepalive", "300"),
         ("timeout", "0"),
@@ -311,6 +312,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_repl_disable_nodelay = if cfg.repl_disable_tcp_nodelay() { "yes".to_string() } else { "no".to_string() };
     let live_slave_read_only = if cfg.slave_read_only() { "yes".to_string() } else { "no".to_string() };
     let live_repl_diskless = if cfg.repl_diskless_sync() { "yes".to_string() } else { "no".to_string() };
+    let live_rdb_version_check = if cfg.rdb_version_check_relaxed() { "relaxed".to_string() } else { "strict".to_string() };
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -353,6 +355,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "repl-disable-tcp-nodelay" => Some(live_repl_disable_nodelay.clone()),
             "slave-read-only" | "replica-read-only" => Some(live_slave_read_only.clone()),
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
+            "rdb-version-check" => Some(live_rdb_version_check.clone()),
             _ => None,
         };
         out.push((
@@ -575,6 +578,13 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         }
         b"repl-diskless-sync" => {
             cfg.set_repl_diskless_sync(value == b"yes");
+        }
+        b"rdb-version-check" => {
+            if ascii_eq_ignore_case(value, b"relaxed") {
+                cfg.set_rdb_version_check_relaxed(true);
+            } else if ascii_eq_ignore_case(value, b"strict") {
+                cfg.set_rdb_version_check_relaxed(false);
+            }
         }
         _ => {}
     }
