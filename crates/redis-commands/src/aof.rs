@@ -347,15 +347,12 @@ fn write_aof_rewrite_db_contents<W: Write>(
             }
             ObjectKind::Set(enc) => {
                 let members: Vec<RedisString> = match enc {
-                    redis_core::object::SetEncoding::Inline(s) => {
-                        s.data.iter().cloned().collect()
-                    }
-                    redis_core::object::SetEncoding::HashTable(hs) => {
-                        hs.iter().cloned().collect()
-                    }
-                    redis_core::object::SetEncoding::IntSet(v) => {
-                        v.iter().map(|n| RedisString::from_vec(n.to_string().into_bytes())).collect()
-                    }
+                    redis_core::object::SetEncoding::Inline(s) => s.data.iter().cloned().collect(),
+                    redis_core::object::SetEncoding::HashTable(hs) => hs.iter().cloned().collect(),
+                    redis_core::object::SetEncoding::IntSet(v) => v
+                        .iter()
+                        .map(|n| RedisString::from_vec(n.to_string().into_bytes()))
+                        .collect(),
                     redis_core::object::SetEncoding::ListPack(_) => Vec::new(),
                 };
                 for chunk in members.chunks(64) {
@@ -469,7 +466,9 @@ fn write_stream_rewrite<W: Write>(
     ));
     if stream.max_deleted_id != redis_ds::stream::StreamId::ZERO {
         xsetid.push(RedisString::from_bytes(b"MAXDELETEDID"));
-        xsetid.push(RedisString::from_vec(stream.max_deleted_id.to_display_bytes()));
+        xsetid.push(RedisString::from_vec(
+            stream.max_deleted_id.to_display_bytes(),
+        ));
     }
     writer.write_all(&encode_resp_command(&xsetid))?;
 
@@ -658,7 +657,11 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) {
         return;
     }
 
-    let name_lower: Vec<u8> = argv[0].as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+    let name_lower: Vec<u8> = argv[0]
+        .as_bytes()
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
 
     match name_lower.as_slice() {
         b"set" if argv.len() >= 3 => {

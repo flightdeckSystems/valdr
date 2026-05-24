@@ -712,15 +712,23 @@ pub fn zrange_command(ctx: &mut CommandContext) -> RedisResult<()> {
         }
     }
 
-    if by_lex {
-        return Err(RedisError::syntax(
-            b"syntax error, BYLEX not implemented yet in this port",
-        ));
-    }
     if have_limit && !by_score && !by_lex {
         return Err(RedisError::runtime(
             b"ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX",
         ));
+    }
+    if by_lex {
+        if withscores {
+            return Err(RedisError::syntax(b"syntax error"));
+        }
+        let (min, max) = if reverse {
+            (parse_lex_bound(stop_bytes.as_bytes())?, parse_lex_bound(start_bytes.as_bytes())?)
+        } else {
+            (parse_lex_bound(start_bytes.as_bytes())?, parse_lex_bound(stop_bytes.as_bytes())?)
+        };
+        return rangebylex_inner_with_bounds(
+            ctx, &key, min, max, reverse, offset, count,
+        );
     }
 
     if by_score {
@@ -1087,8 +1095,19 @@ fn rangebylex_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> Redi
     } else {
         (parse_lex_bound(arg_a.as_bytes())?, parse_lex_bound(arg_b.as_bytes())?)
     };
+    rangebylex_inner_with_bounds(ctx, &key, min, max, reverse, offset, count)
+}
 
-    let mut entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(&key))? {
+fn rangebylex_inner_with_bounds(
+    ctx: &mut CommandContext,
+    key: &RedisString,
+    min: LexBound,
+    max: LexBound,
+    reverse: bool,
+    offset: i64,
+    count: i64,
+) -> RedisResult<()> {
+    let mut entries: Vec<(f64, RedisString)> = match as_zset_ref(ctx.db().lookup_key_read(key))? {
         None => Vec::new(),
         Some(z) => z
             .iter_ascending()

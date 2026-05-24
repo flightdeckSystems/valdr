@@ -161,9 +161,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => {
             let mut obj = RedisObject::new_hash();
             let inserted = {
-                let map = obj
-                    .hash_mut()
-                    .expect("new_hash constructs an Inline hash");
+                let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
                 let mut count: i64 = 0;
                 for (f, v) in pairs {
                     if map.insert(f, v).is_none() {
@@ -216,9 +214,7 @@ pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => {
             let mut obj = RedisObject::new_hash();
             {
-                let map = obj
-                    .hash_mut()
-                    .expect("new_hash constructs an Inline hash");
+                let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
                 for (f, v) in pairs {
                     map.insert(f, v);
                 }
@@ -255,9 +251,7 @@ pub fn hsetnx_command(ctx: &mut CommandContext) -> RedisResult<()> {
         None => {
             let mut obj = RedisObject::new_hash();
             {
-                let map = obj
-                    .hash_mut()
-                    .expect("new_hash constructs an Inline hash");
+                let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
                 map.insert(field, value);
             }
             ctx.db_mut().set_key(key, obj, 0);
@@ -426,7 +420,10 @@ pub fn hstrlen_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let field = ctx.arg_owned(2usize)?;
     let len: i64 = match as_hash_ref(ctx.db().lookup_key_read(&key))? {
         None => 0,
-        Some(h) => h.get(&field).map(|v| v.as_bytes().len() as i64).unwrap_or(0),
+        Some(h) => h
+            .get(&field)
+            .map(|v| v.as_bytes().len() as i64)
+            .unwrap_or(0),
     };
     ctx.reply_integer(len)
 }
@@ -530,9 +527,7 @@ pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
     } else {
         let mut obj = RedisObject::new_hash();
         {
-            let map = obj
-                .hash_mut()
-                .expect("new_hash constructs an Inline hash");
+            let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
             map.insert(field, RedisString::from_bytes(&long_long_to_bytes(delta)));
         }
         ctx.db_mut().set_key(key.clone(), obj, 0);
@@ -565,7 +560,9 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
         };
         let next = current + delta;
         if next.is_nan() || next.is_infinite() {
-            return Err(RedisError::runtime(b"ERR increment would produce NaN or Infinity"));
+            return Err(RedisError::runtime(
+                b"ERR increment would produce NaN or Infinity",
+            ));
         }
         let bytes = float_to_bytes(next);
         map.insert(field, RedisString::from_bytes(&bytes));
@@ -574,9 +571,7 @@ pub fn hincrbyfloat_command(ctx: &mut CommandContext) -> RedisResult<()> {
         let mut obj = RedisObject::new_hash();
         let bytes = float_to_bytes(delta);
         {
-            let map = obj
-                .hash_mut()
-                .expect("new_hash constructs an Inline hash");
+            let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
             map.insert(field, RedisString::from_bytes(&bytes));
         }
         ctx.db_mut().set_key(key.clone(), obj, 0);
@@ -784,7 +779,11 @@ pub fn hscan_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.reply_array_header(2usize)?;
     ctx.reply_bulk(next_cursor.to_string().as_bytes())?;
-    let header = if no_values { matched.len() } else { matched.len() * 2 };
+    let header = if no_values {
+        matched.len()
+    } else {
+        matched.len() * 2
+    };
     ctx.reply_array_header(header)?;
     for (f, v) in matched {
         ctx.reply_bulk_string(f)?;

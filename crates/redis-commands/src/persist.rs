@@ -392,9 +392,7 @@ pub fn bgsave_for_replication(
             let dbs = snapshots_to_dbs(&snapshot);
             let ok = save_rdb_databases(&dbs, &temp_for_thread).is_ok();
             if !ok {
-                eprintln!(
-                    "redis-server: BGSAVE-for-replication thread fallback save failed"
-                );
+                eprintln!("redis-server: BGSAVE-for-replication thread fallback save failed");
                 let _ = repl_for_thread.take_repl_bgsave_job();
                 repl_for_thread.set_repl_child_pid(0);
             }
@@ -478,7 +476,10 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// Write a complete AOF rewrite for `snapshot` to `tmp_path`, then atomically
 /// rename it over `final_path`.
 fn do_aof_rewrite(
-    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
+    snapshot: &[(
+        u32,
+        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
+    )],
     tmp_path: &PathBuf,
     final_path: &PathBuf,
 ) -> std::io::Result<()> {
@@ -496,7 +497,10 @@ fn do_aof_rewrite(
 }
 
 fn snapshots_to_dbs(
-    snapshot: &[(u32, Vec<(redis_types::RedisString, redis_core::RedisObject)>)],
+    snapshot: &[(
+        u32,
+        Vec<(redis_types::RedisString, redis_core::RedisObject)>,
+    )],
 ) -> Vec<RedisDb> {
     snapshot
         .iter()

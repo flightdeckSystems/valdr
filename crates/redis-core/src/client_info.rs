@@ -41,13 +41,16 @@ impl ClientInfoRegistry {
 
     /// Register a freshly accepted connection.
     pub fn register(&mut self, id: ClientId, addr: String) {
-        self.entries.insert(id, ClientSnapshot {
+        self.entries.insert(
             id,
-            addr,
-            db_index: 0,
-            cmd: String::new(),
-            blocked: false,
-        });
+            ClientSnapshot {
+                id,
+                addr,
+                db_index: 0,
+                cmd: String::new(),
+                blocked: false,
+            },
+        );
     }
 
     /// Update the externally visible command/db/blocking snapshot for `id`.
@@ -58,10 +61,7 @@ impl ClientInfoRegistry {
     /// avoids pushing a global mutex into every GET/SET hot path.
     pub fn update_snapshot(&mut self, id: ClientId, cmd: &[u8], db_index: u32, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
-            e.cmd = cmd
-                .iter()
-                .map(|b| b.to_ascii_lowercase() as char)
-                .collect();
+            e.cmd = cmd.iter().map(|b| b.to_ascii_lowercase() as char).collect();
             e.db_index = db_index;
             e.blocked = blocked;
         }

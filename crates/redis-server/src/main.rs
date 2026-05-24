@@ -1214,8 +1214,7 @@ fn process_current_command_with_db(
         .total_commands_processed
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    let active_time_sample =
-        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx =
             CommandContext::with_server(client, db, Arc::clone(server), Arc::clone(registry));
@@ -1256,8 +1255,7 @@ fn process_current_command_with_db_list(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let dispatch_db = client.db_index;
-    let active_time_sample =
-        (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
+    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0).then(Instant::now);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(
             client,

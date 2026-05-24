@@ -618,10 +618,7 @@ impl<'a> CommandContext<'a> {
     /// cursor in sync when the selected DB is changed while reusing a shared
     /// DB slice.
     pub fn set_selected_db_index(&mut self, index: u32) {
-        if let DbStorage::OwnerList {
-            selected_index, ..
-        } = &mut self.db
-        {
+        if let DbStorage::OwnerList { selected_index, .. } = &mut self.db {
             *selected_index = index;
         }
         self.client.db_index = index;
@@ -721,10 +718,7 @@ impl<'a> CommandContext<'a> {
     }
 
     /// Run `f` once for every logical DB in the context route.
-    pub fn for_each_db_mut(
-        &mut self,
-        mut f: impl FnMut(&mut RedisDb),
-    ) -> RedisResult<()> {
+    pub fn for_each_db_mut(&mut self, mut f: impl FnMut(&mut RedisDb)) -> RedisResult<()> {
         if let DbStorage::OwnerList { dbs, .. } = &mut self.db {
             for db in dbs.iter_mut() {
                 f(db);
@@ -802,9 +796,7 @@ impl<'a> CommandContext<'a> {
     }
 
     /// Snapshot every logical DB reachable through this context.
-    pub fn snapshot_all_dbs(
-        &mut self,
-    ) -> RedisResult<Vec<(u32, Vec<(RedisString, RedisObject)>)>> {
+    pub fn snapshot_all_dbs(&mut self) -> RedisResult<Vec<(u32, Vec<(RedisString, RedisObject)>)>> {
         let mut out = Vec::new();
         self.for_each_db_mut(|db| {
             let entries = db
