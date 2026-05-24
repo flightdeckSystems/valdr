@@ -126,6 +126,14 @@ Scope cap: CLIENT LIST / INFO / FILTERS and COMMAND GETKEYS compatibility
 needed by the first frontier. Full MONITOR and tracking invalidation are
 separate packets.
 
+Result 2026-05-24: implemented byte-oriented CLIENT LIST/INFO fields,
+stateful CLIENT CAPA/SETINFO metadata, common positive and negative LIST
+filters, and early COMMAND GETKEYS/GETKEYSANDFLAGS key extraction in
+`crates/redis-commands/src/connection.rs` with supporting client snapshot
+state in `redis-core`. Focused TCL proof passed 32 CLIENT LIST filter rows from
+`unit/introspection.tcl` and 11 COMMAND GETKEYS/GETKEYSANDFLAGS rows from
+`unit/introspection-2.tcl`.
+
 ### 6. Observability admin commands
 
 Packet: `tcl-observability-admin-unlock-v1`.

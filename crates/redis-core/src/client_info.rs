@@ -16,6 +16,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use redis_types::RedisString;
+
+use crate::client::Client;
 use crate::client::ClientId;
 
 /// A point-in-time snapshot of one client's observable state.
@@ -26,6 +29,19 @@ pub struct ClientSnapshot {
     pub db_index: u32,
     pub cmd: String,
     pub blocked: bool,
+    pub name: Option<RedisString>,
+    pub user: Option<RedisString>,
+    pub resp_proto: i32,
+    pub tracking: bool,
+    pub tracking_bcast: bool,
+    pub tracking_broken_redirect: bool,
+    pub import_source: bool,
+    pub capa_redirect: bool,
+    pub lib_name: Option<RedisString>,
+    pub lib_ver: Option<RedisString>,
+    pub subscribed_channels: usize,
+    pub subscribed_patterns: usize,
+    pub queued_multi_count: Option<usize>,
 }
 
 /// Server-wide client info table.
@@ -47,6 +63,19 @@ impl ClientInfoRegistry {
             db_index: 0,
             cmd: String::new(),
             blocked: false,
+            name: None,
+            user: Some(RedisString::from_static(b"default")),
+            resp_proto: 2,
+            tracking: false,
+            tracking_bcast: false,
+            tracking_broken_redirect: false,
+            import_source: false,
+            capa_redirect: false,
+            lib_name: None,
+            lib_ver: None,
+            subscribed_channels: 0,
+            subscribed_patterns: 0,
+            queued_multi_count: None,
         });
     }
 
@@ -64,6 +93,31 @@ impl ClientInfoRegistry {
                 .collect();
             e.db_index = db_index;
             e.blocked = blocked;
+        }
+    }
+
+    /// Refresh the metadata fields that are not passed through the hot-path
+    /// `update_snapshot` call.
+    pub fn update_client_metadata(&mut self, client: &Client) {
+        if let Some(e) = self.entries.get_mut(&client.id) {
+            e.db_index = client.db_index;
+            e.blocked = client.blocked_on_keys;
+            e.name = client.name.clone();
+            e.user = client.authenticated_user.clone();
+            e.resp_proto = client.resp_proto;
+            e.tracking = client.tracking.enabled;
+            e.tracking_bcast = client.tracking.bcast;
+            e.tracking_broken_redirect = client.tracking.broken_redirect;
+            e.import_source = client.import_source;
+            e.capa_redirect = client.capa_redirect;
+            e.lib_name = client.lib_name.clone();
+            e.lib_ver = client.lib_ver.clone();
+            e.subscribed_channels = client.subscribed_channels.len();
+            e.subscribed_patterns = client.subscribed_patterns.len();
+            e.queued_multi_count = client
+                .flags
+                .multi
+                .then_some(client.queued_argvs.len());
         }
     }
 
@@ -98,3 +152,15 @@ static CLIENT_INFO_REGISTRY: OnceLock<Arc<Mutex<ClientInfoRegistry>>> = OnceLock
 pub fn client_info_registry() -> &'static Arc<Mutex<ClientInfoRegistry>> {
     CLIENT_INFO_REGISTRY.get_or_init(|| Arc::new(Mutex::new(ClientInfoRegistry::new())))
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// PORT STATUS
+//   source:        networking.c CLIENT LIST/INFO support state
+//   target_crate:  redis-core
+//   confidence:    medium
+//   todos:         1
+//   port_notes:    1
+//   unsafe_blocks: 0
+//   notes:         Snapshot registry for observable per-client metadata; full
+//                  Valkey client accounting remains broader than this model.
+// ──────────────────────────────────────────────────────────────────────────

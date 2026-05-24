@@ -1,0 +1,94 @@
+{
+  "captured_ts": "2026-05-24T20:04:08.795939Z",
+  "harness_context": {
+    "commit": "815bd2c",
+    "git_dirty": true,
+    "git_status_short": [
+      " M crates/redis-commands/src/connection.rs",
+      " M crates/redis-core/src/client.rs",
+      " M crates/redis-core/src/client_info.rs",
+      " M docs/TCL_UNLOCK_OVERNIGHT_20260524.md",
+      " M harness/evidence/ledger.jsonl",
+      "?? harness/evidence/runs/20260524T193957Z-815bd2c-test-fixer-tcl-client-introspection-filters-v1.json"
+    ],
+    "run_id": "loop-58c54e2240c4ce47",
+    "target_commit": "815bd2c59d246f794adebacb2f40bc1a9ea552c7",
+    "tree_hash": "fe616b28da92f66f60fd87b513ccec224956b7b230333222248ec52a2ee78266"
+  },
+  "kind": "packet_blocked",
+  "packet": "tcl-client-introspection-filters-v1",
+  "reason_code": "repeated_packet_failure",
+  "role": "test-fixer",
+  "schema_version": 1,
+  "state": {
+    "capabilities": [
+      "official-tcl-coverage"
+    ],
+    "commit": "815bd2c",
+    "evidence_path": "harness/evidence/runs/20260524T193957Z-815bd2c-test-fixer-tcl-client-introspection-filters-v1.json",
+    "git_dirty": false,
+    "git_status_short": [],
+    "mode": "test-fixer",
+    "packet": {
+      "batch": "tcl-unlock-wave-b",
+      "capabilities": [
+        "official-tcl-coverage",
+        "client-introspection",
+        "single-node-core"
+      ],
+      "claim_level": "telemetry",
+      "cost_hint": "large",
+      "depends_on": [
+        "tcl-breadth-current-red-after-wave-a-v1",
+        "tcl-client-protocol-info-v1"
+      ],
+      "id": "tcl-client-introspection-filters-v1",
+      "note": "Unlock CLIENT LIST/CLIENT INFO/COMMAND introspection aborts. Implement the common CLIENT LIST filter syntax and output fields used by upstream TCL (ID, ADDR, LADDR, TYPE, USER, SKIPME, MAXAGE, IP, CAPA as feasible), plus early COMMAND GETKEYS/GETKEYSANDFLAGS semantics. Keep the model single-node; do not fake cluster or module command tables.",
+      "opportunistic_scope": {
+        "may_touch_packet_targets": true,
+        "mode": "same_batch",
+        "requires_own_gate": true,
+        "requires_rationale": true
+      },
+      "phase": 143,
+      "resources": [
+        "client-state",
+        "protocol",
+        "oracle-results"
+      ],
+      "role": "test-fixer",
+      "schema_version": 1,
+      "selector": "nightly",
+      "source_ranges": [
+        "reference/valkey/src/networking.c:5262-5851",
+        "reference/valkey/src/server.c:6172-6505",
+        "reference/valkey/tests/unit/introspection.tcl:1-230",
+        "reference/valkey/tests/unit/introspection-2.tcl"
+      ],
+      "targets": [
+        "crates/redis-commands/src/connection.rs",
+        "crates/redis-core/src/networking.rs",
+        "crates/redis-core/src/client.rs",
+        "crates/redis-core/src/client_info.rs",
+        "docs/TCL_UNLOCK_OVERNIGHT_20260524.md"
+      ]
+    },
+    "packet_id": "tcl-client-introspection-filters-v1",
+    "prompt_hash": "2bd037b2ea0ffedd",
+    "role": "test-fixer",
+    "run_id": "loop-58c54e2240c4ce47",
+    "runner_id": null,
+    "target_commit": "815bd2c59d246f794adebacb2f40bc1a9ea552c7",
+    "targets": [
+      "crates/redis-commands/src/connection.rs",
+      "crates/redis-core/src/client.rs",
+      "crates/redis-core/src/client_info.rs",
+      "crates/redis-core/src/networking.rs",
+      "docs/TCL_UNLOCK_OVERNIGHT_20260524.md"
+    ],
+    "tree_hash": "b2b4e18138fb58584db605fd86191879755409b878cded0063d91a2fb21da972",
+    "ts": "2026-05-24T19:39:57.367695Z"
+  },
+  "summary": "same packet failed 1 consecutive time(s); loop stopped to avoid repeated unsafe churn",
+  "worker": "supervisor"
+}

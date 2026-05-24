@@ -17,6 +17,9 @@ use redis_core::acl::{
 use redis_core::client_info::client_info_registry;
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
 use redis_core::metrics::server_metrics;
+use redis_core::networking::{
+    client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
+};
 use redis_core::notify::keyspace_events_string_to_flags;
 use redis_core::{CommandContext, PersistenceStatus, RedisDb};
 use redis_protocol::frame::RespFrame;
@@ -1069,6 +1072,7 @@ pub fn reset_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     unregister_monitor_client(ctx.client_ref().id());
     ctx.client_mut().reset_state();
+    refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"RESET")
 }
 
@@ -1526,52 +1530,87 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 #[derive(Default)]
 struct ClientListFilters {
     ids: Vec<u64>,
-    addr: Option<String>,
-    laddr: Option<String>,
-    name: Option<String>,
-    flags: Option<String>,
-    user: Option<String>,
+    not_ids: Vec<u64>,
+    addr: Option<Vec<u8>>,
+    not_addr: Option<Vec<u8>>,
+    laddr: Option<Vec<u8>>,
+    not_laddr: Option<Vec<u8>>,
+    type_filter: Option<ClientTypeFilter>,
+    not_type_filter: Option<ClientTypeFilter>,
+    name: Option<Vec<u8>>,
+    not_name: Option<Vec<u8>>,
+    flags: Option<Vec<u8>>,
+    not_flags: Option<Vec<u8>>,
+    user: Option<Vec<u8>>,
+    not_user: Option<Vec<u8>>,
     skipme: Option<bool>,
+    maxage: Option<i64>,
+    ip: Option<Vec<u8>>,
+    not_ip: Option<Vec<u8>>,
+    capa: Option<Vec<u8>>,
+    not_capa: Option<Vec<u8>>,
+    lib_name: Option<Vec<u8>>,
+    not_lib_name: Option<Vec<u8>>,
+    lib_ver: Option<Vec<u8>>,
+    not_lib_ver: Option<Vec<u8>>,
+    db: Option<u32>,
+    not_db: Option<u32>,
 }
 
-fn client_user_name(client: &redis_core::client::Client) -> String {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientTypeFilter {
+    Normal,
+    Replica,
+    PubSub,
+    Primary,
+}
+
+fn client_user_bytes(client: &redis_core::client::Client) -> &[u8] {
     client
         .authenticated_user
         .as_ref()
-        .map(|u| String::from_utf8_lossy(u.as_bytes()).into_owned())
-        .unwrap_or_else(|| "default".to_string())
+        .map(|u| u.as_bytes())
+        .unwrap_or(b"default")
 }
 
-fn client_name_string(client: &redis_core::client::Client) -> String {
-    client
-        .name
-        .as_ref()
-        .map(|n| String::from_utf8_lossy(n.as_bytes()).into_owned())
-        .unwrap_or_default()
+fn client_name_bytes(client: &redis_core::client::Client) -> Option<&[u8]> {
+    client.name.as_ref().map(|n| n.as_bytes())
 }
 
-fn client_flags_string(client: &redis_core::client::Client) -> String {
-    let mut out = String::new();
-    if client.import_source {
-        out.push('I');
+fn client_flags_vec(client: &redis_core::client::Client) -> Vec<u8> {
+    let mut out = Vec::new();
+    if client.is_replica {
+        out.push(b'S');
     }
-    if client.tracking.enabled {
-        out.push('t');
+    if client.in_pubsub_mode() {
+        out.push(b'P');
     }
-    if client.tracking.bcast {
-        out.push('B');
-    }
-    if client.tracking.broken_redirect {
-        out.push('R');
+    if client.flag_multi() {
+        out.push(b'x');
     }
     if client.blocked_on_keys || client.flag_blocked() {
-        out.push('b');
+        out.push(b'b');
+    }
+    if client.import_source {
+        out.push(b'I');
+    }
+    if client.tracking.enabled {
+        out.push(b't');
+    }
+    if client.tracking.bcast {
+        out.push(b'B');
+    }
+    if client.tracking.broken_redirect {
+        out.push(b'R');
     }
     if client.flags.monitor {
-        out.push('O');
+        out.push(b'O');
+    }
+    if client.flags.dirty_cas {
+        out.push(b'd');
     }
     if out.is_empty() {
-        out.push('N');
+        out.push(b'N');
     }
     out
 }
@@ -1589,6 +1628,69 @@ fn watched_key_count_for_client(client_id: u64) -> usize {
         .count()
 }
 
+fn client_capa_vec(client: &redis_core::client::Client) -> Vec<u8> {
+    if client.capa_redirect {
+        b"r".to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+fn snapshot_in_pubsub_mode(snap: &redis_core::client_info::ClientSnapshot) -> bool {
+    snap.subscribed_channels > 0
+        || snap.subscribed_patterns > 0
+        || snap.cmd == "subscribe"
+        || snap.cmd == "psubscribe"
+        || snap.cmd == "ssubscribe"
+}
+
+fn snapshot_flags_vec(snap: &redis_core::client_info::ClientSnapshot) -> Vec<u8> {
+    let mut out = Vec::new();
+    if snapshot_in_pubsub_mode(snap) {
+        out.push(b'P');
+    }
+    if snap.queued_multi_count.is_some() {
+        out.push(b'x');
+    }
+    if snap.blocked {
+        out.push(b'b');
+    }
+    if snap.import_source {
+        out.push(b'I');
+    }
+    if snap.tracking {
+        out.push(b't');
+    }
+    if snap.tracking_bcast {
+        out.push(b'B');
+    }
+    if snap.tracking_broken_redirect {
+        out.push(b'R');
+    }
+    if out.is_empty() {
+        out.push(b'N');
+    }
+    out
+}
+
+fn snapshot_type(snap: &redis_core::client_info::ClientSnapshot) -> ClientTypeFilter {
+    if snapshot_in_pubsub_mode(snap) {
+        ClientTypeFilter::PubSub
+    } else {
+        ClientTypeFilter::Normal
+    }
+}
+
+fn current_client_type(client: &redis_core::client::Client) -> ClientTypeFilter {
+    if client.is_replica {
+        ClientTypeFilter::Replica
+    } else if client.in_pubsub_mode() {
+        ClientTypeFilter::PubSub
+    } else {
+        ClientTypeFilter::Normal
+    }
+}
+
 fn client_tracking_redir(client: &redis_core::client::Client) -> i64 {
     if client.tracking.enabled {
         client.tracking.redirect
@@ -1599,54 +1701,209 @@ fn client_tracking_redir(client: &redis_core::client::Client) -> i64 {
 
 fn format_current_client_info_line(
     client: &redis_core::client::Client,
-    command_name: &str,
-) -> String {
-    let addr = client
-        .addr
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1:0".to_string());
-    let laddr = "127.0.0.1:0";
-    let flags = client_flags_string(client);
-    let name = client_name_string(client);
-    let user = client_user_name(client);
+    command_name: &[u8],
+) -> Vec<u8> {
+    let mut line = Vec::with_capacity(320);
+    let addr = client.addr.as_deref().unwrap_or("127.0.0.1:0");
+    let flags = client_flags_vec(client);
+    let capa = client_capa_vec(client);
     let multi = if client.flag_multi() {
         client.queued_argvs.len() as i64
     } else {
         -1
     };
     let watch = watched_key_count_for_client(client.id);
-    format!(
-        "id={} addr={} laddr={} fd=0 name={} age=0 idle=0 flags={} capa= db={} sub={} psub={} ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name= lib-ver= tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n",
-        client.id,
-        addr,
-        laddr,
-        name,
-        flags,
+    let _ = write!(line, "id={} addr={}", client.id, addr);
+    line.extend_from_slice(b" laddr=127.0.0.1:0 fd=0 name=");
+    if let Some(name) = &client.name {
+        line.extend_from_slice(name.as_bytes());
+    }
+    line.extend_from_slice(b" age=0 idle=0 flags=");
+    line.extend_from_slice(&flags);
+    line.extend_from_slice(b" capa=");
+    line.extend_from_slice(&capa);
+    let _ = write!(
+        line,
+        " db={} sub={} psub={} ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=",
         client.db_index,
         client.subscribed_channels.len(),
         client.subscribed_patterns.len(),
         multi,
         watch,
-        command_name,
-        user,
+    );
+    line.extend_from_slice(command_name);
+    line.extend_from_slice(b" user=");
+    line.extend_from_slice(client_user_bytes(client));
+    let _ = write!(
+        line,
+        " redir={} resp={} lib-name=",
         client_tracking_redir(client),
         client.resp_proto,
-    )
+    );
+    if let Some(lib_name) = &client.lib_name {
+        line.extend_from_slice(lib_name.as_bytes());
+    }
+    line.extend_from_slice(b" lib-ver=");
+    if let Some(lib_ver) = &client.lib_ver {
+        line.extend_from_slice(lib_ver.as_bytes());
+    }
+    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n");
+    line
 }
 
 fn format_snapshot_client_info_line(
     snap: &redis_core::client_info::ClientSnapshot,
-    command_name: &str,
-) -> String {
-    let flags = if snap.blocked { "b" } else { "N" };
-    format!(
-        "id={} addr={} laddr=127.0.0.1:0 fd=0 name= age=0 idle=0 flags={} capa= db={} sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user=default redir=-1 resp=2 lib-name= lib-ver= tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n",
+    command_name: &[u8],
+) -> Vec<u8> {
+    let mut line = Vec::with_capacity(320);
+    let flags = snapshot_flags_vec(snap);
+    let capa = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+    let multi = snap.queued_multi_count.map(|n| n as i64).unwrap_or(-1);
+    let _ = write!(
+        line,
+        "id={} addr={} laddr=127.0.0.1:0 fd=0 name=",
         snap.id,
         snap.addr,
-        flags,
+    );
+    if let Some(name) = &snap.name {
+        line.extend_from_slice(name.as_bytes());
+    }
+    line.extend_from_slice(b" age=0 idle=0 flags=");
+    line.extend_from_slice(&flags);
+    line.extend_from_slice(b" capa=");
+    line.extend_from_slice(capa);
+    let _ = write!(
+        line,
+        " db={} sub={} psub={} ssub=0 multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=",
         snap.db_index,
-        command_name,
-    )
+        snap.subscribed_channels,
+        snap.subscribed_patterns,
+        multi,
+    );
+    line.extend_from_slice(command_name);
+    line.extend_from_slice(b" user=");
+    if let Some(user) = &snap.user {
+        line.extend_from_slice(user.as_bytes());
+    } else {
+        line.extend_from_slice(b"default");
+    }
+    let _ = write!(line, " redir=-1 resp={} lib-name=", snap.resp_proto);
+    if let Some(lib_name) = &snap.lib_name {
+        line.extend_from_slice(lib_name.as_bytes());
+    }
+    line.extend_from_slice(b" lib-ver=");
+    if let Some(lib_ver) = &snap.lib_ver {
+        line.extend_from_slice(lib_ver.as_bytes());
+    }
+    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n");
+    line
+}
+
+fn acl_user_exists(name: &[u8]) -> bool {
+    let key = RedisString::from_bytes(name);
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.users.contains_key(&key)
+}
+
+fn unknown_client_type_error(value: &[u8]) -> RedisError {
+    let mut msg = b"ERR Unknown client type '".to_vec();
+    msg.extend_from_slice(value);
+    msg.push(b'\'');
+    RedisError::runtime(msg)
+}
+
+fn no_such_user_error(value: &[u8]) -> RedisError {
+    let mut msg = b"ERR No such user '".to_vec();
+    msg.extend_from_slice(value);
+    msg.push(b'\'');
+    RedisError::runtime(msg)
+}
+
+fn append_value_error(prefix: &[u8], value: &[u8]) -> RedisError {
+    let mut msg = prefix.to_vec();
+    msg.extend_from_slice(value);
+    RedisError::runtime(msg)
+}
+
+fn parse_client_type(value: &[u8]) -> Option<ClientTypeFilter> {
+    if ascii_eq_ignore_case(value, b"normal") {
+        Some(ClientTypeFilter::Normal)
+    } else if ascii_eq_ignore_case(value, b"replica") || ascii_eq_ignore_case(value, b"slave") {
+        Some(ClientTypeFilter::Replica)
+    } else if ascii_eq_ignore_case(value, b"pubsub") {
+        Some(ClientTypeFilter::PubSub)
+    } else if ascii_eq_ignore_case(value, b"primary") || ascii_eq_ignore_case(value, b"master") {
+        Some(ClientTypeFilter::Primary)
+    } else {
+        None
+    }
+}
+
+fn parse_positive_i64_for_client_filter(value: &[u8], name: &[u8]) -> RedisResult<i64> {
+    let Some(parsed) = parse_i64_strict(value) else {
+        let mut msg = b"ERR ".to_vec();
+        msg.extend_from_slice(name);
+        msg.extend_from_slice(b" is not an integer or out of range");
+        return Err(RedisError::runtime(msg));
+    };
+    if parsed <= 0 {
+        let mut msg = b"ERR ".to_vec();
+        msg.extend_from_slice(name);
+        msg.extend_from_slice(b" should be greater than 0");
+        return Err(RedisError::runtime(msg));
+    }
+    Ok(parsed)
+}
+
+fn parse_db_filter(ctx: &CommandContext<'_>, value: &[u8], name: &[u8]) -> RedisResult<u32> {
+    let Some(parsed) = parse_i64_strict(value) else {
+        let mut msg = b"ERR ".to_vec();
+        msg.extend_from_slice(name);
+        msg.extend_from_slice(b" is not an integer or out of range");
+        return Err(RedisError::runtime(msg));
+    };
+    if parsed < 0 || parsed >= ctx.database_count() as i64 {
+        let max = ctx.database_count().saturating_sub(1);
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"ERR ");
+        msg.extend_from_slice(name);
+        let _ = write!(msg, " number should be between 0 and {}", max);
+        return Err(RedisError::runtime(msg));
+    }
+    Ok(parsed as u32)
+}
+
+fn flags_match(actual: &[u8], filter: &[u8]) -> bool {
+    filter.iter().all(|b| actual.contains(b))
+}
+
+fn option_bytes_matches(actual: Option<&RedisString>, expected: &[u8]) -> bool {
+    actual
+        .map(|value| value.as_bytes() == expected)
+        .unwrap_or(false)
+}
+
+fn option_bytes_not_matches(actual: Option<&RedisString>, expected: &[u8]) -> bool {
+    actual
+        .map(|value| value.as_bytes() != expected)
+        .unwrap_or(true)
+}
+
+fn refresh_client_info_registry(client: &redis_core::client::Client) {
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.update_client_metadata(client);
+    }
+}
+
+fn require_filter_value(ctx: &CommandContext<'_>, idx: usize) -> RedisResult<RedisString> {
+    if idx + 1 >= ctx.arg_count() {
+        return Err(RedisError::syntax(b"syntax error"));
+    }
+    ctx.arg_owned(idx + 1)
 }
 
 fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientListFilters> {
@@ -1655,21 +1912,23 @@ fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientList
     while idx < ctx.arg_count() {
         let opt = ctx.arg(idx)?;
         let opt_bytes = opt.as_bytes();
-        if opt_bytes.eq_ignore_ascii_case(b"ID") {
+        if opt_bytes.eq_ignore_ascii_case(b"ID") || opt_bytes.eq_ignore_ascii_case(b"NOT-ID") {
+            let negative = opt_bytes.eq_ignore_ascii_case(b"NOT-ID");
             idx += 1;
             let mut saw_id = false;
             while idx < ctx.arg_count() {
                 let raw = ctx.arg(idx)?;
-                if parse_i64_strict(raw.as_bytes()).is_none() {
+                let Some(id) = parse_i64_strict(raw.as_bytes()) else {
                     break;
+                };
+                if id < 1 {
+                    return Err(RedisError::runtime(b"ERR client-id should be greater than 0"));
                 }
-                let id = parse_i64_strict(raw.as_bytes()).unwrap();
-                if id < 0 {
-                    return Err(RedisError::runtime(
-                        b"ERR value is not an integer or out of range",
-                    ));
+                if negative {
+                    filters.not_ids.push(id as u64);
+                } else {
+                    filters.ids.push(id as u64);
                 }
-                filters.ids.push(id as u64);
                 saw_id = true;
                 idx += 1;
             }
@@ -1677,80 +1936,130 @@ fn parse_client_list_filters(ctx: &CommandContext<'_>) -> RedisResult<ClientList
                 return Err(RedisError::syntax(b"syntax error"));
             }
         } else if opt_bytes.eq_ignore_ascii_case(b"ADDR") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
-            filters.addr = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
+            filters.addr = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-ADDR") {
+            filters.not_addr = Some(require_filter_value(ctx, idx)?.into_bytes());
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"LADDR") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
-            filters.laddr = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
+            filters.laddr = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-LADDR") {
+            filters.not_laddr = Some(require_filter_value(ctx, idx)?.into_bytes());
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"TYPE") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
-            let ty = ctx.arg(idx + 1)?;
-            if !ty.as_bytes().eq_ignore_ascii_case(b"normal") {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
+            let value = require_filter_value(ctx, idx)?;
+            filters.type_filter = Some(
+                parse_client_type(value.as_bytes())
+                    .ok_or_else(|| unknown_client_type_error(value.as_bytes()))?,
+            );
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-TYPE") {
+            let value = require_filter_value(ctx, idx)?;
+            filters.not_type_filter = Some(
+                parse_client_type(value.as_bytes())
+                    .ok_or_else(|| unknown_client_type_error(value.as_bytes()))?,
+            );
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"USER") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
+            let value = require_filter_value(ctx, idx)?;
+            if !acl_user_exists(value.as_bytes()) {
+                return Err(no_such_user_error(value.as_bytes()));
             }
-            let user = String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned();
-            if user != "default" {
-                return Err(RedisError::runtime(
-                    format!("ERR No such user '{}'", user).into_bytes(),
-                ));
-            }
-            filters.user = Some(user);
+            filters.user = Some(value.into_bytes());
             idx += 2;
-        } else if opt_bytes.eq_ignore_ascii_case(b"NAME") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-USER") {
+            let value = require_filter_value(ctx, idx)?;
+            if !acl_user_exists(value.as_bytes()) {
+                return Err(no_such_user_error(value.as_bytes()));
             }
-            filters.name = Some(String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned());
-            idx += 2;
-        } else if opt_bytes.eq_ignore_ascii_case(b"FLAGS") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
-            let flags = String::from_utf8_lossy(ctx.arg(idx + 1)?.as_bytes()).into_owned();
-            if flags
-                .chars()
-                .any(|c| !matches!(c, 'N' | 'b' | 't' | 'B' | 'R' | 'I' | 'O'))
-            {
-                return Err(RedisError::runtime(
-                    format!("ERR Unknown flags found in the provided filter: {}", flags)
-                        .into_bytes(),
-                ));
-            }
-            filters.flags = Some(flags);
+            filters.not_user = Some(value.into_bytes());
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"SKIPME") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
-            }
-            let v = ctx.arg(idx + 1)?;
-            if v.as_bytes().eq_ignore_ascii_case(b"yes") {
+            let value = require_filter_value(ctx, idx)?;
+            if value.as_bytes().eq_ignore_ascii_case(b"yes") {
                 filters.skipme = Some(true);
-            } else if v.as_bytes().eq_ignore_ascii_case(b"no") {
+            } else if value.as_bytes().eq_ignore_ascii_case(b"no") {
                 filters.skipme = Some(false);
             } else {
                 return Err(RedisError::syntax(b"syntax error"));
             }
             idx += 2;
         } else if opt_bytes.eq_ignore_ascii_case(b"MAXAGE") {
-            if idx + 1 >= ctx.arg_count() {
-                return Err(RedisError::syntax(b"syntax error"));
+            let value = require_filter_value(ctx, idx)?;
+            filters.maxage = Some(parse_positive_i64_for_client_filter(value.as_bytes(), b"maxage")?);
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"FLAGS") {
+            let value = require_filter_value(ctx, idx)?;
+            if !validate_client_flag_filter(value.as_bytes()) {
+                return Err(append_value_error(
+                    b"ERR Unknown flags found in the provided filter: ",
+                    value.as_bytes(),
+                ));
             }
-            if parse_i64_strict(ctx.arg(idx + 1)?.as_bytes()).is_none() {
-                return Err(RedisError::runtime(b"ERR maxage is not an integer"));
+            filters.flags = Some(value.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-FLAGS") {
+            let value = require_filter_value(ctx, idx)?;
+            if !validate_client_flag_filter(value.as_bytes()) {
+                return Err(append_value_error(
+                    b"ERR Unknown flags found in the NOT-FLAGS filter: ",
+                    value.as_bytes(),
+                ));
             }
+            filters.not_flags = Some(value.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NAME") {
+            filters.name = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-NAME") {
+            filters.not_name = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"IP") {
+            filters.ip = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-IP") {
+            filters.not_ip = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"CAPA") {
+            let value = require_filter_value(ctx, idx)?;
+            if !validate_client_capa_filter(value.as_bytes()) {
+                return Err(append_value_error(
+                    b"ERR Unknown capa found in the provided filter: ",
+                    value.as_bytes(),
+                ));
+            }
+            filters.capa = Some(value.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-CAPA") {
+            let value = require_filter_value(ctx, idx)?;
+            if !validate_client_capa_filter(value.as_bytes()) {
+                return Err(append_value_error(
+                    b"ERR Unknown capa found in the NOT-CAPA filter: ",
+                    value.as_bytes(),
+                ));
+            }
+            filters.not_capa = Some(value.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"LIB-NAME") {
+            filters.lib_name = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-LIB-NAME") {
+            filters.not_lib_name = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"LIB-VER") {
+            filters.lib_ver = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-LIB-VER") {
+            filters.not_lib_ver = Some(require_filter_value(ctx, idx)?.into_bytes());
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"DB") {
+            let value = require_filter_value(ctx, idx)?;
+            filters.db = Some(parse_db_filter(ctx, value.as_bytes(), b"DB")?);
+            idx += 2;
+        } else if opt_bytes.eq_ignore_ascii_case(b"NOT-DB") {
+            let value = require_filter_value(ctx, idx)?;
+            filters.not_db = Some(parse_db_filter(ctx, value.as_bytes(), b"NOT-DB")?);
             idx += 2;
         } else {
             return Err(RedisError::syntax(b"syntax error"));
@@ -1769,33 +2078,131 @@ fn current_client_matches_filters(
     if !filters.ids.is_empty() && !filters.ids.contains(&client.id) {
         return false;
     }
+    if !filters.not_ids.is_empty() && filters.not_ids.contains(&client.id) {
+        return false;
+    }
     let addr = client
         .addr
         .as_deref()
-        .unwrap_or("127.0.0.1:0");
+        .unwrap_or("127.0.0.1:0")
+        .as_bytes();
     if let Some(expected) = &filters.addr {
-        if expected != addr {
+        if expected.as_slice() != addr {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_addr {
+        if expected.as_slice() == addr {
             return false;
         }
     }
     if let Some(expected) = &filters.laddr {
-        if expected != "127.0.0.1:0" {
+        if expected.as_slice() != b"127.0.0.1:0" {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_laddr {
+        if expected.as_slice() == b"127.0.0.1:0" {
+            return false;
+        }
+    }
+    let client_type = current_client_type(client);
+    if let Some(expected) = filters.type_filter {
+        if expected != client_type {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.not_type_filter {
+        if expected == client_type {
             return false;
         }
     }
     if let Some(expected) = &filters.name {
-        if expected != &client_name_string(client) {
+        if client_name_bytes(client) != Some(expected.as_slice()) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_name {
+        if client_name_bytes(client) == Some(expected.as_slice()) {
             return false;
         }
     }
     if let Some(expected) = &filters.user {
-        if expected != &client_user_name(client) {
+        if expected.as_slice() != client_user_bytes(client) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_user {
+        if expected.as_slice() == client_user_bytes(client) {
+            return false;
+        }
+    }
+    if let Some(maxage) = filters.maxage {
+        if 0 < maxage {
             return false;
         }
     }
     if let Some(expected) = &filters.flags {
-        let actual = client_flags_string(client);
-        if !expected.chars().all(|c| actual.contains(c)) {
+        let actual = client_flags_vec(client);
+        if !flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_flags {
+        let actual = client_flags_vec(client);
+        if flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.ip {
+        if !client_matches_ip_filter(addr, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_ip {
+        if client_matches_ip_filter(addr, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.capa {
+        let actual = client_capa_vec(client);
+        if !flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_capa {
+        let actual = client_capa_vec(client);
+        if flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.lib_name {
+        if !option_bytes_matches(client.lib_name.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_lib_name {
+        if !option_bytes_not_matches(client.lib_name.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.lib_ver {
+        if !option_bytes_matches(client.lib_ver.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_lib_ver {
+        if !option_bytes_not_matches(client.lib_ver.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.db {
+        if client.db_index != expected {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.not_db {
+        if client.db_index == expected {
             return false;
         }
     }
@@ -1809,29 +2216,129 @@ fn snapshot_matches_filters(
     if !filters.ids.is_empty() && !filters.ids.contains(&snap.id) {
         return false;
     }
+    if !filters.not_ids.is_empty() && filters.not_ids.contains(&snap.id) {
+        return false;
+    }
+    let addr = snap.addr.as_bytes();
     if let Some(expected) = &filters.addr {
-        if expected != &snap.addr {
+        if expected.as_slice() != addr {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_addr {
+        if expected.as_slice() == addr {
             return false;
         }
     }
     if let Some(expected) = &filters.laddr {
-        if expected != "127.0.0.1:0" {
+        if expected.as_slice() != b"127.0.0.1:0" {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_laddr {
+        if expected.as_slice() == b"127.0.0.1:0" {
+            return false;
+        }
+    }
+    let client_type = snapshot_type(snap);
+    if let Some(expected) = filters.type_filter {
+        if expected != client_type {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.not_type_filter {
+        if expected == client_type {
             return false;
         }
     }
     if let Some(expected) = &filters.user {
-        if expected != "default" {
+        let actual = snap.user.as_ref().map(|u| u.as_bytes()).unwrap_or(b"default");
+        if expected.as_slice() != actual {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_user {
+        let actual = snap.user.as_ref().map(|u| u.as_bytes()).unwrap_or(b"default");
+        if expected.as_slice() == actual {
             return false;
         }
     }
     if let Some(expected) = &filters.name {
-        if !expected.is_empty() {
+        if snap.name.as_ref().map(|n| n.as_bytes()) != Some(expected.as_slice()) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_name {
+        if snap.name.as_ref().map(|n| n.as_bytes()) == Some(expected.as_slice()) {
+            return false;
+        }
+    }
+    if let Some(maxage) = filters.maxage {
+        if 0 < maxage {
             return false;
         }
     }
     if let Some(expected) = &filters.flags {
-        let actual = if snap.blocked { "b" } else { "N" };
-        if !expected.chars().all(|c| actual.contains(c)) {
+        let actual = snapshot_flags_vec(snap);
+        if !flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_flags {
+        let actual = snapshot_flags_vec(snap);
+        if flags_match(&actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.ip {
+        if !client_matches_ip_filter(addr, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_ip {
+        if client_matches_ip_filter(addr, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.capa {
+        let actual = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+        if !flags_match(actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_capa {
+        let actual = if snap.capa_redirect { b"r".as_slice() } else { b"".as_slice() };
+        if flags_match(actual, expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.lib_name {
+        if !option_bytes_matches(snap.lib_name.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_lib_name {
+        if !option_bytes_not_matches(snap.lib_name.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.lib_ver {
+        if !option_bytes_matches(snap.lib_ver.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = &filters.not_lib_ver {
+        if !option_bytes_not_matches(snap.lib_ver.as_ref(), expected) {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.db {
+        if snap.db_index != expected {
+            return false;
+        }
+    }
+    if let Some(expected) = filters.not_db {
+        if snap.db_index == expected {
             return false;
         }
     }
@@ -1877,6 +2384,7 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         let name = ctx.arg_owned(2usize)?;
         validate_client_name(name.as_bytes())?;
         ctx.client_mut().name = Some(name);
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"NO-EVICT") {
@@ -1903,12 +2411,46 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub_bytes, b"CAPA") {
+        if ctx.arg_count() < 3 {
+            return Err(RedisError::wrong_number_of_args(b"client|capa"));
+        }
+        for i in 2..ctx.arg_count() {
+            let opt = ctx.arg_owned(i)?;
+            if ascii_eq_ignore_case(opt.as_bytes(), b"REDIRECT") {
+                ctx.client_mut().capa_redirect = true;
+            }
+        }
+        refresh_client_info_registry(ctx.client_ref());
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub_bytes, b"SETINFO") {
+        if ctx.arg_count() != 4 {
+            return Err(RedisError::wrong_number_of_args(b"client|setinfo"));
+        }
+        let attr = ctx.arg_owned(2usize)?;
+        let value = ctx.arg_owned(3usize)?;
+        if ascii_eq_ignore_case(attr.as_bytes(), b"LIB-NAME") {
+            validate_client_setinfo_attr(b"lib-name", value.as_bytes())?;
+            ctx.client_mut().lib_name = Some(value);
+        } else if ascii_eq_ignore_case(attr.as_bytes(), b"LIB-VER") {
+            validate_client_setinfo_attr(b"lib-ver", value.as_bytes())?;
+            ctx.client_mut().lib_ver = Some(value);
+        } else {
+            let mut msg = b"ERR Unrecognized option '".to_vec();
+            msg.extend_from_slice(attr.as_bytes());
+            msg.push(b'\'');
+            return Err(RedisError::runtime(msg));
+        }
+        refresh_client_info_registry(ctx.client_ref());
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub_bytes, b"INFO") {
         if ctx.arg_count() != 2 {
             return Err(RedisError::wrong_number_of_args(b"client|info"));
         }
-        let line = format_current_client_info_line(ctx.client_ref(), "client|info");
-        return ctx.reply_bulk_string(RedisString::from_vec(line.into_bytes()));
+        let line = format_current_client_info_line(ctx.client_ref(), b"client|info");
+        return ctx.reply_bulk(&line);
     }
     if ascii_eq_ignore_case(sub_bytes, b"LIST") {
         let filters = parse_client_list_filters(ctx)?;
@@ -1919,9 +2461,12 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             };
             guard.all()
         };
-        let mut out = String::new();
+        let mut out = Vec::new();
         if current_client_matches_filters(ctx.client_ref(), &filters) {
-            out.push_str(&format_current_client_info_line(ctx.client_ref(), "client|list"));
+            out.extend_from_slice(&format_current_client_info_line(
+                ctx.client_ref(),
+                b"client|list",
+            ));
         }
         for snap in &snapshots {
             if snap.id == ctx.client_ref().id {
@@ -1930,10 +2475,14 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             if !snapshot_matches_filters(snap, &filters) {
                 continue;
             }
-            let cmd = if snap.cmd.is_empty() { "NULL" } else { snap.cmd.as_str() };
-            out.push_str(&format_snapshot_client_info_line(snap, cmd));
+            let cmd = if snap.cmd.is_empty() {
+                b"NULL".as_slice()
+            } else {
+                snap.cmd.as_bytes()
+            };
+            out.extend_from_slice(&format_snapshot_client_info_line(snap, cmd));
         }
-        return ctx.reply_bulk_string(RedisString::from_vec(out.into_bytes()));
+        return ctx.reply_bulk(&out);
     }
     if ascii_eq_ignore_case(sub_bytes, b"TRACKING") {
         return client_tracking_command(ctx);
@@ -2096,6 +2645,7 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     if ascii_eq_ignore_case(mode.as_bytes(), b"OFF") {
         ctx.client_mut().tracking = redis_core::client::ClientTrackingState::default();
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     if !ascii_eq_ignore_case(mode.as_bytes(), b"ON") {
@@ -2138,6 +2688,7 @@ fn client_tracking_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     client.tracking.broken_redirect = false;
     client.tracking.redirect = redirect;
     client.tracking.prefixes = prefixes;
+    refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"OK")
 }
 
@@ -2172,6 +2723,7 @@ fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         tracking.caching = true;
     }
+    refresh_client_info_registry(ctx.client_ref());
     ctx.reply_simple_string(b"OK")
 }
 
@@ -2236,10 +2788,12 @@ fn client_import_source_command(ctx: &mut CommandContext<'_>) -> RedisResult<()>
             return Err(RedisError::runtime(b"ERR Server is not in import mode"));
         }
         ctx.client_mut().import_source = true;
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(value.as_bytes(), b"OFF") {
         ctx.client_mut().import_source = false;
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     Err(RedisError::syntax(b"syntax error"))
@@ -2290,7 +2844,7 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     ))
 }
 
-/// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS`.
+/// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS` / `COMMAND GETKEYSANDFLAGS`.
 ///
 /// `COMMAND` (no args) replies with an array of bulk-string command names
 /// drawn from the dispatch table. This stub omits the per-command metadata
@@ -2298,7 +2852,7 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 ///
 /// `COMMAND COUNT` replies with the integer length of the dispatch table.
 /// `COMMAND GETKEYS` replies with keys derived from generated command metadata,
-/// with SORT/SORT_RO matching their upstream variable key parsing.
+/// with SORT/SORT_RO/SET matching their upstream variable key parsing.
 pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() == 1 {
         let handlers = crate::dispatch::HANDLERS;
@@ -2316,6 +2870,8 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"    Return the total number of commands in this server.",
             b"GETKEYS <full-command>",
             b"    Return the keys from a full command.",
+            b"GETKEYSANDFLAGS <full-command>",
+            b"    Return the keys and access flags from a full command.",
             b"HELP",
             b"    Return this help.",
         ];
@@ -2329,7 +2885,10 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_integer(n);
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"GETKEYS") {
-        return command_getkeys(ctx);
+        return command_getkeys(ctx, false);
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"GETKEYSANDFLAGS") {
+        return command_getkeys(ctx, true);
     }
     let mut msg =
         Vec::with_capacity(b"ERR Unknown COMMAND subcommand: ".len() + sub.as_bytes().len());
@@ -2338,26 +2897,111 @@ pub fn command_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     Err(RedisError::runtime(msg))
 }
 
-fn command_getkeys(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
+#[derive(Clone)]
+struct CommandKeyRef {
+    key: RedisString,
+    flags: Vec<RedisString>,
+}
+
+fn command_getkeys(ctx: &mut CommandContext<'_>, with_flags: bool) -> RedisResult<()> {
     if ctx.arg_count() < 3 {
-        return Err(RedisError::wrong_number_of_args(b"command|getkeys"));
+        let name = if with_flags {
+            b"command|getkeysandflags".as_slice()
+        } else {
+            b"command|getkeys".as_slice()
+        };
+        return Err(RedisError::wrong_number_of_args(name));
     }
-    let cmd_name = ctx.arg_owned(2usize)?;
-    let spec = crate::dispatch::registered_command_spec(cmd_name.as_bytes())
-        .ok_or_else(|| RedisError::runtime(b"ERR Invalid command specified"))?;
+    let spec = lookup_generated_command_for_getkeys(ctx)?;
     let command_argc = ctx.arg_count() - 2;
     validate_command_getkeys_arity(spec.arity, command_argc)?;
 
-    let keys = if ascii_eq_ignore_case(cmd_name.as_bytes(), b"SORT") {
-        sort_getkeys(ctx)?
-    } else if ascii_eq_ignore_case(cmd_name.as_bytes(), b"SORT_RO") {
-        vec![ctx.arg_owned(3usize)?]
+    let key_refs = command_key_refs(ctx, spec, command_argc)?;
+    let items = if with_flags {
+        key_refs
+            .into_iter()
+            .map(|key_ref| {
+                RespFrame::array(vec![
+                    RespFrame::bulk(key_ref.key),
+                    RespFrame::array(key_ref.flags.into_iter().map(RespFrame::bulk).collect()),
+                ])
+            })
+            .collect()
     } else {
-        command_getkeys_from_specs(ctx, spec, command_argc)?
-            .ok_or_else(|| RedisError::runtime(b"ERR Invalid arguments specified for command"))?
+        key_refs
+            .into_iter()
+            .map(|key_ref| RespFrame::bulk(key_ref.key))
+            .collect()
     };
-    let items = keys.into_iter().map(RespFrame::bulk).collect();
     ctx.reply_frame(&RespFrame::array(items))
+}
+
+fn lookup_generated_command_for_getkeys(
+    ctx: &CommandContext<'_>,
+) -> RedisResult<&'static crate::generated::GeneratedCommandSpec> {
+    let parent = ctx.arg(2)?.as_bytes();
+    if crate::dispatch::lookup_command(parent).is_none() {
+        return Err(RedisError::runtime(b"ERR Invalid command specified"));
+    }
+    let expected_function = expected_command_function_name(parent);
+    if ctx.arg_count() > 3 {
+        let sub = ctx.arg(3)?.as_bytes();
+        if let Some(spec) = crate::generated::COMMANDS.iter().find(|spec| {
+            ascii_eq_ignore_case(spec.name.as_bytes(), sub)
+                && ascii_eq_ignore_case(spec.function.as_bytes(), &expected_function)
+        }) {
+            return Ok(spec);
+        }
+    }
+    crate::generated::COMMANDS
+        .iter()
+        .find(|spec| {
+            ascii_eq_ignore_case(spec.name.as_bytes(), parent)
+                && ascii_eq_ignore_case(spec.function.as_bytes(), &expected_function)
+        })
+        .ok_or_else(|| RedisError::runtime(b"ERR Invalid command specified"))
+}
+
+fn expected_command_function_name(command: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(command.len() + b"Command".len());
+    for &b in command {
+        if b.is_ascii_alphanumeric() {
+            out.push(ascii_lower(b));
+        }
+    }
+    out.extend_from_slice(b"Command");
+    out
+}
+
+fn command_key_refs(
+    ctx: &CommandContext<'_>,
+    spec: &crate::generated::GeneratedCommandSpec,
+    command_argc: usize,
+) -> RedisResult<Vec<CommandKeyRef>> {
+    let cmd_name = ctx.arg(2)?.as_bytes();
+    if ascii_eq_ignore_case(cmd_name, b"SET") {
+        return Ok(vec![CommandKeyRef {
+            key: ctx.arg_owned(3usize)?,
+            flags: key_flags(&[b"OW".as_slice(), b"update".as_slice()]),
+        }]);
+    }
+    if ascii_eq_ignore_case(cmd_name, b"SORT") {
+        return sort_key_refs(ctx);
+    }
+    if ascii_eq_ignore_case(cmd_name, b"SORT_RO") {
+        return Ok(vec![CommandKeyRef {
+            key: ctx.arg_owned(3usize)?,
+            flags: key_flags(&[b"RO".as_slice(), b"access".as_slice()]),
+        }]);
+    }
+    match command_key_refs_from_specs(ctx, spec, command_argc) {
+        Ok(Some(keys)) => Ok(keys),
+        Ok(None) => Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        )),
+        Err(err) if command_allows_no_mandatory_keys(spec) => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
 }
 
 fn validate_command_getkeys_arity(arity: i32, argc: usize) -> RedisResult<()> {
@@ -2377,10 +3021,13 @@ fn validate_command_getkeys_arity(arity: i32, argc: usize) -> RedisResult<()> {
     }
 }
 
-fn sort_getkeys(ctx: &CommandContext<'_>) -> RedisResult<Vec<RedisString>> {
+fn sort_key_refs(ctx: &CommandContext<'_>) -> RedisResult<Vec<CommandKeyRef>> {
     let argc = ctx.arg_count() - 2;
     let mut keys = Vec::with_capacity(2);
-    keys.push(ctx.arg_owned(3usize)?);
+    keys.push(CommandKeyRef {
+        key: ctx.arg_owned(3usize)?,
+        flags: key_flags(&[b"RO".as_slice(), b"access".as_slice()]),
+    });
     let mut store_key_index: Option<usize> = None;
     let mut i = 2usize;
     while i < argc {
@@ -2400,16 +3047,19 @@ fn sort_getkeys(ctx: &CommandContext<'_>) -> RedisResult<Vec<RedisString>> {
         i += 1;
     }
     if let Some(index) = store_key_index {
-        keys.push(ctx.arg_owned(index)?);
+        keys.push(CommandKeyRef {
+            key: ctx.arg_owned(index)?,
+            flags: key_flags(&[b"OW".as_slice(), b"update".as_slice()]),
+        });
     }
     Ok(keys)
 }
 
-fn command_getkeys_from_specs(
+fn command_key_refs_from_specs(
     ctx: &CommandContext<'_>,
     spec: &crate::generated::GeneratedCommandSpec,
     command_argc: usize,
-) -> RedisResult<Option<Vec<RedisString>>> {
+) -> RedisResult<Option<Vec<CommandKeyRef>>> {
     let key_specs: Value = serde_json::from_str(spec.key_specs_json)
         .map_err(|_| RedisError::runtime(b"ERR Invalid arguments specified for command"))?;
     let Some(specs) = key_specs.as_array() else {
@@ -2429,14 +3079,53 @@ fn command_getkeys_from_specs(
             unsupported = true;
             continue;
         };
+        let flags = key_flags_from_spec(key_spec);
         for pos in positions {
-            keys.push(ctx.arg_owned(2 + pos)?);
+            keys.push(CommandKeyRef {
+                key: ctx.arg_owned(2 + pos)?,
+                flags: flags.clone(),
+            });
         }
     }
     if keys.is_empty() && unsupported {
         Ok(None)
     } else {
         Ok(Some(keys))
+    }
+}
+
+fn command_allows_no_mandatory_keys(spec: &crate::generated::GeneratedCommandSpec) -> bool {
+    spec.flags
+        .iter()
+        .any(|flag| *flag == crate::generated::CommandFlag::NO_MANDATORY_KEYS)
+}
+
+fn key_flags(flags: &[&[u8]]) -> Vec<RedisString> {
+    flags.iter().map(RedisString::from_bytes).collect()
+}
+
+fn key_flags_from_spec(spec: &Value) -> Vec<RedisString> {
+    let Some(flags) = spec.get("flags").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    flags
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|flag| *flag != "NOT_KEY" && *flag != "VARIABLE_FLAGS")
+        .map(command_key_flag_name)
+        .collect()
+}
+
+fn command_key_flag_name(flag: &str) -> RedisString {
+    match flag {
+        "RO" | "RW" | "OW" | "RM" => RedisString::from_bytes(flag.as_bytes()),
+        _ => {
+            let mut out = Vec::with_capacity(flag.len());
+            for &b in flag.as_bytes() {
+                out.push(ascii_lower(b));
+            }
+            RedisString::from_vec(out)
+        }
     }
 }
 
@@ -2555,14 +3244,27 @@ fn keynum_key_positions(
         ));
     };
     let numkeys = numkeys as usize;
-    let mut out = Vec::with_capacity(numkeys);
+    if numkeys == 0 {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(last_offset) = numkeys.checked_sub(1).and_then(|n| n.checked_mul(step)) else {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    };
+    let Some(last_pos) = first_key_index.checked_add(last_offset) else {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    };
+    if last_pos >= command_argc {
+        return Err(RedisError::runtime(
+            b"ERR Invalid arguments specified for command",
+        ));
+    }
+    let mut out = Vec::with_capacity(numkeys.min(command_argc));
     for idx in 0..numkeys {
         let pos = first_key_index + idx * step;
-        if pos >= command_argc {
-            return Err(RedisError::runtime(
-                b"ERR Invalid arguments specified for command",
-            ));
-        }
         out.push(pos);
     }
     Ok(Some(out))
@@ -3136,6 +3838,18 @@ fn validate_client_name(name: &[u8]) -> RedisResult<()> {
             return Err(RedisError::runtime(
                 b"ERR Client names cannot contain spaces, newlines or special characters.",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_client_setinfo_attr(attr_name: &[u8], value: &[u8]) -> RedisResult<()> {
+    for &b in value {
+        if !(b'!'..=b'~').contains(&b) {
+            let mut msg = b"ERR ".to_vec();
+            msg.extend_from_slice(attr_name);
+            msg.extend_from_slice(b" cannot contain spaces, newlines or special characters.");
+            return Err(RedisError::runtime(msg));
         }
     }
     Ok(())

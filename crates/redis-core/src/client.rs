@@ -225,6 +225,12 @@ pub struct Client {
     /// will parse. The flag is cleared on disconnect via the standard
     /// cleanup path.
     pub is_replica: bool,
+    /// CLIENT CAPA REDIRECT visible capability bit.
+    pub capa_redirect: bool,
+    /// Optional client library name set via `CLIENT SETINFO lib-name`.
+    pub lib_name: Option<RedisString>,
+    /// Optional client library version set via `CLIENT SETINFO lib-ver`.
+    pub lib_ver: Option<RedisString>,
 }
 
 /// Per-client transient flags.
@@ -304,6 +310,9 @@ impl Client {
             pending_wakes: Vec::new(),
             authenticated_user: initial_authenticated_user(),
             is_replica: false,
+            capa_redirect: false,
+            lib_name: None,
+            lib_ver: None,
         }
     }
 
@@ -350,6 +359,7 @@ impl Client {
         self.tracking = ClientTrackingState::default();
         self.import_source = false;
         self.authenticated_user = initial_authenticated_user();
+        self.capa_redirect = false;
         self.subscribed_channels.clear();
         self.subscribed_patterns.clear();
         self.pending_wakes.clear();
