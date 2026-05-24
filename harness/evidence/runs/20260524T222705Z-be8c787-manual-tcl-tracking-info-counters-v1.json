@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "packet": "tcl-tracking-info-counters-v1",
+  "runtime": "codex",
+  "commit": "be8c787",
+  "claim_level": "telemetry",
+  "surface": "correctness",
+  "method": "official-suite-plus-manual-wire-probe",
+  "status": "partial",
+  "summary": "Tracking INFO counters are implemented and wire-proven, but full unit/tracking remains no-summary because earlier invalidation-order tests desynchronize the Tcl client before this test.",
+  "commands": [
+    "cargo test -p redis-core runtime_tracking_info_counters_match_tracked_keys_and_bcast_prefixes --quiet",
+    "cargo check --workspace --quiet",
+    "cargo build --bin redis-server --quiet",
+    "python3 harness/oracle/tcl-survey.py --runner-id tcl-tracking-info-counters-v1 --skip-build --timeout-s 180 --files unit/tracking",
+    "manual RESP probe against target/debug/redis-server on port 26379"
+  ],
+  "artifacts": [
+    {
+      "kind": "tcl-survey-setup",
+      "path": "harness/oracle/results/tcl-survey/20260524T222705Z/setup.json"
+    },
+    {
+      "kind": "tcl-survey-log",
+      "path": "harness/oracle/results/tcl-survey/20260524T222705Z/unit__tracking.json",
+      "test": "unit/tracking"
+    }
+  ],
+  "manual_wire_probe": {
+    "scenario": [
+      "CLIENT TRACKING on REDIRECT <redir_id>",
+      "SET key1 1; SET key2 2 from a second client",
+      "GET key1; GET key2 from the tracking client",
+      "CLIENT TRACKING on BCAST PREFIX prefix: from a third client",
+      "SET prefix:key1 1; SET prefix:key2 2",
+      "INFO"
+    ],
+    "observed_info_fields": {
+      "tracking_clients": 2,
+      "tracking_total_keys": 2,
+      "tracking_total_items": 2,
+      "tracking_total_prefixes": 1
+    }
+  },
+  "tcl_survey": {
+    "status": "pass-runner-no-summary-file",
+    "summary": "TCL survey: 1 files, 0 passed tests, 0 failed tests, 0 timed out, 1 without summary",
+    "abort_test": "Tracking info is correct",
+    "exception": "can't read \"total_items\": no such variable",
+    "note": "The INFO field implementation is wire-proven; this full-file abort is not claimed as resolved because previous tracking invalidation-order failures can leave the Tcl connection out of phase before this test."
+  },
+  "measurements": [
+    {
+      "kind": "official",
+      "metric": "tcl_file_no_summary",
+      "test": "unit/tracking",
+      "value": 1,
+      "unit": "files"
+    },
+    {
+      "kind": "manual-wire",
+      "metric": "tracking_info_fields_match_upstream_scenario",
+      "test": "unit/tracking::Tracking info is correct",
+      "value": 1,
+      "unit": "bool"
+    }
+  ]
+}
