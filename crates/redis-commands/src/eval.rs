@@ -27,7 +27,7 @@ use std::sync::{Mutex, OnceLock};
 
 use mlua::{
     Error as LuaError, Function as LuaFunction, LightUserData, Lua, MultiValue, RegistryKey,
-    Table as LuaTable, Value as LuaValue,
+    Table as LuaTable, Value as LuaValue, Variadic,
 };
 
 use redis_core::CommandContext;
@@ -1484,6 +1484,147 @@ fn install_cmsgpack(lua: &Lua) -> mlua::Result<()> {
         .set("cmsgpack_safe", create_cmsgpack_table(lua, true)?)
 }
 
+/// LuaBitOp `barg`: reduce a Lua number to its low 32 bits using the same
+/// magic-number conversion LuaBitOp performs for the double `lua_Number`
+/// build that Valkey ships (`deps/lua/src/lua_bit.c`): add `2^52 + 2^51`,
+/// then take the low 32 bits of the resulting double. mlua is built with the
+/// `lua51` feature, so every Lua number is a `f64`, matching upstream exactly.
+fn bit_barg(n: f64) -> u32 {
+    const MAGIC: f64 = 6_755_399_441_055_744.0;
+    (n + MAGIC).to_bits() as u32
+}
+
+/// LuaBitOp `BRET`: a bit result is returned to Lua as `(lua_Number)(SBits)b`,
+/// i.e. the 32-bit value reinterpreted as a signed `int32_t` before widening
+/// back to the double `lua_Number`.
+fn bit_bret(b: u32) -> f64 {
+    f64::from(b as i32)
+}
+
+/// Shared body for the variadic `bit.band` / `bit.bor` / `bit.bxor`. Mirrors
+/// `BIT_OP`: seed the accumulator with the first argument, then fold the rest.
+fn bit_fold(args: Variadic<f64>, op: impl Fn(u32, u32) -> u32) -> mlua::Result<f64> {
+    let mut iter = args.into_iter();
+    let first = iter.next().ok_or_else(|| {
+        LuaError::RuntimeError("bad argument #1 to bitop (number expected, got no value)".into())
+    })?;
+    let mut acc = bit_barg(first);
+    for value in iter {
+        acc = op(acc, bit_barg(value));
+    }
+    Ok(bit_bret(acc))
+}
+
+/// LuaBitOp `bit.tohex`. Mirrors `bit_tohex` in `lua_bit.c`, including the
+/// `INT32_MIN` guard that makes `bit.tohex(65535, -2147483648)` resolve to
+/// `0000FFFF` (uppercase, clamped to 8 digits) rather than hitting the
+/// undefined `-INT32_MIN` negation.
+fn bit_tohex(x: f64, n_arg: Option<f64>) -> String {
+    let mut b = bit_barg(x);
+    let mut n: i32 = match n_arg {
+        Some(v) => bit_barg(v) as i32,
+        None => 8,
+    };
+    if n == i32::MIN {
+        n = i32::MIN + 1;
+    }
+    let uppercase = n < 0;
+    if uppercase {
+        n = -n;
+    }
+    if n > 8 {
+        n = 8;
+    }
+    let len = n.max(0) as usize;
+    let digits: &[u8; 16] = if uppercase {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut buf = vec![0u8; len];
+    for slot in buf.iter_mut().rev() {
+        *slot = digits[(b & 0xf) as usize];
+        b >>= 4;
+    }
+    String::from_utf8(buf).expect("hex digits are ASCII")
+}
+
+/// Build the Redis-compatible `bit` global (LuaBitOp 1.0.2 surface) as a
+/// readonly table, matching the cjson/cmsgpack install shape. Only the subset
+/// the upstream `unit/scripting.tcl` suite exercises is needed, but the whole
+/// LuaBitOp API is small and well defined, so it is provided in full.
+fn create_bit_table(lua: &Lua) -> mlua::Result<LuaTable> {
+    let table = lua.create_table()?;
+
+    table.raw_set(
+        "tobit",
+        lua.create_function(|_, n: f64| Ok(bit_bret(bit_barg(n))))?,
+    )?;
+    table.raw_set(
+        "bnot",
+        lua.create_function(|_, n: f64| Ok(bit_bret(!bit_barg(n))))?,
+    )?;
+    table.raw_set(
+        "band",
+        lua.create_function(|_, args: Variadic<f64>| bit_fold(args, |a, b| a & b))?,
+    )?;
+    table.raw_set(
+        "bor",
+        lua.create_function(|_, args: Variadic<f64>| bit_fold(args, |a, b| a | b))?,
+    )?;
+    table.raw_set(
+        "bxor",
+        lua.create_function(|_, args: Variadic<f64>| bit_fold(args, |a, b| a ^ b))?,
+    )?;
+    table.raw_set(
+        "lshift",
+        lua.create_function(|_, (b, n): (f64, f64)| {
+            Ok(bit_bret(bit_barg(b).wrapping_shl(bit_barg(n) & 31)))
+        })?,
+    )?;
+    table.raw_set(
+        "rshift",
+        lua.create_function(|_, (b, n): (f64, f64)| {
+            Ok(bit_bret(bit_barg(b).wrapping_shr(bit_barg(n) & 31)))
+        })?,
+    )?;
+    table.raw_set(
+        "arshift",
+        lua.create_function(|_, (b, n): (f64, f64)| {
+            let shifted = (bit_barg(b) as i32).wrapping_shr(bit_barg(n) & 31);
+            Ok(bit_bret(shifted as u32))
+        })?,
+    )?;
+    table.raw_set(
+        "rol",
+        lua.create_function(|_, (b, n): (f64, f64)| {
+            Ok(bit_bret(bit_barg(b).rotate_left(bit_barg(n) & 31)))
+        })?,
+    )?;
+    table.raw_set(
+        "ror",
+        lua.create_function(|_, (b, n): (f64, f64)| {
+            Ok(bit_bret(bit_barg(b).rotate_right(bit_barg(n) & 31)))
+        })?,
+    )?;
+    table.raw_set(
+        "bswap",
+        lua.create_function(|_, n: f64| Ok(bit_bret(bit_barg(n).swap_bytes())))?,
+    )?;
+    table.raw_set(
+        "tohex",
+        lua.create_function(|_, (x, n): (f64, Option<f64>)| Ok(bit_tohex(x, n)))?,
+    )?;
+
+    table.raw_set("_NAME", "bit")?;
+    table.raw_set("_VERSION", "Lua BitOp 1.0.2")?;
+    readonly_table_proxy(lua, table)
+}
+
+fn install_bit(lua: &Lua) -> mlua::Result<()> {
+    lua.globals().set("bit", create_bit_table(lua)?)
+}
+
 /// Execute one inner command for `redis.call` / `redis.pcall`, capturing
 /// the reply bytes the handler appended to `reply_buf` and parsing them
 /// back into a [`ReplyValue`].
@@ -2161,6 +2302,8 @@ fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefi
     install_cmsgpack(&lua).map_err(|e| {
         RedisError::runtime(format!("ERR Lua cmsgpack install: {}", e).into_bytes())
     })?;
+    install_bit(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
 
     let registered: RefCell<Vec<FunctionDefinition>> = RefCell::new(Vec::new());
     let load_result: Result<(), LuaError> = lua.scope(|scope| {
@@ -2454,6 +2597,8 @@ fn run_loaded_function(
     install_cmsgpack(&lua).map_err(|e| {
         RedisError::runtime(format!("ERR Lua cmsgpack install: {}", e).into_bytes())
     })?;
+    install_bit(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
     install_keys_argv(&lua, keys, argv)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
 
@@ -2776,6 +2921,8 @@ fn run_script(
     install_cmsgpack(&lua).map_err(|e| {
         RedisError::runtime(format!("ERR Lua cmsgpack install: {}", e).into_bytes())
     })?;
+    install_bit(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua bit install: {}", e).into_bytes()))?;
     install_keys_argv(&lua, keys, argv)
         .map_err(|e| RedisError::runtime(format!("ERR Lua install: {}", e).into_bytes()))?;
 
@@ -3359,6 +3506,66 @@ mod tests {
             &hex_encode(packed.as_bytes().as_ref()),
             b"82a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a17882a17905a17881a178c0"
         );
+    }
+
+    #[test]
+    fn bit_minimal_bitop_matches_upstream() {
+        let lua = Lua::new();
+        install_bit(&lua).unwrap();
+
+        let ok: bool = lua
+            .load(
+                "return bit.tobit(1) == 1\n\
+                 and bit.band(1) == 1\n\
+                 and bit.bxor(1, 2) == 3\n\
+                 and bit.bor(1, 2, 4, 8, 16, 32, 64, 128) == 255",
+            )
+            .eval()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn bit_tohex_int32_min_width_matches_upstream() {
+        let lua = Lua::new();
+        install_bit(&lua).unwrap();
+
+        let hex: mlua::String = lua
+            .load("return bit.tohex(65535, -2147483648)")
+            .eval()
+            .unwrap();
+        assert_eq!(hex.as_bytes().as_ref(), b"0000FFFF");
+    }
+
+    #[test]
+    fn bit_shifts_use_32bit_wrapping_semantics() {
+        let lua = Lua::new();
+        install_bit(&lua).unwrap();
+
+        let ok: bool = lua
+            .load(
+                "return bit.bnot(0) == -1\n\
+                 and bit.lshift(1, 31) == -2147483648\n\
+                 and bit.rshift(-2147483648, 31) == 1\n\
+                 and bit.arshift(-2147483648, 31) == -1\n\
+                 and bit.rol(0x12345678, 12) == bit.tobit(0x45678123)\n\
+                 and bit.bswap(0x12345678) == bit.tobit(0x78563412)",
+            )
+            .eval()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn bit_table_is_readonly() {
+        let lua = Lua::new();
+        install_bit(&lua).unwrap();
+
+        let err = lua
+            .load("bit.lshift = function() return 1 end")
+            .exec()
+            .unwrap_err();
+        assert!(err.to_string().contains("Attempt to modify a readonly table"));
     }
 }
 

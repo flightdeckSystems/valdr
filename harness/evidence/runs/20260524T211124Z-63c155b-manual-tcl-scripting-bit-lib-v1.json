@@ -1,0 +1,42 @@
+{
+  "captured_ts": "2026-05-24T21:11:24Z",
+  "harness_context": {
+    "claim_level": "telemetry",
+    "commit": "63c155b",
+    "resources": [
+      "scripting",
+      "lua-runtime",
+      "oracle-results"
+    ],
+    "target_commit": "63c155b3ee89be3a4309298410f90c5ce41a438b"
+  },
+  "kind": "manual_packet_result",
+  "packet": "tcl-scripting-bit-lib-v1",
+  "result": {
+    "artifacts": [
+      {
+        "kind": "tcl-survey-log",
+        "path": "harness/oracle/results/tcl-survey/20260524T211124Z/unit__scripting.json"
+      },
+      {
+        "kind": "durable-diagnostic-log",
+        "path": "/tmp/scripting_durable.log"
+      }
+    ],
+    "gate_summary": {
+      "cargo_check_redis_commands": true,
+      "cargo_test_redis_commands_bit": true,
+      "focused_tcl_unit_scripting_advanced_past_bit": true,
+      "focused_tcl_unit_scripting_full_pass": false
+    },
+    "summary": "Installed the Valkey/LuaBitOp-compatible global bit table in the Lua sandbox. Focused unit tests pass, redis-commands checks pass, and unit/scripting now advances past the bit frontier to the next missing os global instead of aborting at bit.*.",
+    "tcl_frontier": {
+      "abort_test_after": "Measures elapsed time os.clock()",
+      "exception_after": "ERR [string \"function_library\"]:4: attempt to index global 'os' (a nil value).",
+      "log": "harness/oracle/results/tcl-survey/20260524T211124Z/unit__scripting.json",
+      "timed_out": false
+    }
+  },
+  "role": "test-fixer",
+  "schema_version": 1
+}

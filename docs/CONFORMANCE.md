@@ -36,6 +36,65 @@ is to report against that denominator. The current numbers are scoped:
 See [`TCL_FULL_SUITE_GOAL_20260523.md`](TCL_FULL_SUITE_GOAL_20260523.md) for
 the reporting rules and expansion plan.
 
+### Why "abort / no-summary" exists, and what unlocking one means
+
+A large slice of the denominator (≈40% on the single-node-core dashboard) is
+not *failing* — it is *hidden* behind an early file abort. Understanding the
+mechanism is the difference between reading the scoreboard correctly and
+chasing the wrong fixes.
+
+Each `.tcl` file runs its `test {name} {body} {expected}` blocks sequentially.
+The framework's `test` proc (`reference/valkey/tests/support/test.tcl:262`)
+runs each body inside a `catch`, but only swallows two error classes
+gracefully:
+
+- `assertion:*` — a failed `assert_*` → records `[err]`, **continues** to the
+  next test.
+- anything at all, **but only if `--durable` is set** → caught, **continues**.
+
+Every other error hits the `else` branch (`test.tcl:294`,
+`error $error $::errorInfo`) and is **re-raised**. It propagates out of `test`,
+out of the file, and `tclsh` exits non-zero **before printing the summary
+line**. `tcl-survey.py` then classifies the whole file as `no-summary`
+(`passed: null`, `total: 0`) and records the last-running test as `abort_test`.
+
+The errors that trigger this are *raw runtime errors*, not assertions — most
+commonly a script reaching for a global our sandbox does not yet provide
+(`attempt to index global 'bit' / 'os' (a nil value)`), or a missing command.
+The Tcl `r` client surfaces a server `-ERR` reply as a Tcl error, and since it
+does not start with `assertion:`, it detonates the file.
+
+Consequence: **the first non-assertion error in a file hides every test after
+it.** So the high-leverage move is unlocking the *blocker*, not fixing wording
+in an already-running test.
+
+What "unlocking" actually buys, stated honestly (worked example — the
+`tcl-scripting-bit-lib-v1` packet, 2026-05-24):
+
+- `unit/scripting.tcl` has **186** `test` blocks. It was aborting at the first
+  `bit.*` use (line 574). Installing the `bit` global moved the abort to the
+  next missing global, `os.clock()` (line 784).
+- That advanced the frontier past **20** `test` blocks (575–784) that now
+  *execute* instead of being skipped-by-abort. Because a passing run simply
+  proceeds while a failed assertion would be caught-and-continued, reaching 784
+  is positive evidence those 20 ran clean.
+- **But the file still aborts** (now at `os`), still emits no summary, and is
+  **still counted as `no-summary` with `total: 0`.** Moving an abort frontier
+  is *not* the same as adding counted passes. A file only converts to counted
+  numbers when execution reaches its end-of-file summary — i.e. when every
+  non-assertion-error detonator between here and EOF is cleared. It is a chain
+  of detonators; each unlock defuses one.
+
+Operational lever: a survey pass *with* `--durable` records each non-assertion
+error as a failure and keeps going to the summary, so it reveals the *counted*
+ceiling a file would reach "if it didn't abort." The default survey runs
+**without** `--durable` on the conservative assumption that a non-assertion
+error may leave the server/connection wedged and produce garbage downstream.
+For clean Lua "nil global" errors that assumption is usually false (the
+connection is intact), so a one-off `--durable` run is a cheap way to quantify
+how much real signal sits behind a given abort — but it is a diagnostic, not
+the conformance number of record.
+
 ## Wire-diff smoke
 
 The 23 scripts in `harness/oracle/corpus/` are sent to both

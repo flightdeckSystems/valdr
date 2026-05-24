@@ -65,6 +65,26 @@ advances `unit/scripting` past the cmsgpack double, negative-int64, smoke, and
 circular-reference tests; the next frontier is the separate missing `bit`
 global.
 
+#### Side packet `tcl-scripting-bit-lib-v1`
+
+Result 2026-05-24: installed a Redis-compatible `bit` global (LuaBitOp 1.0.2
+surface: `tobit`/`bnot`/`band`/`bor`/`bxor`/`lshift`/`rshift`/`arshift`/`rol`/
+`ror`/`bswap`/`tohex`) as a readonly table in the mlua scripting sandbox from
+`crates/redis-commands/src/eval.rs`. Semantics are a byte-faithful port of
+`reference/valkey/deps/lua/src/lua_bit.c`: 32-bit wrapping math, the
+magic-number (`2^52+2^51`) `barg` reduction over the `lua51` double
+`lua_Number`, and the `INT32_MIN` guard in `tohex` so
+`bit.tohex(65535, -2147483648)` resolves to `0000FFFF`. Focused proof
+`harness/oracle/results/tcl-survey/20260524T205655Z/unit__scripting.json`
+advances `unit/scripting` past `EVAL - Verify minimal bitop functionality`
+(line 574); the abort now lands at the unrelated `os.clock()` test
+(`Measures elapsed time os.clock()`, line 784 — missing `os` global), which is
+the next frontier. The later `lua bit.tohex bug` test (line 840) is gated
+behind that `os` frontier but is already covered by a focused `redis-commands`
+unit test (`bit_tohex_int32_min_width_matches_upstream`). Four `bit_*` unit
+tests pass; `cargo check -p redis-commands` and `cargo check --workspace` are
+clean. No new crate, no `unsafe`, scripting/functions engine unchanged.
+
 ### 3. `SET IFEQ`
 
 Packet: `tcl-string-ifeq-unlock-v1`.
