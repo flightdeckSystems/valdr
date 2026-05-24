@@ -24,6 +24,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use mlua::{
     Error as LuaError, Function as LuaFunction, LightUserData, Lua, MultiValue, RegistryKey,
@@ -343,6 +344,12 @@ fn lua_to_resp(value: &LuaValue, out: &mut Vec<u8>) {
                 out.extend_from_slice(b"\r\n");
                 return;
             }
+            if let Ok(Some(n)) = t.get::<Option<f64>>("double") {
+                out.push(b',');
+                out.extend_from_slice(n.to_string().as_bytes());
+                out.extend_from_slice(b"\r\n");
+                return;
+            }
             let mut items: Vec<LuaValue> = Vec::new();
             let mut i: i64 = 1;
             loop {
@@ -430,11 +437,32 @@ fn lua_arg_to_bytes(v: &LuaValue) -> Result<Vec<u8>, LuaError> {
 fn install_sandbox(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     for name in [
-        "os", "io", "debug", "package", "require", "loadfile", "dofile", "print",
+        "io", "debug", "package", "require", "loadfile", "dofile", "print",
     ] {
         globals.set(name, LuaValue::Nil)?;
     }
+    globals.set("os", create_os_table(lua)?)?;
     Ok(())
+}
+
+/// Process-relative seconds for `os.clock`. Valkey's Lua sandbox keeps only
+/// `os.clock` from the standard `os` library, and every script uses it as a
+/// delta (`os.clock() - start`), so an arbitrary monotonic epoch is faithful.
+fn os_clock_seconds() -> f64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// Build the sandboxed `os` global. Valkey exposes a plain table holding only
+/// `os.clock` (`reference/valkey/src/modules/lua/script_lua.c`); every other
+/// `os.*` is absent, so a script calling e.g. `os.execute()` hits the Lua
+/// "attempt to call field 'execute' (a nil value)" error the suite asserts.
+/// The table must stay a plain (non-proxy) table because the sandbox test
+/// iterates it with `pairs(os)`, which in Lua 5.1 sees only raw keys.
+fn create_os_table(lua: &Lua) -> mlua::Result<LuaTable> {
+    let table = lua.create_table()?;
+    table.raw_set("clock", lua.create_function(|_, ()| Ok(os_clock_seconds()))?)?;
+    Ok(table)
 }
 
 /// Install `KEYS` and `ARGV` into the per-call Lua globals.
@@ -3451,6 +3479,18 @@ mod tests {
     }
 
     #[test]
+    fn lua_double_table_serializes_as_resp3_double() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.raw_set("double", 1.25).unwrap();
+        let mut out = Vec::new();
+
+        lua_to_resp(&LuaValue::Table(table), &mut out);
+
+        assert_eq!(out, b",1.25\r\n");
+    }
+
+    #[test]
     fn cmsgpack_pack_matches_upstream_numeric_vectors() {
         let lua = Lua::new();
         install_cmsgpack(&lua).unwrap();
@@ -3566,6 +3606,43 @@ mod tests {
             .exec()
             .unwrap_err();
         assert!(err.to_string().contains("Attempt to modify a readonly table"));
+    }
+
+    #[test]
+    fn os_sandbox_exposes_only_clock() {
+        let lua = Lua::new();
+        install_sandbox(&lua).unwrap();
+
+        let only_clock: bool = lua
+            .load(
+                "local keys = {}\n\
+                 for k, v in pairs(os) do keys[#keys + 1] = k .. ':' .. type(v) end\n\
+                 return #keys == 1 and keys[1] == 'clock:function'",
+            )
+            .eval()
+            .unwrap();
+        assert!(only_clock);
+    }
+
+    #[test]
+    fn os_clock_measures_elapsed_delta() {
+        let lua = Lua::new();
+        install_sandbox(&lua).unwrap();
+
+        let nonnegative: bool = lua
+            .load("local s = os.clock(); local e = os.clock(); return e - s >= 0")
+            .eval()
+            .unwrap();
+        assert!(nonnegative);
+    }
+
+    #[test]
+    fn os_dangerous_methods_are_absent() {
+        let lua = Lua::new();
+        install_sandbox(&lua).unwrap();
+
+        let err = lua.load("os.execute()").exec().unwrap_err();
+        assert!(err.to_string().contains("attempt to call field 'execute'"));
     }
 }
 

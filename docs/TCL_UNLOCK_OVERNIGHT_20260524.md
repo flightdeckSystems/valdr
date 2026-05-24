@@ -85,6 +85,35 @@ unit test (`bit_tohex_int32_min_width_matches_upstream`). Four `bit_*` unit
 tests pass; `cargo check -p redis-commands` and `cargo check --workspace` are
 clean. No new crate, no `unsafe`, scripting/functions engine unchanged.
 
+#### Side packet `tcl-scripting-os-clock-v1`
+
+Result 2026-05-24: replaced the blanket `os = nil` sandbox strip in
+`crates/redis-commands/src/eval.rs` with a faithful minimal `os` table holding
+only `os.clock` (process-relative monotonic seconds via `std::time::Instant` +
+`OnceLock` epoch), matching Valkey's `script_lua.c` sandbox. Kept as a plain
+(non-proxy) table so the sandbox test's `pairs(os)` sees exactly
+`{clock = function}` and every other `os.*` stays absent, so `os.execute()`
+etc. raise the asserted `attempt to call field 'X' (a nil value)`. Three
+`os_*` unit tests pass; `cargo check --workspace` clean. Focused TCL proof
+`harness/oracle/results/tcl-survey/20260524T211817Z/unit__scripting.json`
+advances `unit/scripting` past `os.clock()` (line 784, which now busy-loops a
+real ~1s) and the dangerous-method/global-protection block; abort now lands at
+`Script with RESP3 map` (line 1058) — **22** more test blocks crossed.
+
+Next detonator (separate subsystem, not a scripting global): `Script with
+RESP3 map` aborts with `Bad protocol, 't' as reply type byte`. The test's first
+step is a *non-script* `r HELLO 3` + `r hgetall` expecting a RESP3 map, so the
+fault is in the RESP3 reply serialization layer (`redis-protocol` / connection
+reply path), not `eval.rs`. The frontier has left the scripting-globals chain
+and entered RESP3 encoding — that should be its own packet
+(`tcl-scripting-resp3-map-v1` or a `redis-protocol` packet), and the durable
+desync values seen earlier (`standalone`/`master`/`mode`/`id` leaking into
+later `[r read]`s) point at the HELLO/map RESP3 framing specifically.
+
+Frontier progression on `unit/scripting.tcl`: cmsgpack (~line 540s) -> bit
+(574) -> os (784) -> RESP3 map (1058). Each link cleared; file still
+no-summary until the RESP3 chain is cleared too.
+
 ### 3. `SET IFEQ`
 
 Packet: `tcl-string-ifeq-unlock-v1`.
@@ -277,3 +306,13 @@ Wave C is intentionally broader than another tiny frontier fix:
 - `tcl-scripting-bit-lib-v1` is marked `manual` for a side worktree: it should
   install the Redis Lua `bit` library without conflicting with the main
   list/quicklist path.
+
+Side packet result, 2026-05-24:
+
+- `tcl-scripting-bit-lib-v1` installed the Valkey-compatible Lua `bit` global.
+- `tcl-scripting-os-clock-v1` installed the sandboxed Lua `os` table with only
+  `os.clock`, plus the Lua `{double = n}` reply bridge required by the elapsed
+  time test.
+- `unit/scripting` now advances past the bit and `os.clock` frontiers to
+  `Script with RESP3 map`; it is still no-summary until RESP3 map/protocol and
+  globals-protection errors are addressed.

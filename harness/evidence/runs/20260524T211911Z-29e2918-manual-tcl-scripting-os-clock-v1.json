@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "packet": "tcl-scripting-os-clock-v1",
+  "role": "test-fixer",
+  "runtime": "codex",
+  "manual_salvage": true,
+  "target_commit": "29e29187596cc561b1572d59042dac1e94cc4090",
+  "summary": "Added Redis/Valkey sandboxed Lua os.clock and the Lua double-table reply bridge needed by unit/scripting's elapsed-time test. The scripting frontier now advances to RESP3 map handling.",
+  "claim_level": "telemetry",
+  "surface": "correctness",
+  "method": "official-suite",
+  "checks": {
+    "cargo_test_redis_commands_os": {
+      "status": "pass",
+      "command": "cargo test -p redis-commands os_ --quiet"
+    },
+    "cargo_test_redis_commands_lua_double": {
+      "status": "pass",
+      "command": "cargo test -p redis-commands lua_double_table_serializes_as_resp3_double --quiet"
+    },
+    "cargo_check_workspace": {
+      "status": "pass",
+      "command": "cargo check --workspace --quiet",
+      "notes": "Warnings only."
+    },
+    "focused_tcl_unit_scripting": {
+      "status": "frontier_advanced",
+      "command": "PATH=/tmp/tclwrap-list:$PATH python3 harness/oracle/tcl-survey.py --runner-id tcl-scripting-os-clock-sidecheck-built --skip-build --timeout-s 180 --files unit/scripting",
+      "artifact": "harness/oracle/results/tcl-survey/20260524T211901Z/unit__scripting.json",
+      "timed_out": false,
+      "no_summary": true,
+      "previous_abort": "missing global os / os.clock frontier",
+      "new_abort": "Script with RESP3 map",
+      "remaining_failures_before_abort": [
+        "Globals protection reading an undeclared global variable",
+        "Globals protection setting an undeclared global",
+        "Scripts can handle commands with incorrect arity",
+        "Functions in the Redis namespace are able to report errors",
+        "CLUSTER RESET can not be invoke from within a script"
+      ]
+    }
+  },
+  "targets": [
+    "crates/redis-commands/src/eval.rs",
+    "docs/TCL_UNLOCK_OVERNIGHT_20260524.md"
+  ]
+}
