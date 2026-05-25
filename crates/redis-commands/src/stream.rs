@@ -1375,6 +1375,20 @@ pub fn xinfo_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 return Err(RedisError::wrong_number_of_args(b"xinfo"));
             }
             let key = ctx.arg_owned(2usize)?;
+            // XINFO STREAM <key> [FULL [COUNT <n>]]
+            let argc = ctx.arg_count();
+            if argc > 3 {
+                if ctx.arg(3)?.as_bytes().eq_ignore_ascii_case(b"FULL") {
+                    let mut count: i64 = 10;
+                    if argc == 6 && ctx.arg(4)?.as_bytes().eq_ignore_ascii_case(b"COUNT") {
+                        count = parse_strict_i64(ctx.arg(5)?.as_bytes())?;
+                    } else if argc != 4 {
+                        return Err(RedisError::syntax(b"syntax error"));
+                    }
+                    return xinfo_stream_full(ctx, &key, count);
+                }
+                return Err(RedisError::syntax(b"syntax error"));
+            }
             let stream = match as_stream_ref(ctx.db().lookup_key_read(&key))? {
                 None => return Err(RedisError::runtime(b"ERR no such key")),
                 Some(s) => s,
@@ -1482,9 +1496,12 @@ fn touch_or_create_consumer(
 ) -> bool {
     let exists = group.consumers.contains_key(name);
     if !exists {
-        group
-            .consumers
-            .insert(name.clone(), Consumer::new(name.clone(), now_ms));
+        let mut consumer = Consumer::new(name.clone(), now_ms);
+        // C: streamCreateConsumer (t_stream.c:2539) seeds active_time to -1;
+        // it only advances once the consumer actually receives entries, so
+        // XINFO `inactive` reports -1 until the first real delivery.
+        consumer.active_time_ms = -1;
+        group.consumers.insert(name.clone(), consumer);
     } else if let Some(c) = group.consumers.get_mut(name) {
         c.seen_time_ms = now_ms;
     }
@@ -1900,6 +1917,15 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     None => slice_len,
                     Some(n) => (n as usize).min(slice_len),
                 };
+                // C: XREADGROUP '>' creates/touches the consumer (advancing
+                // seen-time) on every call, even when no new entries exist.
+                {
+                    let group = stream
+                        .groups
+                        .get_mut(&group_name)
+                        .expect("group existence checked above");
+                    touch_or_create_consumer(group, &consumer_name, now);
+                }
                 if max == 0 {
                     continue;
                 }
@@ -1913,7 +1939,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
                     .groups
                     .get_mut(&group_name)
                     .expect("group existence checked above");
-                touch_or_create_consumer(group, &consumer_name, now);
+                // active-time advances only on real delivery.
                 if let Some(consumer) = group.consumers.get_mut(&consumer_name) {
                     consumer.active_time_ms = now;
                 }
@@ -2736,6 +2762,179 @@ fn xinfo_groups(ctx: &mut CommandContext) -> RedisResult<()> {
     Ok(())
 }
 
+/// XINFO STREAM <key> FULL [COUNT <n>]
+///
+/// C: `xinfoReplyWithStreamInfo` full branch (t_stream.c:3686). Emits the
+/// 9-field stream map with inline `entries` and a nested `groups` array
+/// (each group carries its PEL + consumers, each consumer its own PEL).
+/// `count` limits the `entries` and pending arrays (0 = unlimited; the XINFO
+/// default is 10). `pel-count` reports the true total, not the limited view.
+fn xinfo_stream_full(ctx: &mut CommandContext, key: &RedisString, count: i64) -> RedisResult<()> {
+    let limit = if count <= 0 { usize::MAX } else { count as usize };
+
+    struct ConsumerSnap {
+        name: RedisString,
+        seen: i64,
+        active: i64,
+        pel_total: usize,
+        pel: Vec<(StreamId, i64, u64)>,
+    }
+    struct GroupSnap {
+        name: RedisString,
+        last_delivered: StreamId,
+        entries_read: i64,
+        lag: i64,
+        pel_total: usize,
+        pel: Vec<(StreamId, RedisString, i64, u64)>,
+        consumers: Vec<ConsumerSnap>,
+    }
+
+    let (length, last_id, max_del, entries_added, first_id, entries, groups): (
+        i64,
+        StreamId,
+        StreamId,
+        i64,
+        StreamId,
+        Vec<StreamEntry>,
+        Vec<GroupSnap>,
+    ) = {
+        let stream = match as_stream_ref(ctx.db().lookup_key_read(key))? {
+            None => return Err(RedisError::runtime(b"ERR no such key")),
+            Some(s) => s,
+        };
+        let entries: Vec<StreamEntry> = stream.entries.iter().take(limit).cloned().collect();
+        let first_id = stream
+            .entries
+            .first()
+            .map(|e| e.id)
+            .unwrap_or(StreamId { ms: 0, seq: 0 });
+
+        let mut group_names: Vec<&RedisString> = stream.groups.keys().collect();
+        group_names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let mut groups: Vec<GroupSnap> = Vec::with_capacity(group_names.len());
+        for gname in group_names {
+            let g = &stream.groups[gname];
+            // group PEL entry -> owning consumer (PelEntry has no consumer ref).
+            let mut gpel: Vec<(StreamId, RedisString, i64, u64)> = Vec::new();
+            for pe in g.pel.iter().take(limit) {
+                let owner = g
+                    .consumers
+                    .iter()
+                    .find(|(_, c)| c.pel.iter().any(|p| p.entry_id == pe.entry_id))
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_else(|| RedisString::from_bytes(b""));
+                gpel.push((pe.entry_id, owner, pe.delivery_time_ms, pe.delivery_count));
+            }
+            let mut consumer_names: Vec<&RedisString> = g.consumers.keys().collect();
+            consumer_names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            let mut consumers: Vec<ConsumerSnap> = Vec::with_capacity(consumer_names.len());
+            for cname in consumer_names {
+                let c = &g.consumers[cname];
+                consumers.push(ConsumerSnap {
+                    name: c.name.clone(),
+                    seen: c.seen_time_ms,
+                    active: c.active_time_ms,
+                    pel_total: c.pel.len(),
+                    pel: c
+                        .pel
+                        .iter()
+                        .take(limit)
+                        .map(|p| (p.entry_id, p.delivery_time_ms, p.delivery_count))
+                        .collect(),
+                });
+            }
+            let lag = (stream.entries_added as i64).saturating_sub(g.entries_read as i64);
+            groups.push(GroupSnap {
+                name: g.name.clone(),
+                last_delivered: g.last_delivered_id,
+                entries_read: g.entries_read as i64,
+                lag,
+                pel_total: g.pel.len(),
+                pel: gpel,
+                consumers,
+            });
+        }
+        (
+            stream.len() as i64,
+            stream.last_id,
+            stream.max_deleted_id,
+            stream.entries_added as i64,
+            first_id,
+            entries,
+            groups,
+        )
+    };
+
+    let id_str = |id: StreamId| RedisString::from_vec(id.to_display_bytes());
+
+    ctx.reply_map_header(9usize)?;
+    ctx.reply_bulk(b"length")?;
+    ctx.reply_integer(length)?;
+    ctx.reply_bulk(b"radix-tree-keys")?;
+    ctx.reply_integer(0)?;
+    ctx.reply_bulk(b"radix-tree-nodes")?;
+    ctx.reply_integer(0)?;
+    ctx.reply_bulk(b"last-generated-id")?;
+    ctx.reply_bulk_string(id_str(last_id))?;
+    ctx.reply_bulk(b"max-deleted-entry-id")?;
+    ctx.reply_bulk_string(id_str(max_del))?;
+    ctx.reply_bulk(b"entries-added")?;
+    ctx.reply_integer(entries_added)?;
+    ctx.reply_bulk(b"recorded-first-entry-id")?;
+    ctx.reply_bulk_string(id_str(first_id))?;
+    ctx.reply_bulk(b"entries")?;
+    ctx.reply_array_header(entries.len())?;
+    for e in &entries {
+        reply_entry(ctx, e)?;
+    }
+    ctx.reply_bulk(b"groups")?;
+    ctx.reply_array_header(groups.len())?;
+    for g in &groups {
+        ctx.reply_map_header(7usize)?;
+        ctx.reply_bulk(b"name")?;
+        ctx.reply_bulk_string(g.name.clone())?;
+        ctx.reply_bulk(b"last-delivered-id")?;
+        ctx.reply_bulk_string(id_str(g.last_delivered))?;
+        ctx.reply_bulk(b"entries-read")?;
+        ctx.reply_integer(g.entries_read)?;
+        ctx.reply_bulk(b"lag")?;
+        ctx.reply_integer(g.lag)?;
+        ctx.reply_bulk(b"pel-count")?;
+        ctx.reply_integer(g.pel_total as i64)?;
+        ctx.reply_bulk(b"pending")?;
+        ctx.reply_array_header(g.pel.len())?;
+        for (id, consumer, dt, dc) in &g.pel {
+            ctx.reply_array_header(4usize)?;
+            ctx.reply_bulk_string(id_str(*id))?;
+            ctx.reply_bulk_string(consumer.clone())?;
+            ctx.reply_integer(*dt)?;
+            ctx.reply_integer(*dc as i64)?;
+        }
+        ctx.reply_bulk(b"consumers")?;
+        ctx.reply_array_header(g.consumers.len())?;
+        for c in &g.consumers {
+            ctx.reply_map_header(5usize)?;
+            ctx.reply_bulk(b"name")?;
+            ctx.reply_bulk_string(c.name.clone())?;
+            ctx.reply_bulk(b"seen-time")?;
+            ctx.reply_integer(c.seen)?;
+            ctx.reply_bulk(b"active-time")?;
+            ctx.reply_integer(c.active)?;
+            ctx.reply_bulk(b"pel-count")?;
+            ctx.reply_integer(c.pel_total as i64)?;
+            ctx.reply_bulk(b"pending")?;
+            ctx.reply_array_header(c.pel.len())?;
+            for (id, dt, dc) in &c.pel {
+                ctx.reply_array_header(3usize)?;
+                ctx.reply_bulk_string(id_str(*id))?;
+                ctx.reply_integer(*dt)?;
+                ctx.reply_integer(*dc as i64)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     if ctx.arg_count() < 4 {
         return Err(RedisError::wrong_number_of_args(b"xinfo"));
@@ -2762,7 +2961,12 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
     ctx.reply_array_header(snapshot.len())?;
     for (name, pending, seen, active) in &snapshot {
         let idle = (now - *seen).max(0);
-        let inactive = (now - *active).max(0);
+        // active < 0 is the never-delivered sentinel; XINFO reports -1.
+        let inactive = if *active < 0 {
+            -1
+        } else {
+            (now - *active).max(0)
+        };
         ctx.reply_map_header(4usize)?;
         ctx.reply_bulk(b"name")?;
         ctx.reply_bulk_string(name.clone())?;
