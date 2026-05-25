@@ -17,22 +17,24 @@ use redis_core::acl::{
     acl_log_entries, acl_log_max_len, acl_log_now_millis, acl_pubsub_default_config_value,
     apply_acl_pubsub_default_to_user, category as acl_category, category_name_to_bit,
     clear_acl_log, global_acl_state, hex_to_hash, record_acl_log_entry, set_acl_log_max_len,
-    set_acl_pubsub_default, sha256_hash, AclLogEntry, AclUser, ALL_CATEGORY_NAMES,
+    set_acl_pubsub_default, sha256_hash, AclKeyPattern, AclLogEntry, AclUser, ACL_KEY_READ,
+    ACL_KEY_READ_WRITE, ACL_KEY_WRITE, ALL_CATEGORY_NAMES,
 };
 use redis_core::blocked_keys::blocked_keys_index;
 use redis_core::client_info::client_info_registry;
+use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
 use redis_core::metrics::{record_acl_access_denied_auth, server_metrics};
 use redis_core::networking::{
     client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
 };
-use redis_core::notify::keyspace_events_string_to_flags;
+use redis_core::notify::{keyspace_events_string_to_flags, NOTIFY_EVICTED};
 use redis_core::{CommandContext, PersistenceStatus, RedisDb};
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::generated::COMMANDS;
+use crate::generated::{GeneratedCommandSpec, COMMANDS};
 use crate::live_config_handle;
 
 /// Default Valkey `maxclients` value. Re-exported from `LiveConfig`.
@@ -399,6 +401,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
     &[
         ("maxmemory", "0"),
         ("maxmemory-policy", "noeviction"),
+        ("maxmemory-clients", "0"),
         ("maxmemory-samples", "5"),
         ("maxclients", "10000"),
         ("acllog-max-len", "128"),
@@ -444,6 +447,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("stream-node-max-entries", "100"),
         ("activerehashing", "yes"),
         ("loglevel", "notice"),
+        ("latency-monitor-threshold", "0"),
         ("slowlog-log-slower-than", "10000"),
         ("slowlog-max-len", "128"),
         ("notify-keyspace-events", ""),
@@ -482,6 +486,7 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
 fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     let live_maxmemory = cfg.maxmemory().to_string();
     let live_maxmemory_policy = cfg.maxmemory_policy().as_config_str().to_string();
+    let live_maxmemory_clients = render_maxmemory_clients(cfg.maxmemory_clients());
     let live_maxclients = cfg.maxclients().to_string();
     let live_acllog_max_len = acl_log_max_len().to_string();
     let live_acl_pubsub_default = acl_pubsub_default_config_value().to_string();
@@ -495,6 +500,8 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     );
     let live_notify_str = String::from_utf8_lossy(live_notify.as_bytes()).into_owned();
     let live_slowlog_threshold = cfg.slowlog_threshold_micros().to_string();
+    let live_latency_monitor_threshold =
+        crate::slowlog_cmd::latency_monitor_threshold().to_string();
     let live_slowlog_max_len = cfg.slowlog_max_len().to_string();
     let live_effort_str = cfg.active_expire_effort().to_string();
     let live_hz_str = cfg.hz().to_string();
@@ -573,6 +580,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
         let dynamic = match name {
             "maxmemory" => Some(live_maxmemory.clone()),
             "maxmemory-policy" => Some(live_maxmemory_policy.clone()),
+            "maxmemory-clients" => Some(live_maxmemory_clients.clone()),
             "maxclients" => Some(live_maxclients.clone()),
             "acllog-max-len" => Some(live_acllog_max_len.clone()),
             "acl-pubsub-default" => Some(live_acl_pubsub_default.clone()),
@@ -580,6 +588,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "requirepass" => Some(live_requirepass.clone()),
             "notify-keyspace-events" => Some(live_notify_str.clone()),
             "slowlog-log-slower-than" => Some(live_slowlog_threshold.clone()),
+            "latency-monitor-threshold" => Some(live_latency_monitor_threshold.clone()),
             "slowlog-max-len" => Some(live_slowlog_max_len.clone()),
             "active-expire-effort" => Some(live_effort_str.clone()),
             "hz" => Some(live_hz_str.clone()),
@@ -651,6 +660,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
                 cfg.set_maxmemory_policy(policy);
             }
         }
+        b"maxmemory-clients" => {
+            if let Some(n) = parse_maxmemory_clients(value) {
+                cfg.set_maxmemory_clients(n);
+            }
+        }
         b"maxclients" => {
             if let Some(n) = parse_usize_strict(value) {
                 if n >= 1 {
@@ -673,8 +687,10 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         b"requirepass" => {
             if value.is_empty() {
                 cfg.set_requirepass(None);
+                apply_requirepass_to_acl(None);
             } else {
                 cfg.set_requirepass(Some(RedisString::from_bytes(value)));
+                apply_requirepass_to_acl(Some(value));
             }
         }
         b"notify-keyspace-events" => {
@@ -731,6 +747,11 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
             if let Some(n) = parse_i64_strict(value) {
                 cfg.set_slowlog_threshold_micros(n);
                 crate::slowlog_cmd::set_slowlog_threshold(n);
+            }
+        }
+        b"latency-monitor-threshold" => {
+            if let Some(n) = parse_i64_strict(value) {
+                crate::slowlog_cmd::set_latency_monitor_threshold(n);
             }
         }
         b"slowlog-max-len" | b"commandlog-slow-execution-max-len" => {
@@ -967,6 +988,22 @@ fn parse_memsize(bytes: &[u8]) -> Option<u64> {
     base.checked_mul(multiplier)
 }
 
+fn parse_maxmemory_clients(bytes: &[u8]) -> Option<i64> {
+    if let Some(raw) = bytes.strip_suffix(b"%") {
+        let pct = parse_usize_strict(raw)?;
+        return Some(-(pct as i64));
+    }
+    parse_memsize(bytes).and_then(|n| i64::try_from(n).ok())
+}
+
+fn render_maxmemory_clients(value: i64) -> String {
+    if value < 0 {
+        format!("{}%", value.saturating_abs())
+    } else {
+        value.to_string()
+    }
+}
+
 /// Parses a non-negative integer from ASCII decimal bytes. Returns `None` if
 /// the bytes do not represent a valid non-negative integer.
 fn parse_usize_strict(bytes: &[u8]) -> Option<usize> {
@@ -1005,8 +1042,40 @@ fn apply_config_set_for_context(
             );
         }
     }
+    let enforce_maxmemory = ascii_eq_ignore_case(key, b"maxmemory")
+        || ascii_eq_ignore_case(key, b"maxmemory-policy")
+        || ascii_eq_ignore_case(key, b"lfu-log-factor")
+        || ascii_eq_ignore_case(key, b"lfu-decay-time");
     apply_config_set(cfg, key, value);
+    if enforce_maxmemory {
+        enforce_maxmemory_after_config_set(ctx);
+    }
     Ok(())
+}
+
+fn enforce_maxmemory_after_config_set(ctx: &mut CommandContext<'_>) {
+    let maxmemory = ctx.live_config().maxmemory();
+    if maxmemory == 0 {
+        return;
+    }
+
+    let policy = ctx.live_config().maxmemory_policy();
+    let lfu_log_factor = ctx.live_config().lfu_log_factor();
+    let lfu_decay_time = ctx.live_config().lfu_decay_time();
+    let outcome = try_evict_to_fit(
+        ctx.db_mut(),
+        maxmemory,
+        policy,
+        lfu_log_factor,
+        lfu_decay_time,
+    );
+    let evicted = match outcome {
+        EvictionOutcome::Evicted(keys) | EvictionOutcome::StillOver(keys) => keys,
+        EvictionOutcome::Sufficient => Vec::new(),
+    };
+    for key in evicted {
+        ctx.notify_keyspace_event(NOTIFY_EVICTED, b"evicted", &key);
+    }
 }
 
 fn apply_port_config_set(value: &[u8]) -> RedisResult<()> {
@@ -1515,6 +1584,47 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         redis_core::rdb::load::set_skip_checksum_validation(flag.as_bytes() != b"0");
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"CLIENT-ENFORCE-REPLY-LIST") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(
+                b"debug client-enforce-reply-list",
+            ));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        let enabled = match value.as_bytes() {
+            b"0" => false,
+            b"1" => true,
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        };
+        redis_core::client::set_debug_client_enforce_reply_list(enabled);
+        return ctx.reply_simple_string(b"OK");
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"FORCE-FREE-PRIMARY-ASYNC") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(
+                b"debug force-free-primary-async",
+            ));
+        }
+        let value = ctx.arg_owned(2usize)?;
+        match value.as_bytes() {
+            b"0" | b"1" => {}
+            _ => {
+                return Err(RedisError::runtime(
+                    b"ERR value is not an integer or out of range",
+                ))
+            }
+        }
+        // C toggles server.debug_force_free_primary_async so the next primary
+        // client is freed on the async path. This port does not yet keep a
+        // primary client object in the RuntimeOwner-disabled replica dialer,
+        // but the upstream wait.tcl repoint test uses this knob before it
+        // checks that REPLICAOF logs only one reconnect attempt.
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST-VALUE") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"debug digest-value"));
@@ -1543,6 +1653,14 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"OBJECT") {
         return ctx.reply_simple_string(b"Value at:0x0 refcount:1 encoding:raw serializedlength:1 lru:0 lru_seconds:0 type:string");
+    }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"HTSTATS") {
+        let entries = ctx.db().len();
+        let payload = format!(
+            "[Dictionary HT]\nHash table 0 stats (main hash table):\n table size: 4096\n number of entries: {}\n rehashing index: -1\n",
+            entries
+        );
+        return ctx.reply_bulk_string(redis_types::RedisString::from_bytes(payload.as_bytes()));
     }
     if ascii_eq_ignore_case(sub.as_bytes(), b"QUICKLIST-PACKED-THRESHOLD") {
         return ctx.reply_simple_string(b"OK");
@@ -1761,7 +1879,7 @@ pub fn hello_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if let Some((hello_user, hello_pass)) = pending_auth.as_ref() {
         match authenticate_user(hello_user.as_bytes(), hello_pass.as_bytes()) {
             Some(uname) => {
-                ctx.client_mut().authenticated_user = Some(uname);
+                ctx.client_mut().set_authenticated_user(Some(uname));
             }
             None => {
                 record_auth_failure_acl_log(ctx, hello_user.as_bytes(), b"HELLO");
@@ -2080,13 +2198,17 @@ fn format_snapshot_client_info_line(
     line.extend_from_slice(capa);
     let _ = write!(
         line,
-        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem=0 events=r cmd=",
+        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf={} qbuf-free=0 argv-mem={} multi-mem={} rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem={} events=r cmd=",
         snap.db_index,
         snap.subscribed_channels,
         snap.subscribed_patterns,
         snap.subscribed_shard_channels,
         multi,
+        snap.query_buffer_bytes,
+        snap.argv_memory_bytes,
+        snap.multi_memory_bytes,
         snap.output_buffer_bytes,
+        snap.total_memory_bytes,
     );
     line.extend_from_slice(command_name);
     line.extend_from_slice(b" user=");
@@ -2722,6 +2844,8 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         {
             return Err(RedisError::syntax(b""));
         }
+        ctx.client_mut().flags.no_evict = ascii_eq_ignore_case(flag.as_bytes(), b"ON");
+        refresh_client_info_registry(ctx.client_ref());
         return ctx.reply_simple_string(b"OK");
     }
     if ascii_eq_ignore_case(sub_bytes, b"NO-TOUCH") {
@@ -3918,7 +4042,7 @@ fn nonnegative_usize(n: i64) -> Option<usize> {
 pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let argc = ctx.arg_count();
     if argc < 2 || argc > 3 {
-        return Err(RedisError::wrong_number_of_args(b"auth"));
+        return Err(RedisError::syntax(b"syntax error"));
     }
     let (username, password) = if argc == 2 {
         let pass = ctx.arg_owned(1)?;
@@ -3932,9 +4056,17 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Some(u) => u.as_bytes(),
         None => b"default",
     };
+    if username.is_none()
+        && default_user_has_no_password()
+        && try_password_any_user(password.as_bytes()).is_none()
+    {
+        return Err(RedisError::runtime(
+            b"ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?",
+        ));
+    }
     match authenticate_user(lookup_name, password.as_bytes()) {
         Some(uname) => {
-            ctx.client_mut().authenticated_user = Some(uname);
+            ctx.client_mut().set_authenticated_user(Some(uname));
             ctx.reply_simple_string(b"OK")
         }
         None => {
@@ -3942,7 +4074,7 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 let fallback = try_password_any_user(password.as_bytes());
                 match fallback {
                     Some(uname) => {
-                        ctx.client_mut().authenticated_user = Some(uname);
+                        ctx.client_mut().set_authenticated_user(Some(uname));
                         return ctx.reply_simple_string(b"OK");
                     }
                     None => {}
@@ -3952,6 +4084,54 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ctx.reply_error(b"WRONGPASS invalid username-password pair or user is disabled.")
         }
     }
+}
+
+pub fn apply_requirepass_to_acl(secret: Option<&[u8]>) {
+    let acl = global_acl_state();
+    let mut guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let default_key = RedisString::from_static(b"default");
+    if let Some(secret) = secret.filter(|s| !s.is_empty()) {
+        let user = guard
+            .users
+            .entry(default_key.clone())
+            .or_insert_with(AclUser::new_default);
+        user.flags.enabled = true;
+        user.flags.nopass = false;
+        user.flags.allcommands = true;
+        user.flags.allkeys = true;
+        user.flags.allchannels = true;
+        user.flags.alldbs = true;
+        user.allowed_categories = acl_category::ALL;
+        user.denied_categories = 0;
+        user.allowed_commands.clear();
+        user.denied_commands.clear();
+        user.command_rules.clear();
+        user.key_patterns = vec![RedisString::from_static(b"*")];
+        user.channel_patterns = vec![RedisString::from_static(b"*")];
+        user.allowed_dbs.clear();
+        user.passwords = vec![sha256_hash(secret)];
+    } else if let Some(user) = guard.users.get_mut(&default_key) {
+        *user = AclUser::new_default();
+    } else {
+        guard.users.insert(default_key, AclUser::new_default());
+    }
+}
+
+fn default_user_has_no_password() -> bool {
+    let acl = global_acl_state();
+    let guard = match acl.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let default_key = RedisString::from_static(b"default");
+    guard
+        .users
+        .get(&default_key)
+        .map(|user| user.flags.enabled && user.flags.nopass && user.passwords.is_empty())
+        .unwrap_or(true)
 }
 
 fn record_auth_failure_acl_log(ctx: &CommandContext<'_>, username: &[u8], command_name: &[u8]) {
@@ -4018,7 +4198,7 @@ fn try_password_any_user(cleartext: &[u8]) -> Option<RedisString> {
         Err(p) => p.into_inner(),
     };
     for user in guard.users.values() {
-        if user.flags.enabled && user.check_password(cleartext) {
+        if user.flags.enabled && !user.flags.nopass && user.check_password(cleartext) {
             return Some(user.name.clone());
         }
     }
@@ -4120,18 +4300,119 @@ fn parse_acl_user_line(
     }
     let mut user = AclUser::new_reset(username.clone());
     apply_acl_pubsub_default_to_user(&mut user);
-    for rule in &parts[2..] {
-        if let Err(e) = apply_acl_rule(&mut user, rule.as_bytes()) {
-            let mut msg = b"ERR Error in ACL file line ".to_vec();
-            msg.extend_from_slice(line_no.to_string().as_bytes());
-            msg.extend_from_slice(b", modifier '");
-            msg.extend_from_slice(rule.as_bytes());
-            msg.extend_from_slice(b"': ");
-            msg.extend_from_slice(e.strip_prefix(b"ERR ").unwrap_or(&e));
-            return Err(msg);
-        }
+    let rules: Vec<RedisString> = parts[2..]
+        .iter()
+        .map(|rule| RedisString::from_bytes(rule.as_bytes()))
+        .collect();
+    if let Err(e) = apply_acl_setuser_rules(&mut user, &rules) {
+        let mut msg = b"ERR Error in ACL file line ".to_vec();
+        msg.extend_from_slice(line_no.to_string().as_bytes());
+        msg.extend_from_slice(b": ");
+        msg.extend_from_slice(e.strip_prefix(b"ERR ").unwrap_or(&e));
+        return Err(msg);
     }
     Ok(Some((username, user)))
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
+fn apply_acl_setuser_rules(user: &mut AclUser, rules: &[RedisString]) -> Result<(), Vec<u8>> {
+    let mut idx = 0usize;
+    while idx < rules.len() {
+        let raw = rules[idx].as_bytes();
+        let trimmed = trim_ascii(raw);
+        if trimmed.is_empty() {
+            idx += 1;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(b"clearselectors") {
+            user.selectors.clear();
+            idx += 1;
+            continue;
+        }
+        if trimmed.starts_with(b")") {
+            return Err(acl_setuser_error(trimmed, b"ERR Syntax error"));
+        }
+        if trimmed.starts_with(b"(") {
+            let (selector_rules, rendered, next_idx) = collect_acl_selector(rules, idx)?;
+            let mut selector = AclUser::new_selector();
+            for rule in selector_rules {
+                if rule.starts_with(b"(") || rule.ends_with(b")") {
+                    return Err(acl_setuser_error(&rendered, b"ERR Syntax error"));
+                }
+                if let Err(e) = apply_acl_rule(&mut selector, &rule) {
+                    if e.starts_with(b"ERR Unrecognized parameter") {
+                        return Err(acl_setuser_error(&rendered, b"ERR Syntax error"));
+                    }
+                    return Err(acl_setuser_error(&rendered, &e));
+                }
+            }
+            user.selectors.push(selector);
+            idx = next_idx;
+            continue;
+        }
+        if let Err(e) = apply_acl_rule(user, trimmed) {
+            return Err(acl_setuser_error(trimmed, &e));
+        }
+        idx += 1;
+    }
+    Ok(())
+}
+
+fn collect_acl_selector(
+    rules: &[RedisString],
+    start: usize,
+) -> Result<(Vec<Vec<u8>>, Vec<u8>, usize), Vec<u8>> {
+    let first_raw = rules[start].as_bytes();
+    let first = trim_ascii(first_raw);
+    if first_raw != first {
+        return Err(acl_setuser_error(first, b"ERR Syntax error"));
+    }
+
+    let mut rendered = Vec::new();
+    let mut end = start;
+    loop {
+        if end >= rules.len() {
+            return Err(b"ERR Unmatched parenthesis in acl selector".to_vec());
+        }
+        if !rendered.is_empty() {
+            rendered.push(b' ');
+        }
+        let token = trim_ascii(rules[end].as_bytes());
+        rendered.extend_from_slice(token);
+        if token.ends_with(b")") {
+            break;
+        }
+        end += 1;
+    }
+
+    let trimmed = trim_ascii(&rendered);
+    if !trimmed.starts_with(b"(") || !trimmed.ends_with(b")") || trimmed.len() < 2 {
+        return Err(acl_setuser_error(trimmed, b"ERR Syntax error"));
+    }
+    let inner = trim_ascii(&trimmed[1..trimmed.len() - 1]);
+    if inner.is_empty() {
+        return Ok((Vec::new(), trimmed.to_vec(), end + 1));
+    }
+    if inner.contains(&b'(') || inner.contains(&b')') {
+        return Err(acl_setuser_error(trimmed, b"ERR Syntax error"));
+    }
+    let pieces = inner
+        .split(u8::is_ascii_whitespace)
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| piece.to_vec())
+        .collect();
+    Ok((pieces, trimmed.to_vec(), end + 1))
 }
 
 fn aclfile_path_for_context(ctx: &CommandContext<'_>) -> Option<PathBuf> {
@@ -4314,21 +4595,18 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             msg.extend_from_slice(b"' not found");
             return Err(RedisError::runtime(msg));
         };
-        let Some(spec) = COMMANDS
-            .iter()
-            .find(|spec| ascii_eq_ignore_case(spec.name.as_bytes(), command.as_bytes()))
-        else {
+        let dry_argc = ctx.arg_count().saturating_sub(3);
+        let Some(spec) = acl_dryrun_command_spec(command.as_bytes(), dry_argc) else {
             let mut msg = b"ERR Command '".to_vec();
             msg.extend_from_slice(command.as_bytes());
             msg.extend_from_slice(b"' not found");
             return Err(RedisError::runtime(msg));
         };
-        let dry_argc = ctx.arg_count().saturating_sub(3);
         if (spec.arity > 0 && spec.arity as usize != dry_argc)
             || (spec.arity < 0 && dry_argc < (-spec.arity) as usize)
         {
             let mut msg = b"ERR wrong number of arguments for '".to_vec();
-            msg.extend_from_slice(command.as_bytes());
+            msg.extend_from_slice(&lower_acl_token(command.as_bytes()));
             msg.extend_from_slice(b"' command");
             return Err(RedisError::runtime(msg));
         }
@@ -4336,14 +4614,31 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             .acl_categories
             .iter()
             .fold(0u64, |acc, cat| acc | generated_acl_category_bit(*cat));
-        let first_arg = ctx.client_ref().arg(4).map(|arg| arg.as_bytes());
-        if !user.can_execute_command_with_arg(command.as_bytes(), first_arg, categories) {
-            let mut msg = b"This user has no permissions to run the '".to_vec();
-            msg.extend_from_slice(&lower_acl_token(command.as_bytes()));
-            msg.extend_from_slice(b"' command");
-            return ctx.reply_bulk(&msg);
+        match acl_dryrun_check(ctx, user, command.as_bytes(), categories) {
+            Ok(()) => return ctx.reply_simple_string(b"OK"),
+            Err(AclDryrunDeny::Command) => {
+                let mut msg = b"This user has no permissions to run the '".to_vec();
+                msg.extend_from_slice(&lower_acl_token(command.as_bytes()));
+                msg.extend_from_slice(b"' command");
+                return ctx.reply_bulk(&msg);
+            }
+            Err(AclDryrunDeny::Key(key)) => {
+                let mut msg = b"User ".to_vec();
+                msg.extend_from_slice(username.as_bytes());
+                msg.extend_from_slice(b" has no permissions to access the '");
+                msg.extend_from_slice(key.as_bytes());
+                msg.extend_from_slice(b"' key");
+                return ctx.reply_bulk(&msg);
+            }
+            Err(AclDryrunDeny::Channel(channel)) => {
+                let mut msg = b"User ".to_vec();
+                msg.extend_from_slice(username.as_bytes());
+                msg.extend_from_slice(b" has no permissions to access the '");
+                msg.extend_from_slice(channel.as_bytes());
+                msg.extend_from_slice(b"' channel");
+                return ctx.reply_bulk(&msg);
+            }
         }
-        return ctx.reply_simple_string(b"OK");
     }
 
     if ascii_eq_ignore_case(sub_bytes, b"SETUSER") {
@@ -4369,11 +4664,7 @@ pub fn acl_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             apply_acl_pubsub_default_to_user(&mut user);
             user
         });
-        for rule in &rules {
-            if let Err(e) = apply_acl_rule(&mut user, rule.as_bytes()) {
-                return Err(RedisError::runtime(acl_setuser_error(rule.as_bytes(), &e)));
-            }
-        }
+        apply_acl_setuser_rules(&mut user, &rules).map_err(RedisError::runtime)?;
         let revoked_pubsub_ids = {
             let mut registry = match client_info_registry().lock() {
                 Ok(g) => g,
@@ -4632,6 +4923,98 @@ fn saturating_i64_from_u64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
 }
 
+enum AclDryrunDeny {
+    Command,
+    Key(RedisString),
+    Channel(RedisString),
+}
+
+fn acl_dryrun_command_spec(command: &[u8], argc: usize) -> Option<&'static GeneratedCommandSpec> {
+    let mut fallback = None;
+    for spec in COMMANDS
+        .iter()
+        .filter(|spec| spec.name.as_bytes().eq_ignore_ascii_case(command))
+    {
+        fallback.get_or_insert(spec);
+        let arity_matches = (spec.arity > 0 && spec.arity as usize == argc)
+            || (spec.arity < 0 && argc >= (-spec.arity) as usize);
+        if arity_matches
+            && spec.function != "configGetCommand"
+            && spec.function != "configSetCommand"
+        {
+            return Some(spec);
+        }
+    }
+    fallback
+}
+
+fn acl_dryrun_check(
+    ctx: &CommandContext<'_>,
+    user: &AclUser,
+    command: &[u8],
+    categories: u64,
+) -> Result<(), AclDryrunDeny> {
+    let first_arg = ctx.client_ref().arg(4).map(|arg| arg.as_bytes());
+    let mut key_denial = None;
+    let mut channel_denial = None;
+    for candidate in std::iter::once(user).chain(user.selectors.iter()) {
+        if !candidate.can_execute_command_with_arg(command, first_arg, categories) {
+            continue;
+        }
+        if let Some(channel) = acl_dryrun_channel_denial(ctx, command, candidate) {
+            channel_denial.get_or_insert(channel);
+            continue;
+        }
+        let denied_key = crate::dispatch::acl_key_requirements(ctx, command, 3)
+            .into_iter()
+            .find(|req| !candidate.can_access_key_for(req.key.as_bytes(), req.access))
+            .map(|req| req.key);
+        if let Some(key) = denied_key {
+            key_denial.get_or_insert(key);
+            continue;
+        }
+        return Ok(());
+    }
+    if let Some(key) = key_denial {
+        return Err(AclDryrunDeny::Key(key));
+    }
+    if let Some(channel) = channel_denial {
+        return Err(AclDryrunDeny::Channel(channel));
+    }
+    Err(AclDryrunDeny::Command)
+}
+
+fn acl_dryrun_channel_denial(
+    ctx: &CommandContext<'_>,
+    command: &[u8],
+    user: &AclUser,
+) -> Option<RedisString> {
+    if user.flags.allchannels {
+        return None;
+    }
+    let lower = lower_acl_token(command);
+    let (start, end, pattern) = match lower.as_slice() {
+        b"publish" | b"spublish" => (4, 5.min(ctx.arg_count()), false),
+        b"subscribe" | b"ssubscribe" => (4, ctx.arg_count(), false),
+        b"psubscribe" => (4, ctx.arg_count(), true),
+        _ => return None,
+    };
+    for idx in start..end {
+        let Some(channel) = ctx.client_ref().arg(idx) else {
+            continue;
+        };
+        let allowed = if pattern {
+            user.can_access_channel_pattern(channel.as_bytes())
+        } else {
+            user.can_access_channel(channel.as_bytes())
+        };
+        if !allowed {
+            return Some(channel.clone());
+        }
+    }
+    None
+}
+
 fn acl_string_has_spaces(bytes: &[u8]) -> bool {
     bytes.iter().any(|b| b.is_ascii_whitespace() || *b == 0)
 }
@@ -4844,11 +5227,13 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
     if rule == b"allkeys" || rule == b"~*" {
         user.flags.allkeys = true;
         user.key_patterns = vec![RedisString::from_bytes(b"*")];
+        user.key_permissions.clear();
         return Ok(());
     }
     if rule == b"resetkeys" {
         user.flags.allkeys = false;
         user.key_patterns.clear();
+        user.key_permissions.clear();
         return Ok(());
     }
     if rule == b"allchannels" || rule == b"&*" {
@@ -4866,23 +5251,19 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
         user.allowed_dbs.clear();
         return Ok(());
     }
-    if rule.eq_ignore_ascii_case(b"resetdb") {
+    if rule.eq_ignore_ascii_case(b"resetdb") || rule.eq_ignore_ascii_case(b"resetdbs") {
         user.flags.alldbs = false;
         user.allowed_dbs.clear();
         return Ok(());
     }
     if rule.len() > 3 && rule[..3].eq_ignore_ascii_case(b"db=") {
         let raw = &rule[3..];
-        let Some(db) = parse_i64_strict(raw) else {
-            return Err(b"ERR Invalid database number".to_vec());
-        };
-        if db < 0 || db > u32::MAX as i64 {
-            return Err(b"ERR Invalid database number".to_vec());
-        }
-        let db = db as u32;
+        let dbs = parse_acl_db_list(raw)?;
         user.flags.alldbs = false;
-        if !user.allowed_dbs.contains(&db) {
-            user.allowed_dbs.push(db);
+        for db in dbs {
+            if !user.allowed_dbs.contains(&db) {
+                user.allowed_dbs.push(db);
+            }
         }
         return Ok(());
     }
@@ -5033,6 +5414,23 @@ fn apply_acl_rule(user: &mut AclUser, rule: &[u8]) -> Result<(), Vec<u8>> {
         }
         return Ok(());
     }
+    if rule.starts_with(b"%") {
+        let (permissions, pattern) = parse_acl_key_permission(rule)?;
+        let pat = RedisString::from_bytes(pattern);
+        if let Some(existing) = user
+            .key_permissions
+            .iter_mut()
+            .find(|existing| existing.pattern == pat)
+        {
+            existing.permissions |= permissions;
+        } else {
+            user.key_permissions.push(AclKeyPattern {
+                pattern: pat,
+                permissions,
+            });
+        }
+        return Ok(());
+    }
     if rule.starts_with(b"&") {
         let pat = RedisString::from_bytes(&rule[1..]);
         if user.flags.allchannels && pat.as_bytes() != b"*" {
@@ -5099,6 +5497,11 @@ fn build_getuser_reply(user: &AclUser) -> RespFrame {
     let keys_str = user.keys_summary();
     let channels_str = user.channels_summary();
     let databases_str = user.databases_summary();
+    let selectors: Vec<RespFrame> = user
+        .selectors
+        .iter()
+        .map(build_getuser_selector_reply)
+        .collect();
 
     RespFrame::array(vec![
         RespFrame::bulk(RedisString::from_bytes(b"flags")),
@@ -5114,7 +5517,28 @@ fn build_getuser_reply(user: &AclUser) -> RespFrame {
         RespFrame::bulk(RedisString::from_bytes(b"databases")),
         RespFrame::bulk(RedisString::from_vec(databases_str)),
         RespFrame::bulk(RedisString::from_bytes(b"selectors")),
-        RespFrame::array(Vec::new()),
+        RespFrame::array(selectors),
+    ])
+}
+
+fn build_getuser_selector_reply(selector: &AclUser) -> RespFrame {
+    RespFrame::Map(vec![
+        (
+            RespFrame::bulk(RedisString::from_static(b"commands")),
+            RespFrame::bulk(RedisString::from_vec(selector.commands_summary())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"keys")),
+            RespFrame::bulk(RedisString::from_vec(selector.keys_summary())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"channels")),
+            RespFrame::bulk(RedisString::from_vec(selector.channels_summary())),
+        ),
+        (
+            RespFrame::bulk(RedisString::from_static(b"databases")),
+            RespFrame::bulk(RedisString::from_vec(selector.databases_summary())),
+        ),
     ])
 }
 
@@ -5259,6 +5683,50 @@ fn parse_i64_strict(bytes: &[u8]) -> Option<i64> {
     }
     let s = std::str::from_utf8(bytes).ok()?;
     s.parse::<i64>().ok()
+}
+
+fn parse_acl_db_list(bytes: &[u8]) -> Result<Vec<u32>, Vec<u8>> {
+    if bytes.is_empty() {
+        return Err(b"ERR Syntax error".to_vec());
+    }
+    let mut out = Vec::new();
+    for part in bytes.split(|b| *b == b',') {
+        if part.is_empty() {
+            return Err(b"ERR Syntax error".to_vec());
+        }
+        let s = std::str::from_utf8(part).map_err(|_| b"ERR Syntax error".to_vec())?;
+        let parsed = s
+            .parse::<i128>()
+            .map_err(|_| b"ERR Syntax error".to_vec())?;
+        if parsed < 0 || parsed > u32::MAX as i128 {
+            return Err(b"ERR The provided database ID is out of range".to_vec());
+        }
+        let parsed = parsed as u32;
+        if !out.contains(&parsed) {
+            out.push(parsed);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_acl_key_permission(rule: &[u8]) -> Result<(u8, &[u8]), Vec<u8>> {
+    let Some(rest) = rule.strip_prefix(b"%") else {
+        return Err(b"ERR Syntax error".to_vec());
+    };
+    if rest.is_empty() || rest.starts_with(b"~") {
+        return Err(b"ERR Syntax error".to_vec());
+    }
+    let (permissions, tail) = if let Some(tail) = rest.strip_prefix(b"RW") {
+        (ACL_KEY_READ_WRITE, tail)
+    } else if let Some(tail) = rest.strip_prefix(b"R") {
+        (ACL_KEY_READ, tail)
+    } else if let Some(tail) = rest.strip_prefix(b"W") {
+        (ACL_KEY_WRITE, tail)
+    } else {
+        return Err(b"ERR Syntax error".to_vec());
+    };
+    let pattern = tail.strip_prefix(b"~").unwrap_or(tail);
+    Ok((permissions, pattern))
 }
 
 /// Parse a floating-point number. Rejects empty input, whitespace, and

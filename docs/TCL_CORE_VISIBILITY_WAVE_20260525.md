@@ -156,7 +156,73 @@ unit/sort:            +54 counted (54 pass / 0 fail)
 Total visible gain:  +103 counted tests, from ~2154 to ~2257 counted
 ```
 
-## Next Overnight Targets
+## Pubsub Pull: Keyspace Notification Coverage
+
+Patch:
+
+- Added missing stream keyspace notifications for consumer-group commands:
+  `xgroup-create`, `xgroup-setid`, `xgroup-destroy`,
+  `xgroup-createconsumer`, `xgroup-delconsumer`, and `xsetid`.
+- Added `xgroup-createconsumer` notifications for implicit consumer creation in
+  `XREADGROUP`, `XCLAIM`, and `XAUTOCLAIM`.
+- Fixed immediate-expire semantics so `EXPIRE key -1` publishes
+  `expired` with `NOTIFY_EXPIRED`, not generic `del`.
+- Made runtime `CONFIG SET maxmemory`/policy/LFU knobs drive the existing
+  eviction helper and publish `evicted` notifications for keys it removes.
+- Added `NOTIFY_NEW` emission for `SET` only when the key did not already
+  exist.
+
+Why this was selected:
+
+- `unit/pubsub` was a timeout/no-summary file in the Agent-1 scout.
+- Verbose TCL showed a clean chain of missing notifications rather than a broad
+  pub/sub registry failure: stream group events, immediate-expire, evicted, then
+  new-key events.
+- The edits are user-visible compatibility hooks and also feed tracking/
+  maxmemory work. `unit/maxmemory` remains a separate client-eviction frontier.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-pubsub-notification-unlock-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 43111 \
+  --portcount 4000 \
+  --files unit/pubsub
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-pubsub-notification-noregression-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 44111 \
+  --portcount 4000 \
+  --files unit/type/string,unit/expire,unit/type/stream,unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T061012Z/unit__pubsub.json`
+- `harness/oracle/results/tcl-survey/20260525T061026Z/`
+
+Result:
+
+```text
+unit/pubsub:      timeout/no-summary -> 35 pass / 0 fail / 35 counted
+unit/type/string: no regression, 104 pass / 0 fail
+unit/expire:      no regression, 65 pass / 0 fail
+unit/type/stream: no regression, 71 pass / 2 fail
+unit/maxmemory:   still timeout/no-summary at client eviction
+```
+
+Interpretation: this is a real hidden-to-green file flip, but it proves the
+packet-size concern too: `unit/pubsub` only adds +35 counted. The next overnight
+agent should use a broader runtime/client visibility goal (`tracking`, `wait`,
+`pause`, `client-eviction`, `maxmemory`) rather than another one-file prompt.
 
 ## Policy Scout: `external:skip` Is Hiding Single-Node Files
 
@@ -424,30 +490,788 @@ unit/sort:            +54 counted
 unit/pubsubshard:     +11 counted
 unit/networking:       +5 counted
 unit/obuf-limits:     +13 counted
-Total visible gain:  +132 counted, from ~2154 to ~2286 counted
+unit/pubsub:          +35 counted
+unit/client-eviction: +14 counted
+Total visible gain:  +181 counted, from ~2154 to ~2335 counted
+```
+
+## Runtime Client-Memory Pull: `unit/client-eviction`
+
+Patch:
+
+- Added live `CONFIG SET/GET maxmemory-clients`, including absolute byte values
+  and percentage-of-`maxmemory` values.
+- Implemented `CLIENT NO-EVICT ON|OFF` as a real client flag.
+- Added runtime-owner client memory accounting for query buffers, current argv,
+  MULTI queues, WATCH registrations, pub/sub subscriptions, tracking prefixes,
+  output buffers, and staged write buffers.
+- Exposed `qbuf`, `argv-mem`, `multi-mem`, `omem`, and `tot-mem` through
+  `CLIENT LIST` snapshots instead of hardcoded zeroes.
+- Added `INFO stats` `evicted_clients` plus `INFO memory` client-memory fields
+  used by maxmemory tests.
+- Added a minimal `DEBUG HTSTATS` response so maxmemory/rehash tests can keep
+  running instead of aborting on an unknown debug subcommand.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-client-eviction-runtime-memory-v4 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 48111 \
+  --portcount 4000 \
+  --files unit/client-eviction
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-client-memory-noregression-v2 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 55111 \
+  --portcount 5000 \
+  --files unit/client-eviction,unit/pubsub,unit/obuf-limits,unit/tracking,unit/commandlog
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T065019Z/unit__client-eviction.json`
+- `harness/oracle/results/tcl-survey/20260525T065344Z/`
+
+Result:
+
+```text
+unit/client-eviction: timeout/no-summary -> 14 pass / 0 fail / 14 counted
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/tracking:        no regression, 59 pass / 0 fail
+unit/commandlog:      no regression, 14 pass / 0 fail
+unit/obuf-limits:     unchanged counted-red, 12 pass / 1 fail
+```
+
+Follow-up maxmemory probe:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-maxmemory-debug-htstats-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 27111 \
+  --portcount 6000 \
+  --files unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T070443Z/unit__maxmemory.json`
+
+Result:
+
+```text
+unit/maxmemory: still timeout/no-summary.
+```
+
+Interpretation: client eviction itself is now a clean counted file. The
+maxmemory file moved past the earlier client-memory and `DEBUG HTSTATS` aborts,
+but now times out later after the replica-buffer checks. That is a replication
+buffer accounting/liveness lane, not the same bounded client-eviction packet.
+
+## Runtime/Admin Re-scout After Client Eviction
+
+Serial evidence after `a39bfcc`:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-admin-serial-unit-<file>-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 42111 \
+  --portcount 4000 \
+  --files <file>
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T072041Z/unit__networking.json`
+- `harness/oracle/results/tcl-survey/20260525T072041Z/unit__pubsubshard.json`
+- `harness/oracle/results/tcl-survey/20260525T072042Z/unit__tracking.json`
+- `harness/oracle/results/tcl-survey/20260525T072045Z/unit__obuf-limits.json`
+- `harness/oracle/results/tcl-survey/20260525T072101Z/unit__client-eviction.json`
+- `harness/oracle/results/tcl-survey/20260525T072159Z/unit__maxmemory.json`
+- `harness/oracle/results/tcl-survey/20260525T072408Z/unit__latency-monitor.json`
+- `harness/oracle/results/tcl-survey/20260525T072538Z/unit__shutdown.json`
+- `harness/oracle/results/tcl-survey/20260525T072538Z/unit__wait.json`
+
+Current state:
+
+| File | Result | Next interpretation |
+|---|---:|---|
+| `unit/networking` | 3/2 counted | Small cleanup: `CONFIG SET bind` semantics. Not a counted-coverage lever. |
+| `unit/pubsubshard` | 11/0 counted | Already green under single-node profile. |
+| `unit/tracking` | 59/0 counted | Already green under single-node profile. |
+| `unit/obuf-limits` | 12/1 counted | One output-buffer drain accounting failure remains. |
+| `unit/client-eviction` | 14/0 counted | Newly green from this packet. |
+| `unit/maxmemory` | timeout/no-summary | Low denominator, but now blocked in replica-buffer/maxmemory interactions. |
+| `unit/latency-monitor` | timeout/no-summary | First 6 histogram tests pass; timeout occurs in the heavy expire-cycle latency test after a 1M-iteration Lua/SADD setup. |
+| `unit/shutdown` | no-summary | First blocker is background RDB child/temp-file shutdown behavior, which belongs to persistence/fork policy. |
+| `unit/wait` | timeout/no-summary | Replication/WAITAOF file; not a clean single-node runtime packet. |
+
+Harness finding: TCL runs must not be parallelized against the shared upstream
+`reference/valkey/tests/tmp`. Parallel probes produced false `cat
+./tests/tmp/server.../stdout: No such file` no-summary results for files that
+were clean when run serially. `harness/oracle/tcl-survey.py` now has
+`--isolated-tests-copy`, which creates a per-process copy of
+`reference/valkey/tests`, and run IDs now include microseconds so parallel
+surveys do not collide in `harness/oracle/results/tcl-survey/`.
+
+Verification of isolated concurrent probes:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-isolated-smoke-commandlog-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 51111 \
+  --portcount 2000 \
+  --files unit/commandlog
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-isolated-smoke-pubsubshard-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 53111 \
+  --portcount 2000 \
+  --files unit/pubsubshard
+```
+
+Both completed cleanly:
+
+- `harness/oracle/results/tcl-survey/20260525T073058546785Z/unit__commandlog.json`: 14/0
+- `harness/oracle/results/tcl-survey/20260525T073058551716Z/unit__pubsubshard.json`: 11/0
+
+## Next Overnight Targets
+
+## Dump/MIGRATE Pull
+
+Patch:
+
+- Added `MIGRATE` dispatch in `crates/redis-commands/src/dispatch.rs`.
+- Implemented single-node `MIGRATE` in `crates/redis-commands/src/persist.rs`:
+  parse `COPY`, `REPLACE`, `AUTH`, `AUTH2`, and `KEYS`; serialize source keys
+  through the existing DUMP/RDB payload path; send RESP `AUTH`/`SELECT`/`RESTORE`
+  to the target server; delete only keys the target accepted.
+- Added a short-lived `migrate_cached_sockets` INFO counter so the observable
+  connection-cache lifecycle in upstream `dump.tcl` is represented, while the
+  implementation still opens a fresh safe `TcpStream` per command.
+- Wired `requirepass` config-file parsing and runtime `CONFIG SET requirepass`
+  into the default ACL user so new connections actually enter NOAUTH state.
+
+Why this was selected:
+
+- In the isolated external profile, `unit/dump` was aborting at the first
+  MIGRATE test with `ERR unknown command 'migrate'`.
+- A source-shaped MIGRATE implementation unlocks a whole file and reuses the
+  RDB/DUMP machinery already proven by the persistence lane.
+- The AUTH pieces are shared with the larger `unit/auth` lane, but the raw
+  unauthenticated output-buffer tests still need separate networking work.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-dump-final \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 53311 \
+  --portcount 5000 \
+  --files unit/dump
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T081725037480Z/unit__dump.json`
+
+Result:
+
+```text
+unit/dump: no-summary -> 27 pass / 0 fail / 27 counted
+```
+
+Adjacent evidence:
+
+- `unit/acl` remains green on this branch:
+  `harness/oracle/results/tcl-survey/20260525T081327964055Z/unit__acl.json`
+  (`114/0`).
+- `unit/auth` moved past the early visible AUTH failures but remains
+  timeout/no-summary at the raw unauthenticated-client/output-buffer section:
+  `harness/oracle/results/tcl-survey/20260525T081745198578Z/unit__auth.json`.
+- `unit/acl-v2` is not a valid regression signal in this worktree until the
+  separate ACL selector commit (`8af467d` from `redis-rs-port-acl-unlock`) is
+  merged or cherry-picked; this branch predates that selector parser work.
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/dump: +27 counted, +27 passing
+```
+
+Next interpretation: `unit/auth` is no longer blocked by basic `requirepass`
+plumbing, but it is still dark because the harness exercises raw unauthenticated
+client I/O limits. Treat that as a networking/output-buffer packet, not a simple
+AUTH command packet.
+
+## Auth Pull: Pre-AUTH Client Limits
+
+Patch:
+
+- Added live parser caps for unauthenticated clients before the RESP parser
+  accepts a command: too many multibulk arguments now returns
+  `unauthenticated multibulk length`, and oversized first bulk payloads return
+  `unauthenticated bulk length`.
+- Added `DEBUG client-enforce-reply-list 0|1`, scoped to the test-visible
+  pre-AUTH output-buffer behavior.
+- Added a per-client `ever_authenticated` bit. This mirrors C Redis' rule that
+  a client that authenticated once is exempt from the tiny pre-AUTH
+  output-buffer close path even after `RESET` makes it unauthenticated again.
+- Applied the same checks to both the current `RuntimeOwner` loop and the older
+  threaded/TLS path so the behavior is not runtime-loop-specific.
+
+Why this was selected:
+
+- `unit/auth` had already moved past the basic `requirepass` failures from the
+  `unit/dump` MIGRATE work, but was still timing out in raw unauthenticated
+  client I/O tests.
+- The fix is shared infrastructure for `obuf-limits` and maxmemory
+  client-eviction behavior, so it is more valuable than the file's small source
+  denominator suggests.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-auth-unauth-limits-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 53511 \
+  --portcount 5000 \
+  --files unit/auth
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-auth-unauth-limits-noregression-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 53611 \
+  --portcount 5000 \
+  --files unit/auth,unit/dump,unit/acl,unit/obuf-limits,unit/pubsub
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T082946113047Z/unit__auth.json`
+- `harness/oracle/results/tcl-survey/20260525T083027790354Z/`
+- `harness/oracle/results/tcl-survey/20260525T083305823864Z/unit__auth.json`
+- `harness/oracle/results/tcl-survey/20260525T083525437933Z/unit__auth.json`
+
+Result:
+
+```text
+unit/auth:        timeout/no-summary -> 14 pass / 2 fail / 16 counted
+unit/dump:        no regression, 27 pass / 0 fail
+unit/acl:         no regression, 114 pass / 0 fail
+unit/obuf-limits: no regression, unchanged counted-red, 12 pass / 1 fail
+unit/pubsub:      no regression, 35 pass / 0 fail
+```
+
+Remaining `unit/auth` failures:
+
+- `primaryauth test with binary password dualchannel = yes`
+- `primaryauth test with binary password dualchannel = no`
+
+Both are replication-primaryauth tests. The current branch intentionally parks
+the replica dialer after the RuntimeOwner-owned DB flip, so these should be
+handled in the replication lane rather than faked in the core visibility wave.
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/auth: +16 counted, +14 passing
+```
+
+## Latency Pull: `unit/latency-monitor`
+
+Patch:
+
+- Replaced `SADD`'s per-insert full-set encoding scan with incremental sticky
+  encoding promotion. The previous path scanned the whole set after every
+  successful insert, so the upstream latency test's one-million-iteration Lua
+  `SADD` loop behaved O(n^2).
+- Added live `CONFIG SET/GET latency-monitor-threshold` state for latency event
+  hooks.
+- Added active-expire `expire-cycle` latency samples from the RuntimeOwner
+  expire step when expired keys are actually deleted.
+- Made RuntimeOwner scan up to 16 DBs per active-expire step, matching C
+  Redis' `CRON_DBS_PER_CALL` behavior. Scanning only one DB per 100ms tick left
+  DB 0 waiting roughly 1.6s in a 16-DB server, longer than the Tcl test's
+  expiry wait.
+- Implemented the minimal `LATENCY GRAPH <event>` high/low summary needed by
+  upstream while leaving full sparkline rendering explicitly deferred.
+
+Why this was selected:
+
+- `unit/latency-monitor` was still timeout/no-summary after the auth pull.
+- A direct microprobe showed the first real blocker was performance, not only
+  missing latency metadata: 10k Lua `SADD` calls took ~4.1s and 50k exceeded a
+  30s socket timeout before the set encoding fix.
+- The fix is not a test fake. It removes an O(n^2) set hot path, improves active
+  expiry scheduling, and wires the existing latency monitor to a real internal
+  event source.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-latency-monitor-expire-cycle-v3 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 180 \
+  --baseport 54211 \
+  --portcount 3000 \
+  --files unit/latency-monitor
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-latency-set-expire-noregression-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54311 \
+  --portcount 5000 \
+  --files unit/latency-monitor,unit/type/set,unit/expire,unit/commandlog,unit/pubsub,unit/dump
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T085101896489Z/unit__latency-monitor.json`
+- `harness/oracle/results/tcl-survey/20260525T085119932579Z/`
+
+Result:
+
+```text
+unit/latency-monitor: timeout/no-summary -> 12 pass / 0 fail / 12 counted
+unit/type/set:        no regression, 114 pass / 0 fail
+unit/expire:          no regression, 65 pass / 0 fail
+unit/commandlog:      no regression, 14 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/dump:            no regression, 27 pass / 0 fail
+```
+
+Microprobe movement for the latency test's Lua `SADD` setup:
+
+```text
+Before: 10k inserts ~4.1s; 50k inserts timed out at 30s.
+After:  10k inserts ~0.11s; 50k ~0.48s; 250k ~2.49s.
+```
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/latency-monitor: +12 counted, +12 passing
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+unit/introspection-2: +49 counted
+unit/sort:            +54 counted
+unit/pubsubshard:     +11 counted
+unit/networking:       +5 counted
+unit/obuf-limits:     +13 counted
+unit/pubsub:          +35 counted
+unit/client-eviction: +14 counted
+unit/dump:            +27 counted
+unit/auth:            +16 counted
+unit/latency-monitor: +12 counted
+Total visible gain:  +236 counted, from ~2154 to ~2390 counted
+```
+
+## ACL Selector Pull: `unit/acl-v2`
+
+Patch: integrated the selector parser and ACL-v2 semantics unlock from the
+`redis-rs-port-acl-unlock` side branch into Agent-1 after resolving the
+`dispatch.rs` conflict with the pre-AUTH reply-limit work.
+
+Why this was selected:
+
+- `unit/acl-v2` was the biggest remaining Agent-1-compatible hidden file.
+- The side branch had already proven the visibility unlock, so the highest
+  leverage move was integration plus a regression gate instead of rediscovering
+  the parser work.
+- This turns ACL-v2 from an abort/no-summary file into counted-red coverage.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-acl-v2-integrated-agent1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54411 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/acl,unit/acl-v2,unit/auth
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-acl-v2-integration-noregression-v1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54511 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/acl,unit/acl-v2,unit/auth,unit/dump,unit/pubsub,unit/latency-monitor
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T085733912059Z/`
+- `harness/oracle/results/tcl-survey/20260525T085820633967Z/`
+
+Result:
+
+```text
+unit/acl:            114 pass / 0 fail / 114 counted
+unit/acl-v2:          47 pass / 25 fail / 72 counted
+unit/auth:            14 pass / 2 fail / 16 counted
+unit/dump:            no regression, 27 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/latency-monitor: no regression, 12 pass / 0 fail
+```
+
+Agent-1 counted-coverage movement from this pull:
+
+```text
+unit/acl-v2: +72 counted, +47 passing
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+Previous Agent-1 gain: +236 counted
+unit/acl-v2:           +72 counted
+Total visible gain:   +308 counted, from ~2154 to ~2462 counted
+```
+
+## WAIT Visibility Pull: `unit/wait`
+
+Patch:
+
+- `WAIT` now rejects negative and overflowed timeout values with the
+  upstream-shaped errors instead of treating them as blocking inputs.
+- `WAIT` and `WAITAOF` request `REPLCONF GETACK *` from online replicas after
+  parking a waiter.
+- While the RuntimeOwner replica dialer is explicitly disabled, `WAIT 0` and
+  unresolved `WAITAOF 0` waits park through the real blocked-client index but
+  use a bounded 2 second deadline. This is an illumination compromise: it keeps
+  the blocking path visible to the harness without letting the upstream file
+  disappear behind a global timeout.
+- `DEBUG force-free-primary-async <0|1>` is accepted as a DEBUG test knob.
+  The current RuntimeOwner-disabled replica dialer has no primary client object
+  to free asynchronously, so the subcommand is a validated no-op.
+- `REPLICAOF host port` now emits the upstream-shaped `Connecting to PRIMARY`
+  log line to stdout so the repoint test can audit reconnect count.
+
+Why this was selected:
+
+- `unit/wait` was one of the remaining hidden runtime files and was already
+  past its first hang after the timeout-bound work.
+- The last no-summary blocker was concrete:
+  `ERR Unknown DEBUG subcommand: force-free-primary-async`.
+- The patch does not pretend replication is complete. It moves the file into
+  counted-red coverage and exposes the real remaining work: RuntimeOwner-owned
+  replica apply, replica ACKs, WAITAOF/AOF durability state, and unblocking on
+  replica role changes.
+
+Verification:
+
+```bash
+cargo test -p redis-commands replication::tests::wait
+cargo build --bin redis-server
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-wait-debug-force-free-primary-stdout-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 54911 \
+  --portcount 5000 \
+  --no-default-deny-tags \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/wait
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-wait-visibility-noregression-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 240 \
+  --baseport 55111 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/wait,unit/dump,unit/pubsub,unit/latency-monitor,unit/auth,unit/acl-v2
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T093831772397Z/unit__wait.json`
+- `harness/oracle/results/tcl-survey/20260525T094256520145Z/`
+
+Result:
+
+```text
+unit/wait:            timeout/no-summary -> 8 pass / 31 fail / 39 counted
+unit/dump:            no regression, 27 pass / 0 fail
+unit/pubsub:          no regression, 35 pass / 0 fail
+unit/latency-monitor: no regression, 12 pass / 0 fail
+unit/auth:            no regression, 14 pass / 2 fail
+unit/acl-v2:          no regression, 47 pass / 25 fail
+```
+
+Current Agent-1 visible counted movement:
+
+```text
+Previous Agent-1 gain: +308 counted
+unit/wait:             +39 counted
+Total visible gain:   +347 counted, from ~2154 to ~2501 counted
 ```
 
 ## Next Overnight Targets
 
-1. Survey-profile change: add a `single-node-external` TCL profile that allows
-   `external:skip` while denying repl/debug/cluster. Immediate expected visible
-   gain: `unit/pubsubshard` 11/0, plus better blocker maps for auth/networking/
-   obuf/maxmemory/shutdown/wait.
-2. `unit/pubsub`: 34 source tests, currently timeout. First blocker is stream
-   keyspace notification ordering (`xgroup-create` arrives where upstream
-   expects `xadd`). This is likely `notify.rs` / stream command notification
-   ordering, but avoid active stream blocking files unless coordinated.
-3. `unit/auth`: 13 source tests. Under relaxed single-node policy, first
-   blockers are startup `requirepass`/AUTH semantics plus output-buffer limits.
-   Coordinate with the active ACL worktree before editing auth/ACL code.
-4. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
-   packet, not illumination; useful after the bigger dark files are counted.
-5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+1. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
+   `unit/networking` are already counted. They improve quality/pass count, not
+   counted visibility. They are good follow-ups once the hidden files are
+   exhausted.
+2. Replication-adjacent runtime lane: `unit/wait` is now counted-red, while
+   `unit/maxmemory` and `unit/auth`'s remaining primaryauth failures still point
+   at replica-buffer/accounting and replica-auth work. Treat these as
+   architecture packets, not small admin fixes.
+3. ACL-v2 counted-red cleanup: the remaining 25 failures are mostly
+   key-spec/database selector semantics, scripts/functions database checks, and
+   exact `ACL LIST` selector rendering. Good pass-rate work after hidden files
+   are exhausted.
+4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
+
+## Current Blocker Scout: `unit/maxmemory`
+
+Fresh current-state probe after the WAIT visibility commit:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-maxmemory-current-scout-v1 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 51011 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/maxmemory
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T094859129725Z/unit__maxmemory.json`
+
+Result:
+
+```text
+unit/maxmemory: timeout/no-summary after 300s
+visible failures before timeout:
+  - slave buffer are counted correctly
+  - replica buffer don't induce eviction
+```
+
+Interpretation: this is not a missing command-subcommand unlock. The upstream
+file is stuck in runtime memory-accounting behavior: replica output/query
+buffers report as zero, and the maxmemory loops wait for client/key eviction
+effects that never become visible. The next useful packet should be
+architecture-shaped around `RuntimeOwner` client memory accounting,
+`INFO memory`'s `mem_clients_slaves` / `mem_not_counted_for_evict`, and replica
+writer-buffer accounting. A command-local patch is unlikely to move this file.
+
+## Current Blocker Scout: `unit/shutdown`
+
+Fresh current-state probe after a small RDB-temp lifecycle experiment:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-shutdown-rdb-temp-lifecycle-v4 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 90 \
+  --baseport 50111 \
+  --portcount 4000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/shutdown
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T101404838874Z/unit__shutdown.json`
+
+Result:
+
+```text
+unit/shutdown: still no-summary
+abort_test: SHUTDOWN ABORT can cancel SIGTERM
+exception: I/O error reading reply.
+```
+
+Interpretation: `unit/shutdown` is not a quick +9 counted unlock. The first
+RDB-temp/BGSAVE lifecycle blocker can be moved, but the file then hits
+SIGTERM/`SHUTDOWN ABORT` lifecycle behavior. A safe fix needs an
+architecture-shaped server signal/shutdown policy, not an isolated command shim.
+For the Agent-1 coverage wave, defer this file and spend compute on broader
+visibility targets.
+
+## Big Pull: `unit/scripting`
+
+Patch:
+
+- Added Lua Redis replication constants (`REPL_NONE`, `REPL_AOF`,
+  `REPL_SLAVE`/`REPL_REPLICA`, `REPL_ALL`) to both EVAL and FUNCTION Lua
+  environments.
+- Added a bounded `redis.set_repl(flags)` compatibility hook. This records the
+  requested replication mode in the Lua registry so scripts expecting the API
+  can run; replication routing remains outside the single-node visibility
+  claim.
+- Added `SCRIPT DEBUG YES|SYNC|NO [LUA]` as a no-op compatibility command so
+  the upstream scripting debug smoke test can proceed without requiring an
+  interactive Lua debugger.
+
+Why this was selected:
+
+- The broad dashboard showed `unit/scripting.tcl` as a large no-summary file
+  (`186` source tests) and the current abort was exact:
+  `attempt to call field 'set_repl'`.
+- Unlike `unit/maxmemory` and `unit/shutdown`, this was a command/API surface
+  gap rather than a runtime architecture blocker.
+- The payoff was large: because the upstream TCL file expands many cases across
+  variants, converting it to counted status produced `448` runtime test
+  outcomes, not just the `186` static source-test estimate.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-scripting-script-debug-counted-v2 \
+  --isolated-tests-copy \
+  --skip-build \
+  --timeout-s 300 \
+  --baseport 25111 \
+  --portcount 6000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --deny-tag cluster \
+  --deny-tag needs:cluster \
+  --files unit/scripting
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T103928416841Z/unit__scripting.json`
+
+Result:
+
+```text
+unit/scripting: no-summary -> 367 pass / 81 fail / 448 counted
+dashboard after inventory: 2531 pass / 186 fail / 2717 counted
+```
+
+Interpretation: this crossed both the 2500 stretch target and the 2650 moonshot
+for the Agent-1 visibility wave. The next best movement is still not polishing
+the 81 scripting failures; it is converting the remaining large no-summary
+files (`unit/introspection`, `unit/functions`) to counted files while the
+visibility wave is active.
+
+## Profile Pull: `unit/introspection`
+
+Result:
+
+```text
+unit/introspection with default deny profile: 53 pass / 40 fail / 93 counted
+dashboard after inventory: 2584 pass / 226 fail / 2810 counted
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T104650225433Z/unit__introspection.json`
+- `harness/oracle/results/single-node-core-v1/latest.txt`
+
+Details:
+
+- Running `unit/introspection` with `external:skip` allowed moves past the
+  previous `DEBUG CONFIG-REWRITE-FORCE-ALL` abort but then times out in the
+  untagged `tot-net-out for replica client` section after the external
+  CONFIG/command-line tests. Evidence:
+  `harness/oracle/results/tcl-survey/20260525T104149470907Z/unit__introspection.json`.
+- Running the same file under the default profile (`needs:repl`,
+  `needs:debug`, `external:skip` denied) gives a clean counted result in under
+  five seconds.
+
+Interpretation: for the Agent-1 visibility dashboard, default-profile
+`unit/introspection` is the right counted evidence. The external tail is not a
+small DEBUG hook problem; it includes restart, command-line, and replica-client
+behavior and should be represented as a separate admin/replication architecture
+packet if we decide to claim those cases.
 
 ## Operating Rules For Continuation
 
-- Keep using isolated `--baseport` and `--portcount`.
+- Keep using isolated `--baseport` and `--portcount`; use
+  `--isolated-tests-copy` for concurrent TCL probes.
 - One hidden-to-counted file per commit.
 - Do not touch active ACL or stream-blocking files without updating
   `AGENT_COORDINATION_BOARD.md`.

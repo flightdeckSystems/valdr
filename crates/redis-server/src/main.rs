@@ -48,6 +48,8 @@ mod runtime_owner;
 const DEFAULT_PORT: u16 = 6379;
 const DEFAULT_BIND: &str = "127.0.0.1";
 const ACTIVE_TIME_SAMPLE_INTERVAL: u64 = 1024;
+const MAX_UNAUTHENTICATED_MULTIBULK_LEN: i64 = 10;
+const MAX_UNAUTHENTICATED_BULK_LEN: i64 = 16 * 1024;
 
 static RENAMED_READY_KEYS: OnceLock<Mutex<Vec<(u32, RedisString)>>> = OnceLock::new();
 
@@ -119,6 +121,7 @@ struct CliArgs {
     acl_pubsub_default_allchannels: bool,
     aclfile: Option<String>,
     acl_user_lines: Vec<String>,
+    requirepass: Option<String>,
     command_renames: Vec<(String, String)>,
 }
 
@@ -151,6 +154,7 @@ impl Default for CliArgs {
             acl_pubsub_default_allchannels: false,
             aclfile: None,
             acl_user_lines: Vec::new(),
+            requirepass: None,
             command_renames: Vec::new(),
         }
     }
@@ -263,6 +267,12 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
                     .next()
                     .ok_or_else(|| "--acl-pubsub-default requires a value".to_string())?;
                 out.acl_pubsub_default_allchannels = v.eq_ignore_ascii_case("allchannels");
+            }
+            "--requirepass" => {
+                let v = it
+                    .next()
+                    .ok_or_else(|| "--requirepass requires a value".to_string())?;
+                out.requirepass = (!v.is_empty()).then_some(v);
             }
             "--user" => {
                 let v = it
@@ -460,6 +470,10 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             "aclfile" => {
                 args.aclfile = (!value.is_empty()).then(|| value.to_string());
             }
+            "requirepass" => {
+                let value = unquote_config_token(value);
+                args.requirepass = (!value.is_empty()).then(|| value.to_string());
+            }
             "user" => {
                 if !value.is_empty() {
                     args.acl_user_lines.push(value.to_string());
@@ -634,6 +648,11 @@ fn main() {
     live_config.store_set_max_listpack_value(args.set_max_listpack_value);
     live_config.set_zset_max_listpack_entries(args.zset_max_listpack_entries);
     live_config.set_zset_max_listpack_value(args.zset_max_listpack_value);
+    if let Some(secret) = &args.requirepass {
+        live_config.set_requirepass(Some(redis_types::RedisString::from_bytes(
+            secret.as_bytes(),
+        )));
+    }
     if args.acl_pubsub_default_allchannels {
         redis_core::acl::set_acl_pubsub_default(b"allchannels");
     } else {
@@ -657,6 +676,9 @@ fn main() {
     ) {
         eprintln!("{}", String::from_utf8_lossy(&e));
         std::process::exit(1);
+    }
+    if let Some(secret) = args.requirepass.as_deref() {
+        redis_commands::connection::apply_requirepass_to_acl(Some(secret.as_bytes()));
     }
     let repl_state = Arc::new(redis_core::replication::ReplicationState::new(
         redis_core::replication::generate_runid(),
@@ -1270,7 +1292,7 @@ fn handle_connection(
     let mut client = Client::with_connection(Connection::Tcp(stream));
     client.id = id;
     client.addr = Some(peer_addr);
-    client.authenticated_user = determine_initial_user();
+    client.set_authenticated_user(determine_initial_user());
 
     run_client_loop(&mut client, &outbound, shutdown, db, registry, server);
 }
@@ -1302,7 +1324,7 @@ fn handle_connection_tls(
     let mut client = Client::with_connection(conn);
     client.id = id;
     client.addr = Some(peer_addr.clone());
-    client.authenticated_user = determine_initial_user();
+    client.set_authenticated_user(determine_initial_user());
 
     run_client_loop_tls(
         &mut client,
@@ -1359,6 +1381,14 @@ fn run_client_loop(
             None
         };
         loop {
+            if let Some(err) =
+                unauthenticated_protocol_limit_error(client, &client.query_buf[consumed_total..])
+            {
+                queue_error_reply(client, &err);
+                let _ = flush_reply_fast(client, outbound);
+                disconnect = true;
+                break;
+            }
             let parsed = parse_inline_or_multibulk_into(
                 &client.query_buf[consumed_total..],
                 &mut client.argv,
@@ -1498,6 +1528,19 @@ fn run_client_loop_tls(
         let mut saw_command = false;
         let mut last_cmd_name: Vec<u8> = Vec::new();
         loop {
+            if let Some(err) =
+                unauthenticated_protocol_limit_error(client, &client.query_buf[consumed_total..])
+            {
+                queue_error_reply(client, &err);
+                let reply = std::mem::take(&mut client.reply_buf);
+                if !reply.is_empty() {
+                    if let Some(c) = client.conn.as_mut() {
+                        let _ = c.write_all(&reply);
+                    }
+                }
+                disconnect = true;
+                break;
+            }
             let parsed = parse_inline_or_multibulk_into(
                 &client.query_buf[consumed_total..],
                 &mut client.argv,
@@ -1787,6 +1830,59 @@ fn determine_initial_user() -> Option<RedisString> {
 fn queue_error_reply(client: &mut Client, err: &RedisError) {
     let payload = err.to_resp_payload();
     encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
+}
+
+fn unauthenticated_protocol_limit_error(client: &Client, bytes: &[u8]) -> Option<RedisError> {
+    if client.authenticated_user.is_some() || !bytes.starts_with(b"*") {
+        return None;
+    }
+    let array_end = find_crlf_from(bytes, 1)?;
+    let argc = parse_i64_ascii(bytes.get(1..array_end)?)?;
+    if argc > MAX_UNAUTHENTICATED_MULTIBULK_LEN {
+        return Some(RedisError::runtime(
+            b"ERR Protocol error: unauthenticated multibulk length",
+        ));
+    }
+    let bulk_header_start = array_end + 2;
+    if bytes.get(bulk_header_start) != Some(&b'$') {
+        return None;
+    }
+    let bulk_end = find_crlf_from(bytes, bulk_header_start + 1)?;
+    let bulk_len = parse_i64_ascii(bytes.get(bulk_header_start + 1..bulk_end)?)?;
+    if bulk_len > MAX_UNAUTHENTICATED_BULK_LEN {
+        return Some(RedisError::runtime(
+            b"ERR Protocol error: unauthenticated bulk length",
+        ));
+    }
+    None
+}
+
+fn find_crlf_from(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes
+        .get(start..)?
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|idx| start + idx)
+}
+
+fn parse_i64_ascii(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let (negative, digits) = if bytes[0] == b'-' {
+        (true, &bytes[1..])
+    } else {
+        (false, bytes)
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut value: i64 = 0;
+    for digit in digits {
+        value = value.checked_mul(10)?;
+        value = value.checked_add((digit - b'0') as i64)?;
+    }
+    Some(if negative { -value } else { value })
 }
 
 // ──────────────────────────────────────────────────────────────────────────

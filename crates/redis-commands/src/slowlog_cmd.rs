@@ -20,13 +20,14 @@
 //! `record_slowlog_entry` defined here.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use redis_core::commandlog::{
     CommandLog, CommandLogEntry, CommandLogType, COMMANDLOG_ENTRY_MAX_ARGC,
     COMMANDLOG_ENTRY_MAX_STRING,
 };
-use redis_core::latency::{LatencyMonitor, LatencyReportConfig};
+use redis_core::latency::{LatencyMonitor, LatencyReportConfig, LatencyTimeSeries};
 use redis_core::monotonic::{elapsed_us, MonoTime};
 use redis_core::CommandContext;
 use redis_types::{RedisResult, RedisString};
@@ -41,6 +42,7 @@ static BLOCKED_SLOWLOG: OnceLock<Arc<Mutex<HashMap<u64, PendingBlockedSlowlogEnt
     OnceLock::new();
 static LATENCY_HISTOGRAMS: OnceLock<Arc<Mutex<HashMap<Vec<u8>, CommandLatencyStats>>>> =
     OnceLock::new();
+static LATENCY_MONITOR_THRESHOLD_MS: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
 struct CommandLatencyStats {
@@ -322,6 +324,18 @@ pub fn reset_latency_histograms() {
         Err(p) => p.into_inner(),
     };
     histograms.clear();
+}
+
+/// Update the latency-monitor threshold in milliseconds.
+///
+/// Valkey treats 0 as disabled; internal event hooks should only add samples
+/// when their measured duration is at least this threshold.
+pub fn set_latency_monitor_threshold(ms: i64) {
+    LATENCY_MONITOR_THRESHOLD_MS.store(ms.max(0), Ordering::Relaxed);
+}
+
+pub fn latency_monitor_threshold() -> i64 {
+    LATENCY_MONITOR_THRESHOLD_MS.load(Ordering::Relaxed)
 }
 
 /// Update the slowlog threshold in microseconds.
@@ -721,6 +735,10 @@ pub fn global_latency() -> Arc<Mutex<LatencyMonitor>> {
 /// Phase B: no internal callers; exposed for future integration with expire-cycle,
 /// fork, AOF-write, and other latency hooks.
 pub fn report_latency_event(event_name: &[u8], latency_ms: u64) {
+    let threshold = latency_monitor_threshold();
+    if threshold <= 0 || latency_ms < threshold as u64 {
+        return;
+    }
     let handle = global_latency();
     let mut monitor = match handle.lock() {
         Ok(g) => g,
@@ -802,7 +820,17 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 b"latency|graph",
             ));
         }
-        return ctx.reply_bulk(b"(no data)\n");
+        let event = ctx.arg_owned(2usize)?;
+        let handle = global_latency();
+        let monitor = match handle.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let graph = match monitor.get(event.as_bytes()) {
+            Some(ts) => latency_graph_summary(event.as_bytes(), ts),
+            None => b"(no data)\n".to_vec(),
+        };
+        return ctx.reply_bulk(&graph);
     }
 
     if sub_bytes.eq_ignore_ascii_case(b"doctor") {
@@ -817,7 +845,7 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
             Err(p) => p.into_inner(),
         };
         let cfg = LatencyReportConfig {
-            latency_monitor_threshold: 0,
+            latency_monitor_threshold: latency_monitor_threshold(),
             stat_fork_rate: 0.0,
             slowlog_threshold_us: {
                 let sl = global_slowlog();
@@ -878,6 +906,27 @@ pub fn latency_command(ctx: &mut CommandContext) -> RedisResult<()> {
     msg.extend_from_slice(sub_bytes);
     msg.push(b'\'');
     Err(redis_types::RedisError::runtime(msg))
+}
+
+fn latency_graph_summary(event: &[u8], ts: &LatencyTimeSeries) -> Vec<u8> {
+    let low = ts
+        .samples
+        .iter()
+        .filter(|sample| sample.time != 0)
+        .map(|sample| sample.latency)
+        .min()
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    out.extend_from_slice(event);
+    out.extend_from_slice(
+        format!(
+            " - high {} ms, low {} ms (all time high {} ms)\n",
+            ts.max, low, ts.max
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"(sparkline rendering not yet implemented)\n");
+    out
 }
 
 fn reply_latency_histogram(ctx: &mut CommandContext) -> RedisResult<()> {
