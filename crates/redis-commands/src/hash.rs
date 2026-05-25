@@ -9,8 +9,8 @@
 //! # Storage shape
 //!
 //! Round 3 uses the pragmatic `ObjectKind::Hash(HashEncoding::Inline(_))`
-//! encoding from `redis-core::object` — a `HashMap<RedisString,
-//! RedisString>` providing O(1) field lookups and updates. The real
+//! encoding from `redis-core::object` — an insertion-order `InlineHash`
+//! providing field lookups and updates. The real
 //! `ListPack` / `HashTable` encodings land in Phase 4 when `redis-ds`
 //! exposes those types.
 //!
@@ -44,7 +44,7 @@ use std::time::SystemTime;
 use redis_core::command_context::CommandContext;
 use redis_core::db::glob_match;
 use redis_core::notify::{NOTIFY_GENERIC, NOTIFY_HASH};
-use redis_core::object::RedisObject;
+use redis_core::object::{InlineHash, RedisObject};
 use redis_types::{RedisError, RedisResult, RedisString};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -282,9 +282,7 @@ fn parse_incr_f64(bytes: &[u8]) -> Result<f64, RedisError> {
 ///
 /// Returns `Ok(None)` if the key is absent so callers can preserve
 /// existence semantics without nesting `match` on the lookup result.
-fn as_hash_ref(
-    obj: Option<&RedisObject>,
-) -> Result<Option<&HashMap<RedisString, RedisString>>, RedisError> {
+fn as_hash_ref(obj: Option<&RedisObject>) -> Result<Option<&InlineHash>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => o.hash().map(Some).ok_or_else(RedisError::wrong_type),
@@ -294,7 +292,7 @@ fn as_hash_ref(
 /// Mutable variant of `as_hash_ref`.
 fn as_hash_mut(
     obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut HashMap<RedisString, RedisString>>, RedisError> {
+) -> Result<Option<&mut InlineHash>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => {

@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-24T23:41:09.188729+00:00`
+Generated: `2026-05-25T01:45:02.752572+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -9,16 +9,16 @@ implementation work can start from evidence instead of guessing.
 ## Accounting Snapshot
 
 - Full upstream TCL denominator: **4299** source test blocks
-- Counted runner result: **1383 pass / 6 fail / 1389 counted**
+- Counted runner result: **1386 pass / 3 fail / 1389 counted**
 - Conservative full-suite proof: **32.2%** counted-pass / full denominator
 - Non-skipped denominator: **2568** source test blocks
 - Hidden timeout/no-summary bucket: **1007** source tests (**39.2%** of non-skipped)
 
 | Status | Source tests |
 |---|---:|
-| `fail` | 229 |
+| `fail` | 148 |
 | `no-summary` | 567 |
-| `pass` | 940 |
+| `pass` | 1021 |
 | `skipped-by-policy` | 1731 |
 | `timeout` | 440 |
 | `zero-count` | 392 |
@@ -49,10 +49,10 @@ implementation work can start from evidence instead of guessing.
 | 4 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
 | 5 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
 | 6 | `tcl-multi-watch-dirty-queue-v1` | `unit/multi.tcl` | 70 | high | medium | Port the upstream transaction error-state lifecycle. This is smaller than scripting/functions and likely converts a timeout file into a counted fail/pass file quickly. |
-| 7 | `tcl-hash-encoding-and-float-cleanup-v1` | `unit/type/hash.tcl` | 81 | medium | low | A bounded cleanup packet: the file already reaches summary and has three visible failures, so it is lower ambiguity than scripting. |
-| 8 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
-| 9 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
-| 10 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
+| 7 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
+| 8 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
+| 9 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
+| 10 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
 
 ## Per-File Notes
 

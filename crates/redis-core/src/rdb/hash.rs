@@ -46,7 +46,7 @@ pub fn save_hash_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
         )
     })?;
     write_len(w, hash.len() as u64)?;
-    for (field, value) in hash {
+    for (field, value) in hash.iter() {
         save_raw_field(w, field.as_bytes())?;
         save_raw_field(w, value.as_bytes())?;
     }
@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn roundtrip(pairs: &[(&str, &str)]) -> HashMap<RedisString, RedisString> {
+    fn roundtrip(pairs: &[(&str, &str)]) -> Vec<(RedisString, RedisString)> {
         let mut hash = HashMap::new();
         for (f, v) in pairs {
             hash.insert(
@@ -98,7 +98,12 @@ mod tests {
         save_hash_object(&mut buf, &obj).unwrap();
         let mut cursor = Cursor::new(&buf);
         let loaded = load_hash_object(&mut cursor).unwrap();
-        loaded.hash().unwrap().clone()
+        loaded
+            .hash()
+            .unwrap()
+            .iter()
+            .map(|(f, v)| (f.clone(), v.clone()))
+            .collect()
     }
 
     #[test]
@@ -113,8 +118,9 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(
             result
-                .get(&RedisString::from_bytes(b"field1"))
-                .map(|v| v.as_bytes()),
+                .iter()
+                .find(|(f, _)| f.as_bytes() == b"field1")
+                .map(|(_, v)| v.as_bytes()),
             Some(b"value1".as_slice())
         );
     }
@@ -127,8 +133,9 @@ mod tests {
         for (f, v) in &pairs {
             assert_eq!(
                 result
-                    .get(&RedisString::from_bytes(f.as_bytes()))
-                    .map(|r| r.as_bytes()),
+                    .iter()
+                    .find(|(field, _)| field.as_bytes() == f.as_bytes())
+                    .map(|(_, value)| value.as_bytes()),
                 Some(v.as_bytes())
             );
         }

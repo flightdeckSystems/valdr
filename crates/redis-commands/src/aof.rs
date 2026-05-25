@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use redis_core::db::RedisDb;
-use redis_core::object::{ObjectKind, EXPIRY_NONE};
+use redis_core::object::{HashEncoding, InlineHash, ObjectKind, EXPIRY_NONE};
 use redis_core::{Client, CommandContext, PubSubRegistry, RedisServer};
 use redis_types::RedisString;
 
@@ -1432,14 +1432,15 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             db.insert(key, obj);
         }
         b"hmset" if argv.len() >= 4 && (argv.len() - 2) % 2 == 0 => {
-            use std::collections::HashMap;
             let key = argv[1].clone();
-            let mut map: HashMap<RedisString, RedisString> = match db.lookup_key_read(&key) {
+            let mut map: InlineHash = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
-                    ObjectKind::Hash(redis_core::object::HashEncoding::Inline(m)) => m.clone(),
-                    _ => HashMap::new(),
+                    ObjectKind::Hash(HashEncoding::Inline(m) | HashEncoding::HashTable(m)) => {
+                        m.clone()
+                    }
+                    _ => InlineHash::new(),
                 },
-                None => HashMap::new(),
+                None => InlineHash::new(),
             };
             let mut i = 2;
             while i + 1 < argv.len() {
@@ -1449,7 +1450,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             let obj = RedisObject {
                 lru: 0,
                 expire: EXPIRY_NONE,
-                kind: ObjectKind::Hash(redis_core::object::HashEncoding::Inline(map)),
+                kind: ObjectKind::Hash(HashEncoding::Inline(map)),
             };
             db.insert(key, obj);
         }
@@ -1544,14 +1545,15 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             db.set_expire(key, expire_ms);
         }
         b"hset" if argv.len() >= 4 && (argv.len() - 2) % 2 == 0 => {
-            use std::collections::HashMap;
             let key = argv[1].clone();
-            let mut map: HashMap<RedisString, RedisString> = match db.lookup_key_read(&key) {
+            let mut map: InlineHash = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
-                    ObjectKind::Hash(redis_core::object::HashEncoding::Inline(m)) => m.clone(),
-                    _ => HashMap::new(),
+                    ObjectKind::Hash(HashEncoding::Inline(m) | HashEncoding::HashTable(m)) => {
+                        m.clone()
+                    }
+                    _ => InlineHash::new(),
                 },
-                None => HashMap::new(),
+                None => InlineHash::new(),
             };
             let mut i = 2;
             while i + 1 < argv.len() {
@@ -1561,7 +1563,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             let obj = RedisObject {
                 lru: 0,
                 expire: EXPIRY_NONE,
-                kind: ObjectKind::Hash(redis_core::object::HashEncoding::Inline(map)),
+                kind: ObjectKind::Hash(HashEncoding::Inline(map)),
             };
             db.insert(key, obj);
         }

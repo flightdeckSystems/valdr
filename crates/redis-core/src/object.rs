@@ -163,6 +163,95 @@ impl InlineSet {
     }
 }
 
+/// Order-preserving hash storage used by the interim hash implementation.
+///
+/// Valkey's compact hash encodings (`ziplist` historically, `listpack` today)
+/// preserve field insertion order for commands such as `HGETALL`. A plain Rust
+/// `HashMap` gives correct lookup semantics but loses that observable order,
+/// which matters for upstream fixtures that create a compact hash, DUMP it,
+/// RESTORE it, and then compare the returned field sequence. This wrapper keeps
+/// O(1)-ish lookup through the map while emitting iteration in first-insertion
+/// order. Updating an existing field preserves its original position, matching
+/// Redis listpack/dict behavior closely enough for the current object model.
+#[derive(Debug, Clone, Default)]
+pub struct InlineHash {
+    data: HashMap<RedisString, RedisString>,
+    order: Vec<RedisString>,
+}
+
+impl InlineHash {
+    pub fn new() -> Self {
+        Self {
+            data: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: HashMap::with_capacity(capacity),
+            order: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn from_hash_map(map: HashMap<RedisString, RedisString>) -> Self {
+        let mut out = Self::with_capacity(map.len());
+        for (field, value) in map {
+            out.insert(field, value);
+        }
+        out
+    }
+
+    pub fn insert(
+        &mut self,
+        field: RedisString,
+        value: RedisString,
+    ) -> Option<RedisString> {
+        if !self.data.contains_key(&field) {
+            self.order.push(field.clone());
+        }
+        self.data.insert(field, value)
+    }
+
+    pub fn get(&self, field: &RedisString) -> Option<&RedisString> {
+        self.data.get(field)
+    }
+
+    pub fn contains_key(&self, field: &RedisString) -> bool {
+        self.data.contains_key(field)
+    }
+
+    pub fn remove(&mut self, field: &RedisString) -> Option<RedisString> {
+        let removed = self.data.remove(field);
+        if removed.is_some() {
+            self.order.retain(|candidate| candidate != field);
+        }
+        removed
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RedisString, &RedisString)> {
+        self.order
+            .iter()
+            .filter_map(move |field| self.data.get(field).map(|value| (field, value)))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &RedisString> {
+        self.iter().map(|(field, _)| field)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &RedisString> {
+        self.iter().map(|(_, value)| value)
+    }
+}
+
 /// Encoding sub-variants for `RedisObject::Set`.
 ///
 /// Phase 4 will replace `ListPack`, `IntSet`, and `HashTable` with real
@@ -323,22 +412,22 @@ pub enum ZSetEncoding {
 ///
 /// Phase 4 will replace `ListPack` and `HashTable` with real `redis_ds`
 /// types. Until then, hash commands operate over `Inline`, a plain
-/// `HashMap<RedisString, RedisString>` providing the byte-exact semantics
+/// `InlineHash` providing the byte-exact semantics
 /// of every wire-level HASH operation.
 #[derive(Debug, Clone)]
 pub enum HashEncoding {
     /// Pragmatic interim encoding used by the in-tree hash commands.
     ///
-    /// Backed by `HashMap<RedisString, RedisString>` for O(1) field lookups
-    /// and updates. Phase 4 swaps this for real ListPack / HashTable
+    /// Backed by `InlineHash` for field lookups, updates, and insertion-order
+    /// iteration. Phase 4 swaps this for real ListPack / HashTable
     /// encodings once `redis-ds` ships the underlying datastructures.
-    Inline(HashMap<RedisString, RedisString>),
+    Inline(InlineHash),
     /// Compact list-pack byte array (OBJ_ENCODING_LISTPACK).
     // TODO(architect): replace stub Vec with real listpack encoding in Phase 4
     ListPack(Vec<u8>),
     /// Full hash table (OBJ_ENCODING_HASHTABLE).
-    // TODO(architect): replace HashMap with real redis-ds hashtable in Phase 4
-    HashTable(HashMap<RedisString, RedisString>),
+    // TODO(architect): replace InlineHash with real redis-ds hashtable in Phase 4
+    HashTable(InlineHash),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -699,17 +788,17 @@ impl RedisObject {
 
     /// Create a hash object with HashTable encoding.
     pub fn new_hash_hashtable() -> Self {
-        Self::bare(ObjectKind::Hash(HashEncoding::HashTable(HashMap::new())))
+        Self::bare(ObjectKind::Hash(HashEncoding::HashTable(InlineHash::new())))
     }
 
     /// Create an empty hash object with the pragmatic Inline encoding.
     ///
     /// Phase 4 will replace this with one of the real `redis-ds` encodings
     /// (ListPack for small hashes, HashTable for larger ones). For now the
-    /// `Inline` `HashMap<RedisString, RedisString>` is the single working
+    /// `Inline` `InlineHash` is the single working
     /// encoding used by every hash command in the redis-commands crate.
     pub fn new_hash() -> Self {
-        Self::bare(ObjectKind::Hash(HashEncoding::Inline(HashMap::new())))
+        Self::bare(ObjectKind::Hash(HashEncoding::Inline(InlineHash::new())))
     }
 
     /// Create a hash object from an existing `HashMap`, using the Inline encoding.
@@ -717,22 +806,24 @@ impl RedisObject {
     /// Used by the RDB loader to construct a hash object from a deserialized
     /// field/value map without an intermediate empty-insert loop.
     pub fn new_hash_from_map(map: HashMap<RedisString, RedisString>) -> Self {
-        Self::bare(ObjectKind::Hash(HashEncoding::Inline(map)))
+        Self::bare(ObjectKind::Hash(HashEncoding::Inline(
+            InlineHash::from_hash_map(map),
+        )))
     }
 
-    /// Borrow the inner field/value `HashMap` for a hash-encoded object.
+    /// Borrow the inner field/value hash for a hash-encoded object.
     ///
     /// Returns `None` for non-hash objects and for the stub `ListPack` /
     /// `HashTable` encodings that this round does not populate.
-    pub fn hash(&self) -> Option<&HashMap<RedisString, RedisString>> {
+    pub fn hash(&self) -> Option<&InlineHash> {
         match &self.kind {
             ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
             _ => None,
         }
     }
 
-    /// Mutably borrow the inner field/value `HashMap` for a hash-encoded object.
-    pub fn hash_mut(&mut self) -> Option<&mut HashMap<RedisString, RedisString>> {
+    /// Mutably borrow the inner field/value hash for a hash-encoded object.
+    pub fn hash_mut(&mut self) -> Option<&mut InlineHash> {
         match &mut self.kind {
             ObjectKind::Hash(HashEncoding::Inline(h) | HashEncoding::HashTable(h)) => Some(h),
             _ => None,
@@ -741,7 +832,7 @@ impl RedisObject {
 
     /// Promote the interim inline hash map to the explicit hashtable variant.
     ///
-    /// This preserves the same Rust `HashMap` storage while making
+    /// This preserves the same Rust `InlineHash` storage while making
     /// `OBJECT ENCODING` report `"hashtable"` for cases where upstream
     /// upgrades a hash out of listpack form.
     pub fn promote_hash_to_hashtable(&mut self) {
@@ -1401,12 +1492,12 @@ fn list_inline_observed_encoding(d: &VecDeque<RedisString>) -> &'static str {
 /// `hash-max-listpack-value` bytes; `"hashtable"` otherwise. Both thresholds
 /// are read from the process-wide `ENCODING_THRESHOLDS` global so that
 /// `CONFIG SET` takes effect immediately.
-fn hash_inline_observed_encoding(h: &HashMap<RedisString, RedisString>) -> &'static str {
+fn hash_inline_observed_encoding(h: &InlineHash) -> &'static str {
     let t = get_encoding_thresholds();
     if h.len() > t.hash_max_listpack_entries {
         return "hashtable";
     }
-    for (k, v) in h {
+    for (k, v) in h.iter() {
         if k.as_bytes().len() > t.hash_max_listpack_value
             || v.as_bytes().len() > t.hash_max_listpack_value
         {
@@ -2446,8 +2537,9 @@ impl RedisObject {
     /// TODO(port): Phase 4 — proper iter for ListPack encoding (yields empty today).
     pub fn iter_hash(&self) -> Box<dyn Iterator<Item = (&RedisString, &RedisString)> + '_> {
         match &self.kind {
-            ObjectKind::Hash(HashEncoding::HashTable(h)) => Box::new(h.iter()),
-            ObjectKind::Hash(HashEncoding::Inline(h)) => Box::new(h.iter()),
+            ObjectKind::Hash(HashEncoding::HashTable(h) | HashEncoding::Inline(h)) => {
+                Box::new(h.iter())
+            }
             _ => Box::new(std::iter::empty()),
         }
     }
