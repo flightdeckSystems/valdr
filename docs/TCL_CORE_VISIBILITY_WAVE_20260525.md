@@ -158,15 +158,101 @@ Total visible gain:  +103 counted tests, from ~2154 to ~2257 counted
 
 ## Next Overnight Targets
 
-1. `unit/pubsub`: 34 source tests, currently timeout. First blocker is stream
+## Policy Scout: `external:skip` Is Hiding Single-Node Files
+
+The baseline survey denied `external:skip`, which is conservative but too blunt:
+several single-node files use that tag because they spawn or reconfigure local
+servers. A diagnostic pass that denied only `needs:repl` and `needs:debug`
+showed:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-core-visibility-allow-external-scout-v2 \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 53111 \
+  --portcount 8000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --files unit/auth,unit/pubsubshard,unit/networking,unit/obuf-limits
+```
+
+and:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-core-visibility-allow-external-scout-v3 \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 53111 \
+  --portcount 8000 \
+  --no-default-deny-tags \
+  --deny-tag needs:repl \
+  --deny-tag needs:debug \
+  --files unit/wait,unit/maxmemory,unit/shutdown
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T043420Z/`
+- `harness/oracle/results/tcl-survey/20260525T043827Z/`
+
+Result:
+
+| File | Relaxed-policy result | Interpretation |
+|---|---:|---|
+| `unit/pubsubshard` | 11/0 | Already green if the single-node survey allows `external:skip`. |
+| `unit/auth` | timeout/no-summary | First failures show `requirepass` startup config is not enforced; later output-buffer tests hang. |
+| `unit/networking` | no-summary | Aborts on `CONFIG SET port number`: dynamic port rebind not implemented. |
+| `unit/obuf-limits` | timeout/no-summary | Output-buffer limit behavior is missing/hanging. |
+| `unit/wait` | timeout/no-summary | WAIT/replication-style blocking semantics hang even with repl/debug denied. |
+| `unit/maxmemory` | no-summary | Aborts in client-eviction maxmemory path. |
+| `unit/shutdown` | no-summary | Aborts in shutdown/RDB-temp-file behavior. |
+
+Recommendation: split the survey profiles. Keep the default conservative profile
+for public claims, but add a `single-node-external` profile that allows
+`external:skip` while still denying repl/debug/cluster. That immediately makes
+`unit/pubsubshard` counted and gives honest blocker telemetry for the rest.
+
+## Latency Monitor Scout
+
+`unit/latency-monitor` is not a quick visibility patch. A verbose direct run
+against the Rust binary showed the first six histogram tests pass, then the file
+hangs in the non-debug expire-latency test that drives a million `SADD` calls
+through Lua before waiting for expiration:
+
+```text
+[ok]: LATENCY HISTOGRAM with empty histogram
+[ok]: LATENCY HISTOGRAM all commands
+[ok]: LATENCY HISTOGRAM sub commands
+[ok]: LATENCY HISTOGRAM with a subset of commands
+[ok]: LATENCY HISTOGRAM command
+[ok]: LATENCY HISTOGRAM with wrong command name skips the invalid one
+[ignore]: Tag: needs:debug denied
+<timeout in "LATENCY of expire events are correctly collected">
+```
+
+Likely owner: scripting throughput plus expire-cycle latency reporting. This is
+not a good Agent-1 quick pull unless we decide to carve the expensive
+expire-latency test behind a separate profile.
+
+## Next Overnight Targets
+
+1. Survey-profile change: add a `single-node-external` TCL profile that allows
+   `external:skip` while denying repl/debug/cluster. Immediate expected visible
+   gain: `unit/pubsubshard` 11/0, plus better blocker maps for auth/networking/
+   obuf/maxmemory/shutdown/wait.
+2. `unit/pubsub`: 34 source tests, currently timeout. First blocker is stream
    keyspace notification ordering (`xgroup-create` arrives where upstream
    expects `xadd`). This is likely `notify.rs` / stream command notification
    ordering, but avoid active stream blocking files unless coordinated.
-2. `unit/latency-monitor`: 17 source tests, timeout. Smaller denominator, but
-   likely a contained latency/commandlog global-state issue.
-3. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
+3. `unit/auth`: 13 source tests. Under relaxed single-node policy, first
+   blockers are startup `requirepass`/AUTH semantics plus output-buffer limits.
+   Coordinate with the active ACL worktree before editing auth/ACL code.
+4. `unit/pause`: 20 counted tests with 15 failures. This is a product-semantic
    packet, not illumination; useful after the bigger dark files are counted.
-4. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
 ## Operating Rules For Continuation
