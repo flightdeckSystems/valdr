@@ -578,22 +578,107 @@ maxmemory file moved past the earlier client-memory and `DEBUG HTSTATS` aborts,
 but now times out later after the replica-buffer checks. That is a replication
 buffer accounting/liveness lane, not the same bounded client-eviction packet.
 
+## Runtime/Admin Re-scout After Client Eviction
+
+Serial evidence after `a39bfcc`:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-admin-serial-unit-<file>-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 42111 \
+  --portcount 4000 \
+  --files <file>
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T072041Z/unit__networking.json`
+- `harness/oracle/results/tcl-survey/20260525T072041Z/unit__pubsubshard.json`
+- `harness/oracle/results/tcl-survey/20260525T072042Z/unit__tracking.json`
+- `harness/oracle/results/tcl-survey/20260525T072045Z/unit__obuf-limits.json`
+- `harness/oracle/results/tcl-survey/20260525T072101Z/unit__client-eviction.json`
+- `harness/oracle/results/tcl-survey/20260525T072159Z/unit__maxmemory.json`
+- `harness/oracle/results/tcl-survey/20260525T072408Z/unit__latency-monitor.json`
+- `harness/oracle/results/tcl-survey/20260525T072538Z/unit__shutdown.json`
+- `harness/oracle/results/tcl-survey/20260525T072538Z/unit__wait.json`
+
+Current state:
+
+| File | Result | Next interpretation |
+|---|---:|---|
+| `unit/networking` | 3/2 counted | Small cleanup: `CONFIG SET bind` semantics. Not a counted-coverage lever. |
+| `unit/pubsubshard` | 11/0 counted | Already green under single-node profile. |
+| `unit/tracking` | 59/0 counted | Already green under single-node profile. |
+| `unit/obuf-limits` | 12/1 counted | One output-buffer drain accounting failure remains. |
+| `unit/client-eviction` | 14/0 counted | Newly green from this packet. |
+| `unit/maxmemory` | timeout/no-summary | Low denominator, but now blocked in replica-buffer/maxmemory interactions. |
+| `unit/latency-monitor` | timeout/no-summary | First 6 histogram tests pass; timeout occurs in the heavy expire-cycle latency test after a 1M-iteration Lua/SADD setup. |
+| `unit/shutdown` | no-summary | First blocker is background RDB child/temp-file shutdown behavior, which belongs to persistence/fork policy. |
+| `unit/wait` | timeout/no-summary | Replication/WAITAOF file; not a clean single-node runtime packet. |
+
+Harness finding: TCL runs must not be parallelized against the shared upstream
+`reference/valkey/tests/tmp`. Parallel probes produced false `cat
+./tests/tmp/server.../stdout: No such file` no-summary results for files that
+were clean when run serially. `harness/oracle/tcl-survey.py` now has
+`--isolated-tests-copy`, which creates a per-process copy of
+`reference/valkey/tests`, and run IDs now include microseconds so parallel
+surveys do not collide in `harness/oracle/results/tcl-survey/`.
+
+Verification of isolated concurrent probes:
+
+```bash
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-isolated-smoke-commandlog-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 51111 \
+  --portcount 2000 \
+  --files unit/commandlog
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-isolated-smoke-pubsubshard-v1 \
+  --isolated-tests-copy \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 53111 \
+  --portcount 2000 \
+  --files unit/pubsubshard
+```
+
+Both completed cleanly:
+
+- `harness/oracle/results/tcl-survey/20260525T073058546785Z/unit__commandlog.json`: 14/0
+- `harness/oracle/results/tcl-survey/20260525T073058551716Z/unit__pubsubshard.json`: 11/0
+
 ## Next Overnight Targets
 
-1. Runtime/client visibility lane: `unit/tracking` (61), `unit/wait` (37),
-   `unit/pause` (23), `unit/maxmemory` (13), `unit/client-eviction` (15), and
-   the remaining output-buffer/client-close edge. This is the right larger
-   packet shape: shared client lifecycle, tracking invalidation, blocking wake,
-   and maxmemory client eviction semantics.
-2. `unit/auth`: 13 source tests. Under relaxed single-node policy, first
-   blockers are startup `requirepass`/AUTH semantics plus output-buffer limits.
-   Coordinate with the active ACL worktree before editing auth/ACL code.
-3. `unit/introspection-2` cleanup: 3 known failures around object idle-time
+1. ACL/auth lane: `unit/acl` (114), `unit/acl-v2` (72), and `unit/auth` (13).
+   This is the biggest remaining Agent-1-compatible counted-coverage lever, but
+   it is claimed by `redis-rs-port-acl-unlock`; coordinate before editing.
+2. Runtime/client cleanup lane: `unit/pause`, `unit/obuf-limits`, and
+   `unit/networking` are already counted. They improve quality/pass count, not
+   counted visibility. They are good follow-ups once the hidden files are
+   exhausted.
+3. Replication-adjacent runtime lane: `unit/wait` and `unit/maxmemory` are still
+   dark, but current blockers are replica/WAITAOF and replica-buffer accounting.
+   Treat these as architecture packets, not small admin fixes.
+4. Latency lane: `unit/latency-monitor` can likely become counted if the
+   expire-cycle setup is made fast enough or latency expire-cycle semantics are
+   implemented without a pathological 1M-command Lua loop. Lower denominator
+   than ACL, but isolated and not currently claimed.
+5. `unit/introspection-2` cleanup: 3 known failures around object idle-time
    mutation. Good small follow-up if no larger dark file is safe to touch.
 
 ## Operating Rules For Continuation
 
-- Keep using isolated `--baseport` and `--portcount`.
+- Keep using isolated `--baseport` and `--portcount`; use
+  `--isolated-tests-copy` for concurrent TCL probes.
 - One hidden-to-counted file per commit.
 - Do not touch active ACL or stream-blocking files without updating
   `AGENT_COORDINATION_BOARD.md`.
