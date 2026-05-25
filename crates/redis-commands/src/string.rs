@@ -400,6 +400,7 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             .as_ref()
             .is_some_and(|bytes| bytes.as_slice() == compare.as_bytes())
         {
+            ctx.client_mut().set_prevent_propagation();
             if flags & SET_FLAG_GET != 0 {
                 return reply_optional_bulk(ctx, prev_bytes);
             }
@@ -407,12 +408,14 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
     }
     if flags & SET_FLAG_NX != 0 && key_exists {
+        ctx.client_mut().set_prevent_propagation();
         if flags & SET_FLAG_GET != 0 {
             return reply_optional_bulk(ctx, prev_bytes);
         }
         return ctx.reply_null_bulk();
     }
     if flags & SET_FLAG_XX != 0 && !key_exists {
+        ctx.client_mut().set_prevent_propagation();
         if flags & SET_FLAG_GET != 0 {
             return reply_optional_bulk(ctx, prev_bytes);
         }
@@ -444,6 +447,15 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
                 ctx.db_mut().sync_delete(&key);
             } else {
                 ctx.db_mut().set_expire(&key, abs_ms);
+            }
+            if flags & SET_FLAG_PXAT == 0 {
+                ctx.client_mut().set_args(vec![
+                    RedisString::from_bytes(b"SET"),
+                    key.clone(),
+                    value.clone(),
+                    RedisString::from_bytes(b"PXAT"),
+                    RedisString::from_bytes(abs_ms.to_string().as_bytes()),
+                ]);
             }
         }
         None if notify => {
@@ -489,6 +501,7 @@ pub fn setnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let key = ctx.arg_owned(1usize)?;
     let value = ctx.arg_owned(2usize)?;
     if ctx.db_mut().lookup_key_write(&key).is_some() {
+        ctx.client_mut().set_prevent_propagation();
         return ctx.reply_integer(0);
     }
     let obj = RedisObject::new_string_try_encoded(value.as_bytes());
@@ -558,6 +571,13 @@ fn setex_generic(ctx: &mut CommandContext, name: &[u8], multiplier: i64) -> Resu
     ctx.db_mut().set_key(key.clone(), obj, 0);
     ctx.db_mut().set_expire(&key, abs_ms);
     ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
+    ctx.client_mut().set_args(vec![
+        RedisString::from_bytes(b"SET"),
+        key.clone(),
+        value.clone(),
+        RedisString::from_bytes(b"PXAT"),
+        RedisString::from_bytes(abs_ms.to_string().as_bytes()),
+    ]);
     ctx.reply_simple_string(b"OK")
 }
 
@@ -584,8 +604,11 @@ pub fn delifeq_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     if matched {
         ctx.db_mut().sync_delete(&key);
         ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+        ctx.client_mut()
+            .set_args(vec![RedisString::from_bytes(b"DEL"), key.clone()]);
         ctx.reply_integer(1)
     } else {
+        ctx.client_mut().set_prevent_propagation();
         ctx.reply_integer(0)
     }
 }
@@ -699,7 +722,7 @@ pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             if abs_ms <= now_ms {
                 if ctx.db_mut().sync_delete(&key) {
                     ctx.client_mut()
-                        .set_args(vec![RedisString::from_bytes(b"DEL"), key.clone()]);
+                        .set_args(vec![RedisString::from_bytes(b"UNLINK"), key.clone()]);
                 }
             } else {
                 ctx.db_mut().set_expire(&key, abs_ms);
@@ -735,11 +758,16 @@ pub fn getdel_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         },
     };
     match bytes {
-        None => ctx.reply_null_bulk(),
+        None => {
+            ctx.client_mut().set_prevent_propagation();
+            ctx.reply_null_bulk()
+        }
         Some(b) => {
             ctx.db_mut().sync_delete(&key);
             ctx.notify_keyspace_event(NOTIFY_STRING, b"set", &key);
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
+            ctx.client_mut()
+                .set_args(vec![RedisString::from_bytes(b"DEL"), key.clone()]);
             ctx.reply_bulk_string(RedisString::from_bytes(&b))
         }
     }
@@ -1010,6 +1038,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let mut xx = false;
     let mut keepttl = false;
     let mut expire_at_ms: Option<i64> = None;
+    let mut expire_is_pxat = false;
     let mut got_expire_flag = false;
     let now_ms: i64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1066,6 +1095,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             }
             .ok_or_else(|| RedisError::runtime(b"ERR invalid expire time in 'msetex' command"))?;
             expire_at_ms = Some(abs);
+            expire_is_pxat = ob.eq_ignore_ascii_case(b"PXAT");
             got_expire_flag = true;
             j += 2;
         } else {
@@ -1076,6 +1106,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         for p in 0..numkeys {
             let k = ctx.arg_owned(2 + 2 * p)?;
             if ctx.db().find(&k).is_some() {
+                ctx.client_mut().set_prevent_propagation();
                 return ctx.reply_integer(0);
             }
         }
@@ -1084,6 +1115,7 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         for p in 0..numkeys {
             let k = ctx.arg_owned(2 + 2 * p)?;
             if ctx.db().find(&k).is_none() {
+                ctx.client_mut().set_prevent_propagation();
                 return ctx.reply_integer(0);
             }
         }
@@ -1104,6 +1136,17 @@ pub fn msetex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             }
         } else if !keepttl {
             ctx.db_mut().remove_expire(&k);
+        }
+    }
+    if let Some(abs_ms) = expire_at_ms {
+        if !expire_is_pxat {
+            let mut new_argv: Vec<RedisString> = Vec::with_capacity(pairs_end + 2);
+            for k in 0..pairs_end {
+                new_argv.push(ctx.arg_owned(k)?);
+            }
+            new_argv.push(RedisString::from_bytes(b"PXAT"));
+            new_argv.push(RedisString::from_bytes(abs_ms.to_string().as_bytes()));
+            ctx.client_mut().set_args(new_argv);
         }
     }
     ctx.reply_integer(1)

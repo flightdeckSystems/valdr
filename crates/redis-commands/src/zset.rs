@@ -2034,16 +2034,28 @@ pub fn zmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
             continue;
         }
         delete_if_empty(ctx, &key);
+        let popped_len = popped.len();
         ctx.reply_array_header(2usize)?;
-        ctx.reply_bulk_string(key)?;
-        ctx.reply_array_header(popped.len())?;
+        ctx.reply_bulk_string(key.clone())?;
+        ctx.reply_array_header(popped_len)?;
         for (s, m) in popped {
             ctx.reply_array_header(2usize)?;
             ctx.reply_bulk_string(m)?;
             ctx.reply_double(s)?;
         }
+        let prop_cmd = if reverse {
+            b"ZPOPMAX" as &[u8]
+        } else {
+            b"ZPOPMIN" as &[u8]
+        };
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(prop_cmd),
+            key,
+            RedisString::from_bytes(popped_len.to_string().as_bytes()),
+        ]);
         return Ok(());
     }
+    ctx.client_mut().set_prevent_propagation();
     ctx.reply_null_array()
 }
 
@@ -2327,6 +2339,7 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
         if pairs.is_empty() {
             return;
         }
+        let popped_len = pairs.len();
         let reply = encode_bzmpop_reply(key, &pairs, waiter.resp_proto);
         if waiter.sender.send(reply).is_err() {
             match db.lookup_key_write(key) {
@@ -2347,6 +2360,20 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
                     db.set_key(key.clone(), obj, 0);
                 }
             }
+        } else {
+            let prop_cmd = if reverse {
+                b"ZPOPMAX" as &[u8]
+            } else {
+                b"ZPOPMIN" as &[u8]
+            };
+            crate::dispatch::propagate_command_from_wake(
+                db.id,
+                &[
+                    RedisString::from_bytes(prop_cmd),
+                    key.clone(),
+                    RedisString::from_bytes(popped_len.to_string().as_bytes()),
+                ],
+            );
         }
     }
 }
@@ -2356,14 +2383,15 @@ pub fn deliver_zset_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: Block
 /// Should be called by ZADD and ZINCRBY after successfully inserting into a
 /// zset that has blocked waiters. Mirrors `list::wake_blocked_for_key` but
 /// dispatches through `deliver_zset_to_waiter`.
-pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) {
+pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) -> usize {
+    let mut consumed = 0usize;
     loop {
-        let has_data = matches!(
-            db.lookup_key_read(key),
-            Some(o) if o.zset().map(|z| !z.is_empty()).unwrap_or(false)
-        );
-        if !has_data {
-            return;
+        let len_before = db
+            .lookup_key_read(key)
+            .and_then(|o| o.zset().map(|z| z.len()))
+            .unwrap_or(0);
+        if len_before == 0 {
+            return consumed;
         }
         let waiter = {
             let mut idx = match blocked_keys_index().lock() {
@@ -2372,10 +2400,15 @@ pub fn wake_blocked_zset_for_key(db: &mut RedisDb, key: &RedisString) {
             };
             match idx.peek_zset_waiter(key) {
                 Some(w) => w,
-                None => return,
+                None => return consumed,
             }
         };
         deliver_zset_to_waiter(db, key, waiter);
+        let len_after = db
+            .lookup_key_read(key)
+            .and_then(|o| o.zset().map(|z| z.len()))
+            .unwrap_or(0);
+        consumed += len_before.saturating_sub(len_after);
     }
 }
 
@@ -2601,27 +2634,35 @@ pub fn bzmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
+        let popped_len = pairs.len();
         ctx.reply_array_header(2usize)?;
         ctx.reply_bulk_string(key.clone())?;
-        ctx.reply_array_header(pairs.len())?;
+        ctx.reply_array_header(popped_len)?;
         for (member, score) in pairs {
             ctx.reply_array_header(2usize)?;
             ctx.reply_bulk_string(member)?;
             ctx.reply_double(score)?;
         }
+        let prop_cmd = if reverse {
+            b"ZPOPMAX" as &[u8]
+        } else {
+            b"ZPOPMIN" as &[u8]
+        };
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(prop_cmd),
+            key.clone(),
+            RedisString::from_bytes(popped_len.to_string().as_bytes()),
+        ]);
         return Ok(());
     }
     park_zset_blocked_client(ctx, keys, reverse, count as u64, timeout_secs)
 }
 
-/// Emit a wake to any blocked zset waiters on `key` after a successful ZADD
-/// or ZINCRBY that added data to the zset.
+/// Defer waking blocked zset waiters for `key` until the current command's own
+/// effect has propagated (see `list::schedule_or_wake`). The key is appended to
+/// `client.pending_wakes`, drained by `dispatch` after propagation.
 pub fn schedule_or_wake_zset(ctx: &mut CommandContext, key: &RedisString) {
-    if ctx.client_ref().flag_deny_blocking() {
-        ctx.client_mut().pending_wakes.push(key.clone());
-    } else {
-        wake_blocked_zset_for_key(ctx.db_mut(), key);
-    }
+    ctx.client_mut().pending_wakes.push(key.clone());
 }
 
 #[cfg(test)]
