@@ -587,7 +587,32 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         }
     }
 
+    drain_pending_wakes(ctx);
+
     result
+}
+
+/// Wake blocked clients on keys that the just-completed command made ready,
+/// after that command has propagated its own effect. Running this here (rather
+/// than synchronously inside the write handler) keeps the replication stream in
+/// causal order: the triggering write propagates before each woken client's
+/// effect. `exec_command` performs the equivalent drain for transactions.
+fn drain_pending_wakes(ctx: &mut CommandContext<'_>) {
+    if ctx.client_ref().flag_deny_blocking() {
+        return;
+    }
+    if ctx.client_ref().pending_wakes.is_empty() {
+        return;
+    }
+    let keys = std::mem::take(&mut ctx.client_mut().pending_wakes);
+    let mut consumed = 0usize;
+    for key in &keys {
+        consumed += crate::list::wake_blocked_for_key(ctx.db_mut(), key);
+        consumed += crate::zset::wake_blocked_zset_for_key(ctx.db_mut(), key);
+    }
+    if consumed > 0 {
+        ctx.server().add_dirty(consumed as i64);
+    }
 }
 
 fn snapshot_argv(ctx: &CommandContext<'_>) -> Vec<RedisString> {
@@ -1586,6 +1611,19 @@ fn propagate_write_to_replicas(
             }
         }
     }
+}
+
+/// Feed a synthesized write command to the replication stream from outside a
+/// `CommandContext` — a blocked client (BLPOP/BLMPOP/BZPOPMIN) served via the
+/// deferred wake path, where the pop has no dispatch-time argv to rewrite.
+/// Because `dispatch` drains pending wakes after propagating the triggering
+/// command, this lands in causal order. No-ops when propagation is disabled.
+pub fn propagate_command_from_wake(selected_db: u32, argv: &[RedisString]) {
+    let repl = redis_core::replication::global_replication_state();
+    if !repl.should_propagate_writes() {
+        return;
+    }
+    propagate_write_to_replicas(&repl, selected_db, argv);
 }
 
 fn replication_select_bytes_if_needed(

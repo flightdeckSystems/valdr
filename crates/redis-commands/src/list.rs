@@ -238,20 +238,29 @@ fn encode_bulk_reply(value: &RedisString) -> Vec<u8> {
 ///
 /// Call sites inside EXEC drain should use `schedule_or_wake` instead so that
 /// wakes are deferred until after EXEC completes.
-pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) {
+/// Wake blocked list waiters for `key`; returns the number of elements consumed
+/// (popped/moved) while serving them, so the deferred-wake drain can attribute
+/// that dirty delta to the triggering command's unit.
+pub fn wake_blocked_for_key(db: &mut RedisDb, key: &RedisString) -> usize {
+    let mut consumed = 0usize;
     loop {
-        let value_present = matches!(
-            db.lookup_key_read(key),
-            Some(o) if o.list().map(|d| !d.is_empty()).unwrap_or(false)
-        );
-        if !value_present {
-            return;
+        let len_before = db
+            .lookup_key_read(key)
+            .and_then(|o| o.list().map(|d| d.len()))
+            .unwrap_or(0);
+        if len_before == 0 {
+            return consumed;
         }
         let waiter = match take_list_waiter(key) {
             Some(w) => w,
-            None => return,
+            None => return consumed,
         };
         deliver_to_waiter(db, key, waiter);
+        let len_after = db
+            .lookup_key_read(key)
+            .and_then(|o| o.list().map(|d| d.len()))
+            .unwrap_or(0);
+        consumed += len_before.saturating_sub(len_after);
     }
 }
 
@@ -303,20 +312,17 @@ pub fn wake_ready_list_keys(db: &mut RedisDb) {
     }
 }
 
-/// Wake blocked waiters for `key`, or defer the wake if the calling client is
-/// currently inside an EXEC drain.
+/// Defer waking blocked waiters for `key` until the current command's own
+/// effect has propagated.
 ///
-/// When `ctx.client_ref().flag_deny_blocking()` is true the command is
-/// executing inside `exec_command`'s queue drain; in that case the key is
-/// appended to `client.pending_wakes` so `exec_command` can fire the real
-/// wake after the drain finishes. Otherwise `wake_blocked_for_key` is called
-/// immediately.
+/// The key is appended to `client.pending_wakes`; `dispatch` drains it after
+/// the command propagates (and `exec_command` drains it after a transaction).
+/// Deferring is what preserves cause-before-effect in the replication stream:
+/// the triggering write (e.g. `LPUSH`) propagates before the woken client's
+/// effect (e.g. `LPOP`). Mirrors C's `handleClientsBlockedOnKeys` running in
+/// `beforeSleep`, after the command unit.
 fn schedule_or_wake(ctx: &mut CommandContext, key: &RedisString) {
-    if ctx.client_ref().flag_deny_blocking() {
-        ctx.client_mut().pending_wakes.push(key.clone());
-    } else {
-        wake_blocked_for_key(ctx.db_mut(), key);
-    }
+    ctx.client_mut().pending_wakes.push(key.clone());
 }
 
 fn list_len(db: &RedisDb, key: &RedisString) -> usize {
@@ -387,6 +393,18 @@ fn deliver_to_waiter(db: &mut RedisDb, key: &RedisString, waiter: BlockedWaiter)
                     }
                 } else {
                     crate::slowlog_cmd::record_blocked_slowlog_entry(waiter.client_id);
+                    let prop_cmd = match side {
+                        BlockedSide::Head => b"LPOP" as &[u8],
+                        BlockedSide::Tail => b"RPOP" as &[u8],
+                    };
+                    crate::dispatch::propagate_command_from_wake(
+                        db.id,
+                        &[
+                            RedisString::from_bytes(prop_cmd),
+                            key.clone(),
+                            RedisString::from_bytes(values.len().to_string().as_bytes()),
+                        ],
+                    );
                 }
             }
         }
@@ -1731,13 +1749,23 @@ pub fn blmpop_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if empty_after {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", key);
         }
-        add_dirty_if_nonzero(ctx, popped.len() as i64);
+        let popped_len = popped.len();
+        add_dirty_if_nonzero(ctx, popped_len as i64);
         ctx.reply_array_header(2)?;
         ctx.reply_bulk_string(key.clone())?;
-        ctx.reply_array_header(popped.len())?;
+        ctx.reply_array_header(popped_len)?;
         for v in popped {
             ctx.reply_bulk_string(v)?;
         }
+        let prop_cmd = match position {
+            ListPosition::Head => b"LPOP" as &[u8],
+            ListPosition::Tail => b"RPOP" as &[u8],
+        };
+        ctx.client_mut().set_args(vec![
+            RedisString::from_bytes(prop_cmd),
+            key.clone(),
+            RedisString::from_bytes(popped_len.to_string().as_bytes()),
+        ]);
         return Ok(());
     }
     park_blocked_client(
