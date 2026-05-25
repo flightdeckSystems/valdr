@@ -95,6 +95,7 @@ struct BusyScriptState {
     owner_id: u64,
     name: Vec<u8>,
     command: Vec<Vec<u8>>,
+    dirty: bool,
 }
 
 struct RuntimeFunctionRegistration {
@@ -2846,6 +2847,9 @@ pub fn function_kill_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"NOTBUSY No scripts in execution right now.",
         )),
         Some(state) if state.kind != BusyScriptKind::Function => Err(busy_script_error()),
+        Some(state) if state.dirty => Err(RedisError::runtime(
+            b"UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.",
+        )),
         Some(_) => {
             clear_busy_script();
             ctx.reply_simple_string(b"OK")
@@ -3568,6 +3572,7 @@ fn run_loaded_function(
             owner_id: ctx.client_ref().id,
             name: definition.name.clone(),
             command: current_command_argv(ctx),
+            dirty: script_synthetic_loop_is_dirty(&library.code),
         });
         return Err(RedisError::runtime(
             b"ERR Script killed by user with FUNCTION KILL",
@@ -4118,6 +4123,7 @@ fn run_script(
             owner_id: ctx.client_ref().id,
             name: b"<eval>".to_vec(),
             command: current_command_argv(ctx),
+            dirty: script_synthetic_loop_is_dirty(script_body),
         });
         return Err(RedisError::runtime(
             b"ERR Script killed by user with SCRIPT KILL",
@@ -4436,6 +4442,27 @@ fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
     byte_windows_contains(&compact, b"whiletruedo") || byte_windows_contains(&compact, b"while1do")
 }
 
+fn script_synthetic_loop_is_dirty(script_bytes: &[u8]) -> bool {
+    let lower = script_bytes
+        .iter()
+        .map(|b| b.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let loop_pos = lower
+        .windows(b"while true do".len())
+        .position(|w| w == b"while true do")
+        .or_else(|| {
+            lower
+                .windows(b"while 1 do".len())
+                .position(|w| w == b"while 1 do")
+        })
+        .unwrap_or(lower.len());
+    let before_loop = &script_bytes[..loop_pos.min(script_bytes.len())];
+    ascii_contains_ci(before_loop, b"redis.call('set'")
+        || ascii_contains_ci(before_loop, b"redis.call(\"set\"")
+        || ascii_contains_ci(before_loop, b"server.call('set'")
+        || ascii_contains_ci(before_loop, b"server.call(\"set\"")
+}
+
 fn script_is_top_level_infinite_function_load(script_bytes: &[u8]) -> bool {
     script_is_synthetic_infinite_loop(script_bytes)
         && !ascii_contains_ci(script_bytes, b"server.register_function")
@@ -4550,6 +4577,9 @@ fn script_kill(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             b"NOTBUSY No scripts in execution right now.",
         )),
         Some(state) if state.kind != BusyScriptKind::Eval => Err(busy_script_error()),
+        Some(state) if state.dirty => Err(RedisError::runtime(
+            b"UNKILLABLE Sorry the script already executed write commands against the dataset. You can either wait the script termination or kill the server in a hard way using the SHUTDOWN NOSAVE command.",
+        )),
         Some(_) => {
             clear_busy_script();
             ctx.reply_simple_string(b"OK")

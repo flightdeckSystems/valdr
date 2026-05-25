@@ -1426,8 +1426,10 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return Err(RedisError::runtime(b"ERR syntax error"));
     }
-    if let Some(conn) = ctx.client_mut().conn.as_mut() {
-        let _ = conn.write_all(b"+OK\r\n");
+    if !crate::eval::is_script_busy() {
+        if let Some(conn) = ctx.client_mut().conn.as_mut() {
+            let _ = conn.write_all(b"+OK\r\n");
+        }
     }
     std::process::exit(0);
 }
