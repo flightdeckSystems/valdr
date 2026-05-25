@@ -778,7 +778,10 @@ fn enforce_busy_script_gate(
     if !crate::eval::is_script_busy() {
         return None;
     }
-    if allow_busy_command || is_script_kill_command(ctx, name) {
+    if allow_busy_command
+        || is_script_kill_command(ctx, name)
+        || is_function_busy_command(ctx, name)
+    {
         return None;
     }
     Some(crate::eval::busy_script_error_reply())
@@ -790,6 +793,19 @@ fn is_script_kill_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
     }
     match ctx.client_ref().arg(1) {
         Some(sub) => ascii_eq_ignore_case(sub.as_bytes(), b"KILL"),
+        None => false,
+    }
+}
+
+fn is_function_busy_command(ctx: &CommandContext<'_>, name: &[u8]) -> bool {
+    if !ascii_eq_ignore_case(name, b"FUNCTION") {
+        return false;
+    }
+    match ctx.client_ref().arg(1) {
+        Some(sub) => {
+            ascii_eq_ignore_case(sub.as_bytes(), b"KILL")
+                || ascii_eq_ignore_case(sub.as_bytes(), b"STATS")
+        }
         None => false,
     }
 }
@@ -810,7 +826,8 @@ pub(crate) fn execabort_from_error_reply(reply: &[u8]) -> Vec<u8> {
         .unwrap_or(reply)
         .strip_suffix(b"\r\n")
         .unwrap_or(reply);
-    let mut out = Vec::with_capacity(b"-EXECABORT Transaction discarded because of: \r\n".len() + msg.len());
+    let mut out =
+        Vec::with_capacity(b"-EXECABORT Transaction discarded because of: \r\n".len() + msg.len());
     out.extend_from_slice(b"-EXECABORT Transaction discarded because of: ");
     out.extend_from_slice(msg);
     out.extend_from_slice(b"\r\n");

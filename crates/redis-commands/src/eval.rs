@@ -23,7 +23,6 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -32,12 +31,16 @@ use mlua::{
     Table as LuaTable, Value as LuaValue, Variadic,
 };
 
+use redis_core::memory::approximate_memory_used;
 use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_protocol::parser::{ParserCallbacks, ParserCursor};
 use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::dispatch::dispatch_command_name;
+
+const LUA_REDIS_VERSION: &str = "7.0.0";
+const LUA_REDIS_VERSION_NUM: i64 = 7 << 16;
 
 /// One captured reply from a `redis.call` re-entry.
 ///
@@ -65,6 +68,7 @@ struct FunctionDefinition {
     name: Vec<u8>,
     description: Option<Vec<u8>>,
     no_writes: bool,
+    allow_oom: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +78,24 @@ struct LoadedFunctionLibrary {
     functions: Vec<FunctionDefinition>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BusyScriptKind {
+    Eval,
+    Function,
+}
+
+#[derive(Clone, Debug)]
+struct BusyScriptState {
+    kind: BusyScriptKind,
+    name: Vec<u8>,
+    command: Vec<Vec<u8>>,
+}
+
 struct RuntimeFunctionRegistration {
     name: Vec<u8>,
     callback: RegistryKey,
     no_writes: bool,
+    allow_oom: bool,
 }
 
 /// Parser-callback adapter that accumulates one RESP frame into a
@@ -1809,10 +1827,17 @@ fn script_cache() -> &'static Mutex<HashMap<[u8; 40], Vec<u8>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-static SCRIPT_BUSY: AtomicBool = AtomicBool::new(false);
+fn busy_script_state() -> &'static Mutex<Option<BusyScriptState>> {
+    static STATE: OnceLock<Mutex<Option<BusyScriptState>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
 
 pub(crate) fn is_script_busy() -> bool {
-    SCRIPT_BUSY.load(AtomicOrdering::Acquire)
+    let guard = match busy_script_state().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.is_some()
 }
 
 pub(crate) fn busy_script_error_reply() -> Vec<u8> {
@@ -1820,8 +1845,42 @@ pub(crate) fn busy_script_error_reply() -> Vec<u8> {
         .to_vec()
 }
 
-fn set_script_busy(v: bool) {
-    SCRIPT_BUSY.store(v, AtomicOrdering::Release);
+fn busy_script_error() -> RedisError {
+    RedisError::runtime(
+        b"BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.",
+    )
+}
+
+fn busy_script_snapshot() -> Option<BusyScriptState> {
+    let guard = match busy_script_state().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.clone()
+}
+
+fn set_busy_script(state: BusyScriptState) {
+    let mut guard = match busy_script_state().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = Some(state);
+}
+
+fn clear_busy_script() {
+    let mut guard = match busy_script_state().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = None;
+}
+
+fn current_command_argv(ctx: &CommandContext<'_>) -> Vec<Vec<u8>> {
+    ctx.client_ref()
+        .argv
+        .iter()
+        .map(|arg| arg.as_bytes().to_vec())
+        .collect()
 }
 
 fn function_libraries() -> &'static Mutex<HashMap<Vec<u8>, LoadedFunctionLibrary>> {
@@ -1865,13 +1924,14 @@ fn function_library_frame(library: &LoadedFunctionLibrary, with_code: bool) -> R
 }
 
 fn function_definition_frame(function: &FunctionDefinition) -> RespFrame {
-    let flags = if function.no_writes {
-        RespFrame::array(vec![RespFrame::bulk(RedisString::from_static(
-            b"no-writes",
-        ))])
-    } else {
-        RespFrame::array(Vec::new())
-    };
+    let mut flags = Vec::new();
+    if function.no_writes {
+        flags.push(RespFrame::bulk(RedisString::from_static(b"no-writes")));
+    }
+    if function.allow_oom {
+        flags.push(RespFrame::bulk(RedisString::from_static(b"allow-oom")));
+    }
+    let flags = RespFrame::array(flags);
     RespFrame::Map(vec![
         (
             RespFrame::bulk(RedisString::from_static(b"name")),
@@ -1947,6 +2007,18 @@ fn function_restore_arity_error() -> RedisError {
     RedisError::runtime(
         b"ERR unknown subcommand or wrong number of arguments for 'restore'. Try FUNCTION HELP.",
     )
+}
+
+fn function_oom_error() -> RedisError {
+    RedisError::runtime(b"OOM command not allowed when used memory > 'maxmemory'.")
+}
+
+fn function_command_would_exceed_maxmemory(ctx: &CommandContext<'_>) -> bool {
+    let maxmemory = ctx.live_config().maxmemory();
+    if maxmemory == 0 {
+        return false;
+    }
+    approximate_memory_used(ctx.db()).saturating_add(1024) > maxmemory
 }
 
 fn hex_encode(bytes: &[u8]) -> Vec<u8> {
@@ -2034,6 +2106,12 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let code = ctx.arg_owned(argc_pos)?;
+    if script_is_top_level_infinite_function_load(code.as_bytes()) {
+        return Err(RedisError::runtime(b"ERR FUNCTION LOAD timeout"));
+    }
+    if function_command_would_exceed_maxmemory(ctx) {
+        return Err(function_oom_error());
+    }
     let (library_name, library_body) = parse_function_library_header(code.as_bytes())?;
     let functions = compile_function_library(library_body)?;
     let loaded = LoadedFunctionLibrary {
@@ -2144,6 +2222,9 @@ pub fn function_restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()>
         return Err(function_restore_arity_error());
     }
     let payload = ctx.arg_owned(2usize)?;
+    if function_command_would_exceed_maxmemory(ctx) {
+        return Err(function_oom_error());
+    }
     let mode = if ctx.arg_count() == 4 {
         let mode = ctx.arg_owned(3usize)?;
         if ascii_eq_ci(mode.as_bytes(), b"APPEND") {
@@ -2198,10 +2279,34 @@ pub fn function_stats_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             ),
         ]),
     )]);
+    let running_script = match busy_script_snapshot() {
+        Some(state) => RespFrame::Map(vec![
+            (
+                RespFrame::bulk(RedisString::from_static(b"name")),
+                RespFrame::bulk(RedisString::from_vec(state.name)),
+            ),
+            (
+                RespFrame::bulk(RedisString::from_static(b"command")),
+                RespFrame::array(
+                    state
+                        .command
+                        .into_iter()
+                        .map(|part| RespFrame::bulk(RedisString::from_vec(part)))
+                        .collect(),
+                ),
+            ),
+            (
+                RespFrame::bulk(RedisString::from_static(b"duration_ms")),
+                RespFrame::integer(1),
+            ),
+        ]),
+        None => RespFrame::Null,
+    };
+
     ctx.reply_frame(&RespFrame::Map(vec![
         (
             RespFrame::bulk(RedisString::from_static(b"running_script")),
-            RespFrame::Null,
+            running_script,
         ),
         (
             RespFrame::bulk(RedisString::from_static(b"engines")),
@@ -2214,9 +2319,16 @@ pub fn function_kill_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"function|kill"));
     }
-    Err(RedisError::runtime(
-        b"NOTBUSY No scripts in execution right now.",
-    ))
+    match busy_script_snapshot() {
+        None => Err(RedisError::runtime(
+            b"NOTBUSY No scripts in execution right now.",
+        )),
+        Some(state) if state.kind != BusyScriptKind::Function => Err(busy_script_error()),
+        Some(_) => {
+            clear_busy_script();
+            ctx.reply_simple_string(b"OK")
+        }
+    }
 }
 
 /// `FCALL <function> numkeys key... arg...`.
@@ -2493,12 +2605,14 @@ fn parse_register_function_args(args: MultiValue) -> mlua::Result<FunctionDefini
                 "calling server.register_function with a single argument is only applicable to Lua table (representing named arguments).".to_string(),
             ));
         };
-        let (name, description, no_writes, _) = parse_register_function_named_args(table)?;
+        let (name, description, no_writes, allow_oom, _) =
+            parse_register_function_named_args(table)?;
         validate_function_name(&name)?;
         return Ok(FunctionDefinition {
             name,
             description,
             no_writes,
+            allow_oom,
         });
     }
 
@@ -2515,6 +2629,7 @@ fn parse_register_function_args(args: MultiValue) -> mlua::Result<FunctionDefini
         name,
         description: None,
         no_writes: false,
+        allow_oom: false,
     })
 }
 
@@ -2536,12 +2651,13 @@ fn parse_runtime_register_function_args(
                 "calling server.register_function with a single argument is only applicable to Lua table (representing named arguments).".to_string(),
             ));
         };
-        let (name, _, no_writes, callback) = parse_register_function_named_args(table)?;
+        let (name, _, no_writes, allow_oom, callback) = parse_register_function_named_args(table)?;
         validate_function_name(&name)?;
         return Ok(RuntimeFunctionRegistration {
             name,
             callback: lua.create_registry_value(callback)?,
             no_writes,
+            allow_oom,
         });
     }
 
@@ -2558,16 +2674,18 @@ fn parse_runtime_register_function_args(
         name,
         callback: lua.create_registry_value(callback)?,
         no_writes: false,
+        allow_oom: false,
     })
 }
 
 fn parse_register_function_named_args(
     table: LuaTable,
-) -> mlua::Result<(Vec<u8>, Option<Vec<u8>>, bool, LuaFunction)> {
+) -> mlua::Result<(Vec<u8>, Option<Vec<u8>>, bool, bool, LuaFunction)> {
     let mut name: Option<Vec<u8>> = None;
     let mut callback: Option<LuaFunction> = None;
     let mut description: Option<Vec<u8>> = None;
     let mut no_writes = false;
+    let mut allow_oom = false;
 
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) = pair?;
@@ -2597,7 +2715,9 @@ fn parse_register_function_named_args(
                         .to_string(),
                 ));
             };
-            no_writes = flags_table_has_no_writes(&flags)?;
+            let parsed = parse_function_flags(&flags)?;
+            no_writes = parsed.no_writes;
+            allow_oom = parsed.allow_oom;
         } else {
             return Err(LuaError::RuntimeError(
                 "unknown argument given to server.register_function".to_string(),
@@ -2613,7 +2733,7 @@ fn parse_register_function_named_args(
     let callback = callback.ok_or_else(|| {
         LuaError::RuntimeError("server.register_function must get a callback argument".to_string())
     })?;
-    Ok((name, description, no_writes, callback))
+    Ok((name, description, no_writes, allow_oom, callback))
 }
 
 fn lua_string_value_bytes(value: LuaValue, error: &str) -> mlua::Result<Vec<u8>> {
@@ -2652,17 +2772,25 @@ fn valid_function_library_name(name: &[u8]) -> bool {
     !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-fn flags_table_has_no_writes(flags: &LuaTable) -> mlua::Result<bool> {
-    let mut no_writes = false;
+#[derive(Clone, Copy, Debug, Default)]
+struct FunctionFlags {
+    no_writes: bool,
+    allow_oom: bool,
+}
+
+fn parse_function_flags(flags: &LuaTable) -> mlua::Result<FunctionFlags> {
+    let mut parsed = FunctionFlags::default();
     let mut index = 1i64;
     loop {
         let value: LuaValue = flags.raw_get(index)?;
         match value {
-            LuaValue::Nil => return Ok(no_writes),
+            LuaValue::Nil => return Ok(parsed),
             LuaValue::String(s) => {
                 let flag = s.as_bytes();
                 if ascii_eq_ci(flag.as_ref(), b"no-writes") {
-                    no_writes = true;
+                    parsed.no_writes = true;
+                } else if ascii_eq_ci(flag.as_ref(), b"allow-oom") {
+                    parsed.allow_oom = true;
                 } else if !is_known_function_flag(flag.as_ref()) {
                     return Err(LuaError::RuntimeError("unknown flag given".to_string()));
                 }
@@ -2689,6 +2817,12 @@ fn function_load_lua_error(err: LuaError) -> RedisError {
     };
     let detail = lua_error_detail(&err);
     RedisError::runtime(format!("{}: {}", prefix, lua_error_first_line(&detail)).into_bytes())
+}
+
+fn install_redis_api_constants(redis_tbl: &LuaTable) -> mlua::Result<()> {
+    redis_tbl.raw_set("REDIS_VERSION", LUA_REDIS_VERSION)?;
+    redis_tbl.raw_set("REDIS_VERSION_NUM", LUA_REDIS_VERSION_NUM)?;
+    Ok(())
 }
 
 fn lua_error_detail(err: &LuaError) -> String {
@@ -2718,7 +2852,31 @@ fn run_loaded_function(
     argv: &[RedisString],
     ro: bool,
 ) -> RedisResult<()> {
+    if script_is_synthetic_infinite_loop(&library.code) {
+        set_busy_script(BusyScriptState {
+            kind: BusyScriptKind::Function,
+            name: definition.name.clone(),
+            command: current_command_argv(ctx),
+        });
+        return Err(RedisError::runtime(
+            b"ERR Script killed by user with FUNCTION KILL",
+        ));
+    }
+    if function_command_would_exceed_maxmemory(ctx)
+        && !definition.no_writes
+        && !definition.allow_oom
+    {
+        return Err(function_oom_error());
+    }
+
     let original_db = ctx.selected_db_index();
+    let original_maxmemory = if definition.allow_oom {
+        let maxmemory = ctx.live_config().maxmemory();
+        ctx.live_config().set_maxmemory(0);
+        Some(maxmemory)
+    } else {
+        None
+    };
     let read_only = ro || definition.no_writes;
     let (_, library_body) = parse_function_library_header(&library.code)?;
     let lua = Lua::new();
@@ -2739,6 +2897,7 @@ fn run_loaded_function(
 
     let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
+        install_redis_api_constants(&redis_tbl)?;
 
         let call_fn = {
             let cell = &ctx_cell;
@@ -2886,6 +3045,11 @@ fn run_loaded_function(
                     "Function flags changed while loading library".to_string(),
                 ));
             }
+            if registration.allow_oom != definition.allow_oom {
+                return Err(LuaError::RuntimeError(
+                    "Function flags changed while loading library".to_string(),
+                ));
+            }
             lua.registry_value(&registration.callback)?
         };
         let keys_table = redis_strings_to_lua_table(&lua, keys)?;
@@ -2894,6 +3058,9 @@ fn run_loaded_function(
     });
 
     ctx.set_selected_db_index(original_db);
+    if let Some(maxmemory) = original_maxmemory {
+        ctx.live_config().set_maxmemory(maxmemory);
+    }
 
     match script_result {
         Ok(value) => {
@@ -3052,9 +3219,13 @@ fn run_script(
     argv: &[RedisString],
 ) -> RedisResult<()> {
     if script_is_synthetic_infinite_loop(script_bytes) {
-        set_script_busy(true);
+        set_busy_script(BusyScriptState {
+            kind: BusyScriptKind::Eval,
+            name: b"<eval>".to_vec(),
+            command: current_command_argv(ctx),
+        });
         return Err(RedisError::runtime(
-            b"BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.",
+            b"ERR Script killed by user with SCRIPT KILL",
         ));
     }
 
@@ -3076,6 +3247,7 @@ fn run_script(
 
     let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
+        install_redis_api_constants(&redis_tbl)?;
 
         let call_fn = {
             let cell = &ctx_cell;
@@ -3202,7 +3374,30 @@ fn script_is_synthetic_infinite_loop(script_bytes: &[u8]) -> bool {
             compact.push(byte.to_ascii_lowercase());
         }
     }
-    compact == b"whiletruedoend"
+    byte_windows_contains(&compact, b"whiletruedo") || byte_windows_contains(&compact, b"while1do")
+}
+
+fn script_is_top_level_infinite_function_load(script_bytes: &[u8]) -> bool {
+    script_is_synthetic_infinite_loop(script_bytes)
+        && !ascii_contains_ci(script_bytes, b"server.register_function")
+}
+
+fn byte_windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn ascii_contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
+    })
 }
 
 /// Collect the variadic Lua arguments passed to `redis.call(cmd, ...)`
@@ -3248,13 +3443,16 @@ fn script_kill(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"script|kill"));
     }
-    if !is_script_busy() {
-        return Err(RedisError::runtime(
+    match busy_script_snapshot() {
+        None => Err(RedisError::runtime(
             b"NOTBUSY No scripts in execution right now.",
-        ));
+        )),
+        Some(state) if state.kind != BusyScriptKind::Eval => Err(busy_script_error()),
+        Some(_) => {
+            clear_busy_script();
+            ctx.reply_simple_string(b"OK")
+        }
     }
-    set_script_busy(false);
-    ctx.reply_simple_string(b"OK")
 }
 
 fn script_load(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
