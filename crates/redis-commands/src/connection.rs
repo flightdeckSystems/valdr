@@ -44,6 +44,43 @@ type TcpPortSetHook = dyn Fn(u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + 
 static TCP_PORT_SET_HOOK: OnceLock<Box<TcpPortSetHook>> = OnceLock::new();
 static PENDING_TCP_LISTENERS: OnceLock<Mutex<Vec<TcpListener>>> = OnceLock::new();
 static TCP_PORT_CONFIG: AtomicU16 = AtomicU16::new(0);
+static CLIENT_OBUF_LIMITS: OnceLock<Mutex<ClientOutputBufferLimits>> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+pub struct ClientOutputBufferLimit {
+    pub hard: usize,
+    pub soft: usize,
+    pub soft_seconds: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ClientOutputBufferLimits {
+    normal: ClientOutputBufferLimit,
+    replica: ClientOutputBufferLimit,
+    pubsub: ClientOutputBufferLimit,
+}
+
+impl Default for ClientOutputBufferLimits {
+    fn default() -> Self {
+        Self {
+            normal: ClientOutputBufferLimit {
+                hard: 0,
+                soft: 0,
+                soft_seconds: 0,
+            },
+            replica: ClientOutputBufferLimit {
+                hard: 256 * 1024 * 1024,
+                soft: 64 * 1024 * 1024,
+                soft_seconds: 60,
+            },
+            pubsub: ClientOutputBufferLimit {
+                hard: 32 * 1024 * 1024,
+                soft: 8 * 1024 * 1024,
+                soft_seconds: 60,
+            },
+        }
+    }
+}
 
 fn monitor_clients() -> &'static Mutex<HashMap<u64, Sender<Vec<u8>>>> {
     MONITOR_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -51,6 +88,10 @@ fn monitor_clients() -> &'static Mutex<HashMap<u64, Sender<Vec<u8>>>> {
 
 fn aclfile_config_cell() -> &'static Mutex<Option<String>> {
     ACLFILE_CONFIG.get_or_init(|| Mutex::new(None))
+}
+
+fn client_obuf_limits_cell() -> &'static Mutex<ClientOutputBufferLimits> {
+    CLIENT_OBUF_LIMITS.get_or_init(|| Mutex::new(ClientOutputBufferLimits::default()))
 }
 
 pub fn set_aclfile_config_name(name: Option<String>) {
@@ -110,6 +151,41 @@ pub fn drain_pending_tcp_listeners() -> Vec<TcpListener> {
         Err(p) => p.into_inner(),
     };
     std::mem::take(&mut *guard)
+}
+
+pub fn client_output_buffer_hard_limit(is_pubsub: bool) -> usize {
+    client_output_buffer_limit(is_pubsub).hard
+}
+
+pub fn client_output_buffer_limit(is_pubsub: bool) -> ClientOutputBufferLimit {
+    let guard = match client_obuf_limits_cell().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if is_pubsub {
+        guard.pubsub
+    } else {
+        guard.normal
+    }
+}
+
+fn client_output_buffer_limit_config_string() -> String {
+    let guard = match client_obuf_limits_cell().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    format!(
+        "normal {} {} {} slave {} {} {} pubsub {} {} {}",
+        guard.normal.hard,
+        guard.normal.soft,
+        guard.normal.soft_seconds,
+        guard.replica.hard,
+        guard.replica.soft,
+        guard.replica.soft_seconds,
+        guard.pubsub.hard,
+        guard.pubsub.soft,
+        guard.pubsub.soft_seconds,
+    )
 }
 
 /// `PING [message]`.
@@ -490,6 +566,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     } else {
         "strict".to_string()
     };
+    let live_client_obuf_limit = client_output_buffer_limit_config_string();
 
     let mut out: Vec<(String, String)> = Vec::new();
     for &(name, value) in default_config_pairs() {
@@ -545,6 +622,7 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "slave-read-only" | "replica-read-only" => Some(live_slave_read_only.clone()),
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
             "rdb-version-check" => Some(live_rdb_version_check.clone()),
+            "client-output-buffer-limit" => Some(live_client_obuf_limit.clone()),
             _ => None,
         };
         out.push((
@@ -911,6 +989,9 @@ fn apply_config_set_for_context(
     if ascii_eq_ignore_case(key, b"port") {
         return apply_port_config_set(value);
     }
+    if ascii_eq_ignore_case(key, b"client-output-buffer-limit") {
+        return apply_client_output_buffer_limit_config_set(value);
+    }
     if ascii_eq_ignore_case(key, b"maxmemory") && parse_memsize(value).is_none() {
         return Err(RedisError::runtime(b"ERR CONFIG SET failed"));
     }
@@ -952,6 +1033,58 @@ fn apply_port_config_set(value: &[u8]) -> RedisResult<()> {
 
     set_tcp_port_config(port);
     server_metrics().set_tcp_port(port);
+    Ok(())
+}
+
+fn apply_client_output_buffer_limit_config_set(value: &[u8]) -> RedisResult<()> {
+    let value_str = std::str::from_utf8(value)
+        .map_err(|_| RedisError::runtime(b"ERR Wrong number of arguments"))?;
+    let tokens: Vec<&str> = value_str.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() % 4 != 0 {
+        return Err(RedisError::runtime(b"ERR Wrong number of arguments"));
+    }
+
+    let mut next = {
+        let guard = match client_obuf_limits_cell().lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard
+    };
+
+    for chunk in tokens.chunks_exact(4) {
+        let class = chunk[0].as_bytes();
+        let hard = parse_memsize(chunk[1].as_bytes())
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| RedisError::runtime(b"ERR Error in hard limit"))?;
+        let soft = parse_memsize(chunk[2].as_bytes())
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| RedisError::runtime(b"ERR Error in soft limit"))?;
+        let soft_seconds = parse_usize_strict(chunk[3].as_bytes())
+            .map(|n| n as u64)
+            .ok_or_else(|| RedisError::runtime(b"ERR Error in soft_seconds limit"))?;
+
+        let limit = ClientOutputBufferLimit {
+            hard,
+            soft,
+            soft_seconds,
+        };
+        if ascii_eq_ignore_case(class, b"normal") {
+            next.normal = limit;
+        } else if ascii_eq_ignore_case(class, b"slave") || ascii_eq_ignore_case(class, b"replica") {
+            next.replica = limit;
+        } else if ascii_eq_ignore_case(class, b"pubsub") {
+            next.pubsub = limit;
+        } else {
+            return Err(RedisError::runtime(b"ERR Invalid client class"));
+        }
+    }
+
+    let mut guard = match client_obuf_limits_cell().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = next;
     Ok(())
 }
 
@@ -1907,7 +2040,7 @@ fn format_current_client_info_line(
     if let Some(lib_ver) = &client.lib_ver {
         line.extend_from_slice(lib_ver.as_bytes());
     }
-    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n");
+    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\n");
     line
 }
 
@@ -1937,12 +2070,13 @@ fn format_snapshot_client_info_line(
     line.extend_from_slice(capa);
     let _ = write!(
         line,
-        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=",
+        " db={} sub={} psub={} ssub={} multi={} watch=0 qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem={} tot-mem=0 events=r cmd=",
         snap.db_index,
         snap.subscribed_channels,
         snap.subscribed_patterns,
         snap.subscribed_shard_channels,
         multi,
+        snap.output_buffer_bytes,
     );
     line.extend_from_slice(command_name);
     line.extend_from_slice(b" user=");
@@ -1959,7 +2093,7 @@ fn format_snapshot_client_info_line(
     if let Some(lib_ver) = &snap.lib_ver {
         line.extend_from_slice(lib_ver.as_bytes());
     }
-    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\r\n");
+    line.extend_from_slice(b" tot-net-in=0 tot-net-out=0 tot-cmds=0\n");
     line
 }
 
@@ -2642,9 +2776,10 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             };
             guard.all()
         };
-        let mut out = Vec::new();
+        let mut snapshot_lines: Vec<(bool, u64, Vec<u8>)> = Vec::new();
+        let mut current_line: Option<Vec<u8>> = None;
         if current_client_matches_filters(ctx.client_ref(), &filters) {
-            out.extend_from_slice(&format_current_client_info_line(
+            current_line = Some(format_current_client_info_line(
                 ctx.client_ref(),
                 b"client|list",
             ));
@@ -2661,7 +2796,19 @@ pub fn client_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             } else {
                 snap.cmd.as_bytes()
             };
-            out.extend_from_slice(&format_snapshot_client_info_line(snap, cmd));
+            snapshot_lines.push((
+                snapshot_in_pubsub_mode(snap),
+                snap.id,
+                format_snapshot_client_info_line(snap, cmd),
+            ));
+        }
+        let mut out = Vec::new();
+        if let Some(line) = current_line {
+            out.extend_from_slice(&line);
+        }
+        snapshot_lines.sort_by_key(|(is_pubsub, id, _)| (!*is_pubsub, *id));
+        for (_, _, line) in snapshot_lines {
+            out.extend_from_slice(&line);
         }
         return ctx.reply_bulk(&out);
     }

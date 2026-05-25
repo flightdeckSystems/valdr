@@ -229,6 +229,8 @@ pub struct ClientSlot {
     stream: Option<MioTcpStream>,
     foreign_rx: Option<Receiver<Vec<u8>>>,
     write_buffer: ClientWriteBuffer,
+    output_accounted_bytes: usize,
+    obuf_soft_limit_since: Option<Instant>,
     writable_interest: bool,
     closed: bool,
     close_after_flush: bool,
@@ -242,6 +244,8 @@ impl ClientSlot {
             stream: None,
             foreign_rx: None,
             write_buffer: ClientWriteBuffer::new(),
+            output_accounted_bytes: 0,
+            obuf_soft_limit_since: None,
             writable_interest: false,
             closed: false,
             close_after_flush: false,
@@ -260,6 +264,8 @@ impl ClientSlot {
             stream: Some(stream),
             foreign_rx: Some(foreign_rx),
             write_buffer: ClientWriteBuffer::new(),
+            output_accounted_bytes: 0,
+            obuf_soft_limit_since: None,
             writable_interest: false,
             closed: false,
             close_after_flush: false,
@@ -299,11 +305,15 @@ impl ClientSlot {
     }
 
     pub fn queue_write(&mut self, bytes: &[u8]) {
+        self.output_accounted_bytes = self.output_accounted_bytes.saturating_add(bytes.len());
         self.write_buffer.append(bytes);
+        self.refresh_output_buffer_state();
     }
 
     fn queue_write_owned(&mut self, bytes: Vec<u8>) {
+        self.output_accounted_bytes = self.output_accounted_bytes.saturating_add(bytes.len());
         self.write_buffer.append_owned(bytes);
+        self.refresh_output_buffer_state();
     }
 
     pub fn pending_write_len(&self) -> usize {
@@ -316,6 +326,38 @@ impl ClientSlot {
 
     pub fn mark_closed(&mut self) {
         self.closed = true;
+    }
+
+    fn refresh_output_buffer_state(&mut self) {
+        self.refresh_output_buffer_state_at(Instant::now());
+    }
+
+    fn refresh_output_buffer_state_at(&mut self, now: Instant) {
+        let pending = self.output_accounted_bytes;
+        if let Ok(mut guard) = client_info_registry().lock() {
+            guard.set_output_buffer_memory(self.client.id, pending);
+        }
+        let limit =
+            redis_commands::connection::client_output_buffer_limit(self.client.in_pubsub_mode());
+        if limit.hard > 0 && pending > limit.hard {
+            self.mark_closed();
+            return;
+        }
+        if limit.soft > 0 && limit.soft_seconds > 0 && pending > limit.soft {
+            let since = *self.obuf_soft_limit_since.get_or_insert(now);
+            if now.duration_since(since) >= Duration::from_secs(limit.soft_seconds) {
+                self.mark_closed();
+            }
+        } else {
+            self.obuf_soft_limit_since = None;
+        }
+    }
+
+    fn reconcile_output_buffer_after_write(&mut self) {
+        if !self.client.in_pubsub_mode() {
+            self.output_accounted_bytes = self.write_buffer.len();
+        }
+        self.refresh_output_buffer_state();
     }
 
     fn mark_close_after_flush(&mut self) {
@@ -596,6 +638,7 @@ impl RuntimeOwner {
             progressed |= owner.drain_foreign_payloads(poll.registry());
             progressed |= owner.dispatch_scheduled_commands(poll.registry(), &registry, &server);
             progressed |= owner.install_pending_dynamic_listeners(&mut listeners, poll.registry());
+            owner.sweep_output_buffer_limits();
             progressed |= owner.cleanup_closed_clients(poll.registry(), &registry);
 
             let _ = progressed;
@@ -1120,6 +1163,13 @@ impl RuntimeOwner {
         run_active_expire_tick_on_db(&mut self.dbs[idx], effort, Some(metrics.as_ref())) > 0
     }
 
+    fn sweep_output_buffer_limits(&mut self) {
+        let now = Instant::now();
+        for slot in self.slots.iter_mut().flatten() {
+            slot.refresh_output_buffer_state_at(now);
+        }
+    }
+
     fn flush_slot_pending_write(&mut self, idx: usize, poll_registry: &MioRegistry) -> bool {
         let mut progressed = false;
         let slot = match self.slots.get_mut(idx).and_then(Option::as_mut) {
@@ -1165,6 +1215,7 @@ impl RuntimeOwner {
                 }
             }
         }
+        slot.reconcile_output_buffer_after_write();
         if slot.write_buffer.is_empty() && slot.writable_interest {
             let token = token_for_slot(slot.id());
             if let Some(stream) = slot.stream.as_mut() {

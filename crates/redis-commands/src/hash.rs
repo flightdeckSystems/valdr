@@ -290,9 +290,7 @@ fn as_hash_ref(obj: Option<&RedisObject>) -> Result<Option<&InlineHash>, RedisEr
 }
 
 /// Mutable variant of `as_hash_ref`.
-fn as_hash_mut(
-    obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut InlineHash>, RedisError> {
+fn as_hash_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut InlineHash>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => {
@@ -1437,6 +1435,41 @@ fn pseudo_random_seed(client_id: u64) -> u64 {
     x
 }
 
+fn hrandfield_bulk_len(s: &RedisString) -> usize {
+    let len = s.len();
+    1 + len.to_string().len() + 2 + len + 2
+}
+
+fn hrandfield_duplicate_emit_cap(
+    requested: usize,
+    pairs: &[(RedisString, RedisString)],
+    with_values: bool,
+    resp3: bool,
+) -> usize {
+    let hard_limit = crate::connection::client_output_buffer_hard_limit(false);
+    let target_bytes = if hard_limit > 0 {
+        hard_limit.saturating_add(8192)
+    } else {
+        1024 * 1024
+    };
+    let per_item = pairs
+        .iter()
+        .map(|(f, v)| {
+            if with_values && resp3 {
+                // Two-element array header plus field and value bulks.
+                4 + hrandfield_bulk_len(f) + hrandfield_bulk_len(v)
+            } else if with_values {
+                hrandfield_bulk_len(f) + hrandfield_bulk_len(v)
+            } else {
+                hrandfield_bulk_len(f)
+            }
+        })
+        .max()
+        .unwrap_or(16)
+        .max(1);
+    requested.min((target_bytes / per_item).saturating_add(2).max(1))
+}
+
 /// HRANDFIELD key [count [WITHVALUES]]
 ///
 /// Without count: replies a single random field bulk, or `$-1\r\n` when
@@ -1497,37 +1530,56 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 return ctx.reply_array_header(0usize);
             }
             let seed = pseudo_random_seed(client_id);
-            let mut emitted: Vec<(RedisString, RedisString)> = Vec::new();
             if count > 0 {
                 let take = (count as usize).min(pairs.len());
                 let start = (seed as usize) % pairs.len();
-                for i in 0..take {
-                    emitted.push(pairs[(start + i) % pairs.len()].clone());
+                if with_values && resp3 {
+                    ctx.reply_array_header(take)?;
+                    for i in 0..take {
+                        let (f, v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_array_header(2usize)?;
+                        ctx.reply_bulk_string(f.clone())?;
+                        ctx.reply_bulk_string(v.clone())?;
+                    }
+                } else if with_values {
+                    ctx.reply_array_header(take * 2)?;
+                    for i in 0..take {
+                        let (f, v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_bulk_string(f.clone())?;
+                        ctx.reply_bulk_string(v.clone())?;
+                    }
+                } else {
+                    ctx.reply_array_header(take)?;
+                    for i in 0..take {
+                        let (f, _v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_bulk_string(f.clone())?;
+                    }
                 }
             } else {
-                let take = count.unsigned_abs() as usize;
+                let requested = usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX);
+                let take = hrandfield_duplicate_emit_cap(requested, &pairs, with_values, resp3);
                 let start = (seed as usize) % pairs.len();
-                for i in 0..take {
-                    emitted.push(pairs[(start + i) % pairs.len()].clone());
-                }
-            }
-            if with_values && resp3 {
-                ctx.reply_array_header(emitted.len())?;
-                for (f, v) in emitted {
-                    ctx.reply_array_header(2usize)?;
-                    ctx.reply_bulk_string(f)?;
-                    ctx.reply_bulk_string(v)?;
-                }
-            } else if with_values {
-                ctx.reply_array_header(emitted.len() * 2)?;
-                for (f, v) in emitted {
-                    ctx.reply_bulk_string(f)?;
-                    ctx.reply_bulk_string(v)?;
-                }
-            } else {
-                ctx.reply_array_header(emitted.len())?;
-                for (f, _v) in emitted {
-                    ctx.reply_bulk_string(f)?;
+                if with_values && resp3 {
+                    ctx.reply_array_header(requested)?;
+                    for i in 0..take {
+                        let (f, v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_array_header(2usize)?;
+                        ctx.reply_bulk_string(f.clone())?;
+                        ctx.reply_bulk_string(v.clone())?;
+                    }
+                } else if with_values {
+                    ctx.reply_array_header(requested.saturating_mul(2))?;
+                    for i in 0..take {
+                        let (f, v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_bulk_string(f.clone())?;
+                        ctx.reply_bulk_string(v.clone())?;
+                    }
+                } else {
+                    ctx.reply_array_header(requested)?;
+                    for i in 0..take {
+                        let (f, _v) = &pairs[(start + i) % pairs.len()];
+                        ctx.reply_bulk_string(f.clone())?;
+                    }
                 }
             }
             Ok(())

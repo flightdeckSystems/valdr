@@ -354,6 +354,79 @@ Interpretation: this is a small counted-coverage gain (+5), but it is a useful
 runtime capability: the owner loop can now grow its listener set after startup.
 The bind-address semantics are a separate listener-policy packet.
 
+## Output Buffer Pull: `unit/obuf-limits`
+
+Patch:
+
+- Added live `CONFIG GET/SET client-output-buffer-limit` parsing for normal,
+  replica/slave, and pubsub classes.
+- Added RuntimeOwner output-buffer accounting, hard-limit close, soft-limit
+  clocks, and a per-loop soft-limit sweep so idle clients are still disconnected.
+- Exposed `omem` in `CLIENT LIST` snapshots and fixed CLIENT LIST payload line
+  endings to LF, matching Valkey's bulk payload shape.
+- Kept `CLIENT LIST` stable enough for upstream tests by listing the current
+  client first, then pubsub snapshots before normal snapshots.
+- Stopped `HRANDFIELD key -huge` from materializing billions of duplicate
+  fields before output-buffer enforcement can run. The command now emits enough
+  duplicate fields to cross the active hard limit and then lets the connection
+  close mid-reply, matching the test's expected I/O failure shape.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-obuf-counted-v1 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 37111 \
+  --portcount 4000 \
+  --files unit/obuf-limits
+
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-hash-after-hrandfield-cap-v1 \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 40111 \
+  --portcount 3000 \
+  --files unit/type/hash
+```
+
+Evidence:
+
+- `harness/oracle/results/tcl-survey/20260525T052853Z/unit__obuf-limits.json`
+- `harness/oracle/results/tcl-survey/20260525T053202Z/unit__type__hash.json`
+
+Result:
+
+```text
+unit/obuf-limits: timeout/no-summary -> 12 pass / 1 fail / 13 counted
+unit/type/hash:   no regression, 83 pass / 0 fail
+```
+
+Remaining failure:
+
+- `Copy avoidance spill to reply list returns omem to zero after drain`
+
+Interpretation: `unit/obuf-limits` is now illuminated. The one remaining
+failure is copy-avoidance reply-list accounting (`oll`/`obl`) rather than
+client-limit enforcement. A follow-up maxmemory probe still times out:
+`harness/oracle/results/tcl-survey/20260525T052909Z/unit__maxmemory.json`.
+It now needs actual maxmemory client-eviction policy, not just the output-buffer
+limit primitives.
+
+Agent-1 visible counted movement so far:
+
+```text
+unit/introspection-2: +49 counted
+unit/sort:            +54 counted
+unit/pubsubshard:     +11 counted
+unit/networking:       +5 counted
+unit/obuf-limits:     +13 counted
+Total visible gain:  +132 counted, from ~2154 to ~2286 counted
+```
+
 ## Next Overnight Targets
 
 1. Survey-profile change: add a `single-node-external` TCL profile that allows

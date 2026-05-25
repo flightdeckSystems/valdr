@@ -48,6 +48,7 @@ pub struct ClientSnapshot {
     pub pattern_names: Vec<RedisString>,
     pub shard_channel_names: Vec<RedisString>,
     pub queued_multi_count: Option<usize>,
+    pub output_buffer_bytes: usize,
 }
 
 /// Server-wide client info table.
@@ -89,6 +90,7 @@ impl ClientInfoRegistry {
                 pattern_names: Vec::new(),
                 shard_channel_names: Vec::new(),
                 queued_multi_count: None,
+                output_buffer_bytes: 0,
             },
         );
     }
@@ -134,6 +136,12 @@ impl ClientInfoRegistry {
         }
     }
 
+    pub fn set_output_buffer_memory(&mut self, id: ClientId, bytes: usize) {
+        if let Some(e) = self.entries.get_mut(&id) {
+            e.output_buffer_bytes = bytes;
+        }
+    }
+
     /// Mark `id` as blocked (waiting on a blocking command).
     pub fn set_blocked(&mut self, id: ClientId, blocked: bool) {
         if let Some(e) = self.entries.get_mut(&id) {
@@ -175,7 +183,9 @@ impl ClientInfoRegistry {
 
     /// Snapshot of all currently registered clients.
     pub fn all(&self) -> Vec<ClientSnapshot> {
-        self.entries.values().cloned().collect()
+        let mut out: Vec<ClientSnapshot> = self.entries.values().cloned().collect();
+        out.sort_by_key(|snap| snap.id);
+        out
     }
 }
 
