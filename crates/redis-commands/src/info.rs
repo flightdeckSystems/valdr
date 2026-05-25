@@ -175,12 +175,23 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
         );
         let _ = writeln!(buf, "used_memory_estimated:true\r");
         let _ = writeln!(buf, "total_system_memory:0\r");
+        let _ = writeln!(buf, "mem_not_counted_for_evict:0\r");
         let live_maxmemory = ctx.live_config().maxmemory();
         let live_policy = ctx.live_config().maxmemory_policy();
         let _ = writeln!(buf, "maxmemory:{}\r", live_maxmemory);
         let _ = writeln!(buf, "maxmemory_policy:{}\r", live_policy.as_config_str());
         let _ = writeln!(buf, "mem_fragmentation_ratio:1.00\r");
         let _ = writeln!(buf, "mem_allocator:rust-std\r");
+        let _ = writeln!(
+            buf,
+            "lazyfree_pending_objects:{}\r",
+            redis_core::lazyfree::lazyfree_get_pending_objects_count()
+        );
+        let _ = writeln!(
+            buf,
+            "lazyfreed_objects:{}\r",
+            redis_core::lazyfree::lazyfree_get_freed_objects_count()
+        );
         let _ = writeln!(buf, "max_clients_seen:{}\r", peak);
         let _ = writeln!(buf, "\r");
     }

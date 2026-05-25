@@ -1164,16 +1164,45 @@ fn enforce_maxmemory_gate(
     if used <= maxmem {
         return None;
     }
-    if !is_denyoom_command {
-        return None;
-    }
     let policy = ctx.live_config().maxmemory_policy();
     let log_factor = ctx.live_config().lfu_log_factor();
     let decay_time = ctx.live_config().lfu_decay_time();
     let outcome = try_evict_to_fit(ctx.db_mut(), maxmem, policy, log_factor, decay_time);
-    match outcome {
-        EvictionOutcome::Sufficient | EvictionOutcome::Evicted(_) => None,
-        EvictionOutcome::StillOver => Some(oom_error_reply()),
+    let still_over = match outcome {
+        EvictionOutcome::Sufficient => false,
+        EvictionOutcome::Evicted(keys) => {
+            if !keys.is_empty() {
+                let pubsub = ctx.pubsub.as_ref().cloned();
+                redis_core::tracking::runtime_invalidate_keys(
+                    ctx.client_ref().id,
+                    ctx.client_mut(),
+                    pubsub.as_ref(),
+                    &keys,
+                    true,
+                    false,
+                );
+            }
+            false
+        }
+        EvictionOutcome::StillOver(keys) => {
+            if !keys.is_empty() {
+                let pubsub = ctx.pubsub.as_ref().cloned();
+                redis_core::tracking::runtime_invalidate_keys(
+                    ctx.client_ref().id,
+                    ctx.client_mut(),
+                    pubsub.as_ref(),
+                    &keys,
+                    true,
+                    false,
+                );
+            }
+            true
+        }
+    };
+    if still_over && is_denyoom_command {
+        Some(oom_error_reply())
+    } else {
+        None
     }
 }
 
@@ -2301,6 +2330,14 @@ pub static HANDLERS: &[DispatchEntry] = &[
     DispatchEntry {
         name: b"EVALSHA",
         handler: crate::eval::evalsha_command,
+    },
+    DispatchEntry {
+        name: b"EVALSHA_RO",
+        handler: crate::eval::evalsha_command,
+    },
+    DispatchEntry {
+        name: b"EVAL_RO",
+        handler: crate::eval::eval_command,
     },
     DispatchEntry {
         name: b"SCRIPT",

@@ -380,6 +380,7 @@ impl<'a> CommandContext<'a> {
             crate::tracking::sync_runtime_client_tracking(self.client.id, &self.client.tracking);
         }
         if !self.client.flag_deny_blocking() {
+            crate::tracking::runtime_flush_deferred_current_client(&mut *self.client);
             let pubsub = self.pubsub.as_ref().cloned();
             crate::tracking::runtime_flush_pending_bcast(&mut *self.client, pubsub.as_ref());
         }
@@ -1173,31 +1174,7 @@ fn tracking_read_keys_for_command(name: &[u8], argv: &[RedisString]) -> Vec<Redi
     if ascii_eq_ignore_case(name, b"HMGET") {
         return argv.get(1).cloned().into_iter().collect();
     }
-    if ascii_eq_ignore_case(name, b"EVAL")
-        || ascii_eq_ignore_case(name, b"EVAL_RO")
-        || ascii_eq_ignore_case(name, b"EVALSHA")
-        || ascii_eq_ignore_case(name, b"EVALSHA_RO")
-        || ascii_eq_ignore_case(name, b"FCALL")
-        || ascii_eq_ignore_case(name, b"FCALL_RO")
-    {
-        return tracking_script_keys(argv);
-    }
     Vec::new()
-}
-
-fn tracking_script_keys(argv: &[RedisString]) -> Vec<RedisString> {
-    let Some(numkeys_arg) = argv.get(2) else {
-        return Vec::new();
-    };
-    let Some(numkeys) = parse_i64_from_bytes(numkeys_arg.as_bytes()) else {
-        return Vec::new();
-    };
-    if numkeys <= 0 {
-        return Vec::new();
-    }
-    let start = 3usize;
-    let end = start.saturating_add(numkeys as usize).min(argv.len());
-    argv[start..end].to_vec()
 }
 
 fn tracking_mutation_for_command(name: &[u8], argv: &[RedisString]) -> TrackingMutation {

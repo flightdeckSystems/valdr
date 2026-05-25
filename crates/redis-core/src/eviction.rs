@@ -50,10 +50,10 @@ const LFU_INIT_VAL: u8 = 5;
 pub enum EvictionOutcome {
     /// `approximate_memory_used` was already below `target_bytes` on entry.
     Sufficient,
-    /// Evicted `usize` keys and is now under `target_bytes`.
-    Evicted(usize),
-    /// Exhausted the per-call budget without getting under the limit.
-    StillOver,
+    /// Evicted these keys and is now under `target_bytes`.
+    Evicted(Vec<RedisString>),
+    /// Evicted these keys but remained over the limit.
+    StillOver(Vec<RedisString>),
 }
 
 /// Drive eviction until either `approximate_memory_used(db) <= target_bytes`,
@@ -73,8 +73,8 @@ pub fn try_evict_to_fit(
         return EvictionOutcome::Sufficient;
     }
 
-    let mut evicted: usize = 0;
-    while evicted < MAX_EVICTIONS_PER_CALL {
+    let mut evicted: Vec<RedisString> = Vec::new();
+    while evicted.len() < MAX_EVICTIONS_PER_CALL {
         let victim = match select_victim(db, policy, log_factor, decay_time) {
             Some(k) => k,
             None => break,
@@ -82,7 +82,7 @@ pub fn try_evict_to_fit(
         if !db.delete(&victim) {
             break;
         }
-        evicted += 1;
+        evicted.push(victim);
         server_metrics()
             .evicted_keys
             .fetch_add(1, Ordering::Relaxed);
@@ -94,7 +94,7 @@ pub fn try_evict_to_fit(
     if approximate_memory_used(db) <= target_bytes {
         EvictionOutcome::Evicted(evicted)
     } else {
-        EvictionOutcome::StillOver
+        EvictionOutcome::StillOver(evicted)
     }
 }
 
@@ -368,7 +368,7 @@ mod tests {
     fn noeviction_returns_still_over_when_over_limit() {
         let mut db = db_with(&[(b"k1", b"value1", 1), (b"k2", b"value2", 2)]);
         let res = try_evict_to_fit(&mut db, 1, MaxmemoryPolicyCode::NoEviction, 10, 1);
-        assert_eq!(res, EvictionOutcome::StillOver);
+        assert_eq!(res, EvictionOutcome::StillOver(Vec::new()));
         assert_eq!(db.len(), 2);
     }
 
@@ -382,7 +382,7 @@ mod tests {
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysLru, 10, 1);
         assert!(matches!(
             res,
-            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver(_)
         ));
     }
 
@@ -392,7 +392,7 @@ mod tests {
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysLfu, 10, 1);
         assert!(matches!(
             res,
-            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver(_)
         ));
     }
 
@@ -402,7 +402,7 @@ mod tests {
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::AllkeysRandom, 10, 1);
         assert!(matches!(
             res,
-            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver(_)
         ));
     }
 
@@ -416,7 +416,7 @@ mod tests {
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::VolatileLru, 10, 1);
         assert!(matches!(
             res,
-            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver
+            EvictionOutcome::Evicted(_) | EvictionOutcome::StillOver(_)
         ));
         assert!(db.find(&RedisString::from_bytes(b"no_ttl")).is_some());
     }
@@ -425,7 +425,7 @@ mod tests {
     fn volatile_lru_with_no_ttl_keys_returns_still_over() {
         let mut db = db_with(&[(b"a", b"value", 1), (b"b", b"value", 2)]);
         let res = try_evict_to_fit(&mut db, 0, MaxmemoryPolicyCode::VolatileLru, 10, 1);
-        assert_eq!(res, EvictionOutcome::StillOver);
+        assert_eq!(res, EvictionOutcome::StillOver(Vec::new()));
         assert_eq!(db.len(), 2);
     }
 

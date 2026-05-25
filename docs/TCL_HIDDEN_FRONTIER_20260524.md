@@ -1,6 +1,6 @@
 # TCL Hidden Frontier - 2026-05-24
 
-Generated: `2026-05-25T03:28:25.866544+00:00`
+Generated: `2026-05-25T03:58:40.612898+00:00`
 
 This is an illumination artifact, not a conformance claim. It maps the
 timeout/no-summary bucket into concrete subsystem packets so broad
@@ -48,11 +48,11 @@ implementation work can start from evidence instead of guessing.
 | 3 | `tcl-functions-timeout-scout-then-library-v1` | `unit/functions.tcl` | 112 | high | high | Do not start with a broad function rewrite. First add a single-test bisect/scout runner for the timeout, then port only the first library lifecycle semantic that blocks summary output. |
 | 4 | `tcl-stream-transaction-xread-wake-v1` | `unit/type/stream.tcl` | 82 | high | high | Port the upstream blocked stream client wake semantics around XADD inside MULTI before touching consumer-group metadata. |
 | 5 | `tcl-stream-cgroups-pel-idle-seen-time-v1` | `unit/type/stream-cgroups.tcl` | 65 | high | high | Implement the missing `idle`/seen-time dictionary shape and keep the blocking XREADGROUP failures as separate follow-up packets. |
-| 6 | `tcl-client-tracking-info-counters-v1` | `unit/tracking.tcl` | 61 | medium | medium | Fix the current no-summary variable gap around tracking info counters, then decide whether invalidation routing belongs in this wave. |
-| 7 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
-| 8 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
-| 9 | `tcl-bitops-runner-isolation-then-edge-fails-v1` | `unit/bitops.tcl` | 46 | medium | low | Current evidence is a tmp/stdout runner artifact. Isolate the run before spending implementation time. |
-| 10 | `tcl-command-list-filterby-v1` | `unit/introspection-2.tcl` | 33 | medium | medium | Implement the missing COMMAND LIST/FILTERBY subcommand path from the generated registry before broader introspection polish. |
+| 6 | `tcl-sort-runner-launch-then-by-get-v1` | `unit/sort.tcl` | 43 | medium | medium | The current timeout says the harness cannot start the server. Fix that visibility issue before changing SORT internals. |
+| 7 | `tcl-pubsub-keyspace-notify-order-v1` | `unit/pubsub.tcl` | 34 | medium | medium | Start from the stream event notification mismatch. Verify exact xgroup/xadd ordering and CLIENT REPLY behavior, then rerun the file with a short timeout to see if the hang collapses. |
+| 8 | `tcl-bitops-runner-isolation-then-edge-fails-v1` | `unit/bitops.tcl` | 46 | medium | low | Current evidence is a tmp/stdout runner artifact. Isolate the run before spending implementation time. |
+| 9 | `tcl-command-list-filterby-v1` | `unit/introspection-2.tcl` | 33 | medium | medium | Implement the missing COMMAND LIST/FILTERBY subcommand path from the generated registry before broader introspection polish. |
+| 10 | `tcl-dump-runner-launch-then-restore-edges-v1` | `unit/dump.tcl` | 30 | medium | medium | RDB object oracles are strong; first remove the test server launch failure, then focus on DUMP/RESTORE edge semantics. |
 
 ## Per-File Notes
 

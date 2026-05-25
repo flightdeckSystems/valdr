@@ -1064,6 +1064,9 @@ pub fn quit_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 1 {
         return Err(RedisError::wrong_number_of_args(b"quit"));
     }
+    if let Ok(mut guard) = client_info_registry().lock() {
+        guard.deregister(ctx.client_ref().id());
+    }
     ctx.client_mut().should_close = true;
     ctx.reply_simple_string(b"OK")
 }
@@ -2906,6 +2909,9 @@ fn client_caching_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 fn client_trackinginfo_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ctx.arg_count() != 2 {
         return Err(RedisError::wrong_number_of_args(b"client|trackinginfo"));
+    }
+    if redis_core::tracking::runtime_client_has_broken_redirect(ctx.client_ref().id()) {
+        ctx.client_mut().tracking.broken_redirect = true;
     }
     let tracking = &ctx.client_ref().tracking;
     let mut flags = Vec::new();

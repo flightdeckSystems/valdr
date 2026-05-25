@@ -1215,6 +1215,7 @@ fn cleanup_slot(mut slot: ClientSlot, registry: &Arc<Mutex<PubSubRegistry>>) {
     let id = slot.client.id;
     let _ = redis_commands::pubsub::drop_client_from_registry(registry, id);
     redis_core::replication::global_replication_state().remove_replica(id);
+    redis_core::tracking::remove_runtime_client_tracking(id);
     slot.client.clear_blocked_on_keys();
     if let Ok(mut guard) = client_info_registry().lock() {
         guard.deregister(id);

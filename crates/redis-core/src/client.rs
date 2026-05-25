@@ -121,6 +121,9 @@ pub struct Client {
     /// Ranges in `reply_buf` that are Pub/Sub push replies from the current
     /// command and must bypass CLIENT REPLY OFF/SKIP.
     push_reply_segments: Vec<(usize, usize)>,
+    /// Tracking push frames deferred while an inner execution context is
+    /// building a transaction or script reply.
+    pending_tracking_pushes: Vec<RespFrame>,
     /// Selected database index (Phase 3 with RedisDb).
     pub db_index: u32,
     /// MULTI/EXEC transaction state (lazily initialised; `None` when the client
@@ -295,6 +298,7 @@ impl Client {
             argv: Vec::new(),
             reply_buf: Vec::new(),
             push_reply_segments: Vec::new(),
+            pending_tracking_pushes: Vec::new(),
             db_index: 0,
             mstate: None,
             queued_argvs: Vec::new(),
@@ -358,6 +362,7 @@ impl Client {
         self.queued_argvs.clear();
         self.reply_buf.clear();
         self.push_reply_segments.clear();
+        self.pending_tracking_pushes.clear();
         self.db_index = 0;
         self.flags = ClientFlags::default();
         self.resp_proto = 2;
@@ -422,6 +427,20 @@ impl Client {
         let end = self.reply_buf.len();
         if end > start {
             self.push_reply_segments.push((start, end));
+        }
+    }
+
+    /// Queue a tracking push until the surrounding nested execution context is
+    /// done writing its command reply.
+    pub fn defer_tracking_push_frame(&mut self, frame: RespFrame) {
+        self.pending_tracking_pushes.push(frame);
+    }
+
+    /// Append deferred tracking pushes after the surrounding command reply.
+    pub fn flush_deferred_tracking_pushes(&mut self) {
+        let pending = std::mem::take(&mut self.pending_tracking_pushes);
+        for frame in pending {
+            self.write_push_frame(&frame);
         }
     }
 

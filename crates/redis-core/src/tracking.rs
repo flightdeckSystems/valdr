@@ -525,15 +525,42 @@ fn runtime_client_exists(client_id: ClientId) -> bool {
     guard.all().iter().any(|snap| snap.id == client_id)
 }
 
+fn write_or_defer_tracking_push(current: &mut Client, frame: RespFrame) {
+    if current.flag_deny_blocking() {
+        current.defer_tracking_push_frame(frame);
+    } else {
+        current.write_push_frame(&frame);
+    }
+}
+
+fn tracking_redirect_broken_frame(redirect: ClientId) -> RespFrame {
+    RespFrame::Push(vec![
+        RespFrame::bulk(RedisString::from_static(b"tracking-redir-broken")),
+        RespFrame::Integer(redirect as i64),
+    ])
+}
+
 fn mark_runtime_redirect_broken(current: &mut Client, redirect: ClientId) {
     current.tracking.broken_redirect = true;
     sync_runtime_client_tracking(current.id, &current.tracking);
     if current.resp_proto == 3 {
-        current.write_push_frame(&RespFrame::Push(vec![
-            RespFrame::bulk(RedisString::from_static(b"tracking-redir-broken")),
-            RespFrame::Integer(redirect as i64),
-        ]));
+        write_or_defer_tracking_push(current, tracking_redirect_broken_frame(redirect));
     }
+}
+
+fn mark_runtime_owner_redirect_broken(owner_id: ClientId) {
+    let mut rt = lock_runtime_tracking();
+    if let Some(state) = rt.clients.get_mut(&owner_id) {
+        state.broken_redirect = true;
+    }
+}
+
+/// Return whether the live runtime has observed a broken redirect for a client.
+pub fn runtime_client_has_broken_redirect(client_id: ClientId) -> bool {
+    let rt = lock_runtime_tracking();
+    rt.clients
+        .get(&client_id)
+        .is_some_and(|state| state.broken_redirect)
 }
 
 fn runtime_deliver_messages(
@@ -544,9 +571,9 @@ fn runtime_deliver_messages(
     for delivery in deliveries {
         if delivery.recipient_id == current.id {
             if current.resp_proto == 3 {
-                current.write_push_frame(&tracking_resp3_push(&delivery.keys));
+                write_or_defer_tracking_push(current, tracking_resp3_push(&delivery.keys));
             } else if current.in_pubsub_mode() {
-                current.write_push_frame(&tracking_resp2_pubsub_message(&delivery.keys));
+                write_or_defer_tracking_push(current, tracking_resp2_pubsub_message(&delivery.keys));
             }
             continue;
         }
@@ -568,13 +595,38 @@ fn runtime_deliver_messages(
                 false
             } else {
                 let proto = guard.resp_proto(delivery.recipient_id);
-                let bytes = encode_tracking_message_for_proto(proto, &delivery.keys);
-                guard.send_to(delivery.recipient_id, bytes)
+                if proto != 3 && delivery.redirect.is_none() {
+                    true
+                } else {
+                    let bytes = encode_tracking_message_for_proto(proto, &delivery.keys);
+                    guard.send_to(delivery.recipient_id, bytes)
+                }
             }
         };
         if !sent && delivery.owner_id == current.id {
             if let Some(redirect) = delivery.redirect {
                 mark_runtime_redirect_broken(current, redirect);
+            }
+        } else if !sent {
+            if let Some(redirect) = delivery.redirect {
+                mark_runtime_owner_redirect_broken(delivery.owner_id);
+                let Some(registry) = pubsub else {
+                    continue;
+                };
+                let guard = match registry.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if runtime_client_exists(delivery.owner_id)
+                    && guard.resp_proto(delivery.owner_id) == 3
+                {
+                    let mut bytes = Vec::new();
+                    redis_protocol::encode_resp3(
+                        &tracking_redirect_broken_frame(redirect),
+                        &mut bytes,
+                    );
+                    let _ = guard.send_to(delivery.owner_id, bytes);
+                }
             }
         }
     }
@@ -615,6 +667,14 @@ pub fn runtime_flush_pending_bcast(
         runtime_collect_pending_bcast_deliveries(&mut rt)
     };
     runtime_deliver_messages(current, pubsub, deliveries);
+}
+
+/// Flush tracking pushes deferred while an EXEC/script inner context was
+/// writing its own reply.
+pub fn runtime_flush_deferred_current_client(current: &mut Client) {
+    if !current.flag_deny_blocking() {
+        current.flush_deferred_tracking_pushes();
+    }
 }
 
 /// Evict tracked-key entries until the runtime table is at or below `max_keys`.
