@@ -525,6 +525,9 @@ fn runtime_error_payload(message: &str) -> Vec<u8> {
     if normalized.contains("wrong number of arguments") {
         normalized = normalized.replace("wrong number of arguments", "wrong number of args");
     }
+    if let Some(rest) = normalized.strip_prefix("[string \"user_script\"]:") {
+        normalized = format!("user_script:{}", rest);
+    }
 
     let bytes = normalized.as_bytes();
     let first_token_is_error_code = lua_error_token_is_code(lua_error_code_token(bytes));
@@ -534,12 +537,18 @@ fn runtime_error_payload(message: &str) -> Vec<u8> {
         out.extend_from_slice(b"ERR ");
     }
     out.extend_from_slice(bytes);
+    if out.starts_with(b"ERR user_script:") && !byte_windows_contains(&out, b" script: ") {
+        out.extend_from_slice(b" script: unknown");
+    }
     out
 }
 
 fn lua_execution_error_payload(kind: &str, err: LuaError) -> Vec<u8> {
     match err {
         LuaError::RuntimeError(msg) => runtime_error_payload(&msg),
+        LuaError::CallbackError { cause, .. } => {
+            lua_execution_error_payload(kind, cause.as_ref().clone())
+        }
         LuaError::SyntaxError { message, .. } => {
             runtime_error_payload(&format!("ERR Error compiling {kind}: {message}"))
         }
@@ -570,14 +579,89 @@ fn lua_arg_to_bytes(v: &LuaValue) -> Result<Vec<u8>, LuaError> {
 }
 
 fn lua_script_command_error_payload(err: &RedisError) -> Vec<u8> {
-    if matches!(err, RedisError::WrongNumberOfArgs(_)) {
+    lua_script_command_reply_error_payload(err.to_resp_payload().as_bytes())
+}
+
+fn lua_script_command_reply_error_payload(bytes: &[u8]) -> Vec<u8> {
+    let payload = bytes.strip_prefix(b"-").unwrap_or(bytes);
+    let first_line = payload
+        .split(|b| *b == b'\r' || *b == b'\n')
+        .next()
+        .unwrap_or(payload);
+    let lower = first_line.to_ascii_lowercase();
+    if lower.starts_with(b"err wrong number of args")
+        || lower.starts_with(b"err wrong number of arguments")
+    {
         return b"ERR Wrong number of args calling command from script".to_vec();
     }
-    err.to_resp_payload().as_bytes().to_vec()
+    first_line.to_vec()
 }
 
 fn create_disabled_loadstring(lua: &Lua) -> mlua::Result<LuaFunction> {
     lua.create_function(|_, _: MultiValue| -> mlua::Result<LuaValue> { Ok(LuaValue::Nil) })
+}
+
+fn install_script_error_wrapper(lua: &Lua) -> mlua::Result<()> {
+    lua.load(
+        r#"
+        local raw_error = error
+        local raw_getinfo = debug and debug.getinfo
+
+        local function sanitize_error_message(msg)
+            if type(msg) ~= "string" then
+                msg = "ERR unknown error"
+            end
+            msg = string.match(msg, "^[^\r\n]*") or ""
+            if msg == "" then
+                msg = "ERR"
+            end
+            if string.sub(msg, 1, 1) == "-" then
+                msg = string.sub(msg, 2)
+            end
+            local code = string.match(msg, "^[^ \t]*") or ""
+            if string.sub(msg, 1, 4) ~= "ERR " and not string.match(code, "^[A-Z0-9_]+$") then
+                msg = "ERR " .. msg
+            end
+            return msg
+        end
+
+        error = function(value, level)
+            if type(value) == "table" then
+                raw_error(sanitize_error_message(value.err) .. " script: unknown", 0)
+            end
+
+            if level ~= nil then
+                if level > 0 then
+                    level = level + 1
+                end
+                raw_error(value, level)
+            end
+
+            if type(value) == "string" then
+                if string.sub(value, 1, 1) == "-" or string.find(value, "\r", 1, true) or string.find(value, "\n", 1, true) then
+                    raw_error(sanitize_error_message(value) .. " script: unknown", 0)
+                end
+                local src = "user_script"
+                local line = 1
+                if raw_getinfo ~= nil then
+                    local info = raw_getinfo(2, "Sl")
+                    if info ~= nil then
+                        src = info.short_src or src
+                        line = info.currentline or line
+                    end
+                end
+                if src == '[string "user_script"]' then
+                    src = "user_script"
+                end
+                raw_error("ERR " .. src .. ":" .. tostring(line) .. ": " .. value .. " script: unknown", 0)
+            end
+
+            raw_error(sanitize_error_message(nil) .. " script: unknown", 0)
+        end
+        "#,
+    )
+    .set_name("script_error_wrapper")
+    .exec()
 }
 
 fn create_sha1hex_function(lua: &Lua) -> mlua::Result<LuaFunction> {
@@ -2959,6 +3043,8 @@ fn split_function_metadata_args(line: &[u8]) -> Option<Vec<Vec<u8>>> {
 
 fn compile_function_library(library_body: &[u8]) -> RedisResult<Vec<FunctionDefinition>> {
     let lua = Lua::new();
+    install_script_error_wrapper(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_cjson(&lua)
@@ -3485,6 +3571,8 @@ fn run_loaded_function(
         .globals()
         .raw_get("getmetatable")
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_script_error_wrapper(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_cjson(&lua)
@@ -3509,6 +3597,7 @@ fn run_loaded_function(
 
     let ctx_cell: RefCell<&mut CommandContext<'_>> = RefCell::new(ctx);
     let script_dirty = Rc::new(Cell::new(false));
+    let script_error_already_recorded = Rc::new(Cell::new(false));
     let registrations: RefCell<Vec<RuntimeFunctionRegistration>> = RefCell::new(Vec::new());
     let load_phase = Rc::new(Cell::new(true));
 
@@ -3519,6 +3608,7 @@ fn run_loaded_function(
         let call_fn = {
             let cell = &ctx_cell;
             let dirty = Rc::clone(&script_dirty);
+            let error_recorded = Rc::clone(&script_error_already_recorded);
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
@@ -3538,6 +3628,7 @@ fn run_loaded_function(
                             &arg_bytes,
                             b"ERR Write commands are not allowed from read-only scripts.",
                         );
+                        error_recorded.set(true);
                         return Err(LuaError::RuntimeError(
                             "Write commands are not allowed from read-only scripts".to_string(),
                         ));
@@ -3546,16 +3637,23 @@ fn run_loaded_function(
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => {
                             if let ReplyValue::Error(msg) = &reply {
+                                error_recorded.set(true);
                                 return Err(LuaError::RuntimeError(
-                                    String::from_utf8_lossy(msg).into_owned(),
+                                    String::from_utf8_lossy(
+                                        &lua_script_command_reply_error_payload(msg),
+                                    )
+                                    .into_owned(),
                                 ));
                             }
                             reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner))
                         }
-                        Err(e) => Err(LuaError::RuntimeError(
-                            String::from_utf8_lossy(&lua_script_command_error_payload(&e))
-                                .into_owned(),
-                        )),
+                        Err(e) => {
+                            error_recorded.set(true);
+                            Err(LuaError::RuntimeError(
+                                String::from_utf8_lossy(&lua_script_command_error_payload(&e))
+                                    .into_owned(),
+                            ))
+                        }
                     }
                 },
             )?
@@ -3597,7 +3695,7 @@ fn run_loaded_function(
                         t.raw_set(
                             "err",
                             lua_inner.create_string(
-                                "Write commands are not allowed from read-only scripts",
+                                "ERR Write commands are not allowed from read-only scripts.",
                             )?,
                         )?;
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
@@ -3769,9 +3867,13 @@ fn run_loaded_function(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(e) => Err(RedisError::runtime(lua_execution_error_payload(
-            "function", e,
-        ))),
+        Err(e) => {
+            let payload = lua_execution_error_payload("function", e);
+            if !script_error_already_recorded.get() {
+                record_error_reply(&payload);
+            }
+            Err(RedisError::runtime(payload))
+        }
     }
 }
 
@@ -4016,6 +4118,8 @@ fn run_script(
         .globals()
         .raw_get("loadstring")
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
+    install_script_error_wrapper(&lua)
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     lua.globals()
@@ -4050,6 +4154,7 @@ fn run_script(
 
     let ctx_cell: RefCell<&mut CommandContext<'_>> = RefCell::new(ctx);
     let script_dirty = Rc::new(Cell::new(false));
+    let script_error_already_recorded = Rc::new(Cell::new(false));
 
     let script_result: Result<LuaValue, LuaError> = lua.scope(|scope| {
         let redis_tbl = lua.create_table()?;
@@ -4058,6 +4163,7 @@ fn run_script(
         let call_fn = {
             let cell = &ctx_cell;
             let dirty = Rc::clone(&script_dirty);
+            let error_recorded = Rc::clone(&script_error_already_recorded);
             scope.create_function_mut(move |_lua, args: MultiValue| -> mlua::Result<LuaValue> {
                 let arg_bytes = collect_call_args(args)?;
                 if script_command_not_allowed(&arg_bytes) {
@@ -4076,6 +4182,7 @@ fn run_script(
                         &arg_bytes,
                         b"ERR Write commands are not allowed from read-only scripts.",
                     );
+                    error_recorded.set(true);
                     return Err(LuaError::RuntimeError(
                         "Write commands are not allowed from read-only scripts".to_string(),
                     ));
@@ -4084,15 +4191,23 @@ fn run_script(
                 match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                     Ok(reply) => {
                         if let ReplyValue::Error(msg) = &reply {
+                            error_recorded.set(true);
                             return Err(LuaError::RuntimeError(
-                                String::from_utf8_lossy(msg).into_owned(),
+                                String::from_utf8_lossy(&lua_script_command_reply_error_payload(
+                                    msg,
+                                ))
+                                .into_owned(),
                             ));
                         }
                         reply_to_lua(_lua, &reply, script_resp_view(_lua))
                     }
-                    Err(e) => Err(LuaError::RuntimeError(
-                        String::from_utf8_lossy(e.to_resp_payload().as_bytes()).into_owned(),
-                    )),
+                    Err(e) => {
+                        error_recorded.set(true);
+                        Err(LuaError::RuntimeError(
+                            String::from_utf8_lossy(&lua_script_command_error_payload(&e))
+                                .into_owned(),
+                        ))
+                    }
                 }
             })?
         };
@@ -4133,7 +4248,7 @@ fn run_script(
                         t.raw_set(
                             "err",
                             lua_inner.create_string(
-                                "Write commands are not allowed from read-only scripts",
+                                "ERR Write commands are not allowed from read-only scripts.",
                             )?,
                         )?;
                         t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
@@ -4143,8 +4258,8 @@ fn run_script(
                     match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
-                            let msg = String::from_utf8_lossy(e.to_resp_payload().as_bytes())
-                                .into_owned();
+                            let payload = lua_script_command_error_payload(&e);
+                            let msg = String::from_utf8_lossy(&payload).into_owned();
                             let t = lua_inner.create_table()?;
                             t.raw_set("err", lua_inner.create_string(&msg)?)?;
                             t.raw_set(LUA_ERROR_ALREADY_RECORDED_FIELD, true)?;
@@ -4246,9 +4361,13 @@ fn run_script(
             ctx.client_mut().reply_buf.extend_from_slice(&out);
             Ok(())
         }
-        Err(e) => Err(RedisError::runtime(lua_execution_error_payload(
-            "script", e,
-        ))),
+        Err(e) => {
+            let payload = lua_execution_error_payload("script", e);
+            if !script_error_already_recorded.get() {
+                record_error_reply(&payload);
+            }
+            Err(RedisError::runtime(payload))
+        }
     }
 }
 
