@@ -55,6 +55,19 @@ DENY_TAG_PROFILES = {
         "cluster",
         "needs:cluster",
     ],
+    # Counts the single-server `attach_to_replication_stream` tests (a fake
+    # replica attaches via inline SYNC; no real replica needed). These are
+    # tagged `needs:repl` and so are hidden by the default profile, even though
+    # they exercise command-propagation correctness on one node. The real
+    # dual-server replica tests additionally carry `external:skip`, so denying
+    # that (plus debug/cluster) keeps them out while letting the propagation
+    # assertions illuminate. ~17 files / 77 `assert_replication_stream` sites.
+    "single-node-repl": [
+        "needs:debug",
+        "external:skip",
+        "cluster",
+        "needs:cluster",
+    ],
 }
 
 
