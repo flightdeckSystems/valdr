@@ -324,12 +324,23 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
     let pre_reply_len = ctx.client_ref().reply_buf.len();
     let result = (entry.handler)(ctx);
     let command_blocked = result.is_ok() && ctx.client_ref().blocked_on_keys;
+    let reply_is_error = result.is_ok()
+        && ctx
+            .client_ref()
+            .reply_buf
+            .get(pre_reply_len)
+            .is_some_and(|b| *b == b'-');
     let elapsed_micros = if command_blocked {
         None
     } else {
         Some(elapsed_us(start))
     };
-    record_command_stat(name, elapsed_micros.unwrap_or(0), false, result.is_err());
+    record_command_stat(
+        name,
+        elapsed_micros.unwrap_or(0),
+        false,
+        result.is_err() || reply_is_error,
+    );
     let reply_bytes = ctx
         .client_ref()
         .reply_buf
@@ -520,6 +531,10 @@ pub(crate) fn command_is_no_multi(name: &[u8]) -> bool {
     command_metadata(name).no_multi
 }
 
+pub(crate) fn command_acl_categories(name: &[u8]) -> Option<u64> {
+    lookup_runtime_command(name).map(|entry| entry.metadata.acl_categories)
+}
+
 fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
     COMMAND_METADATA_TABLE.get_or_init(|| {
         let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
@@ -533,6 +548,14 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
                     let mut metadata = CommandMetadata::default();
                     metadata.include(spec.flags, spec.acl_categories);
                     rows.push((spec.name.as_bytes(), metadata));
+                }
+            }
+            if spec.group == "scripting" {
+                if let Some((_, metadata)) = rows
+                    .iter_mut()
+                    .find(|(name, _)| ascii_eq_ignore_case(name, spec.name.as_bytes()))
+                {
+                    metadata.acl_categories |= acl_category::SCRIPTING;
                 }
             }
         }
@@ -776,6 +799,10 @@ fn enforce_busy_script_gate(
     allow_busy_command: bool,
 ) -> Option<Vec<u8>> {
     if !crate::eval::is_script_busy() {
+        return None;
+    }
+    if ascii_eq_ignore_case(name, b"PING") && crate::eval::busy_script_owner_is(ctx.client_ref().id)
+    {
         return None;
     }
     if allow_busy_command
@@ -1940,8 +1967,16 @@ pub static HANDLERS: &[DispatchEntry] = &[
         handler: crate::eval::eval_command,
     },
     DispatchEntry {
+        name: b"EVAL_RO",
+        handler: crate::eval::eval_ro_command,
+    },
+    DispatchEntry {
         name: b"EVALSHA",
         handler: crate::eval::evalsha_command,
+    },
+    DispatchEntry {
+        name: b"EVALSHA_RO",
+        handler: crate::eval::evalsha_ro_command,
     },
     DispatchEntry {
         name: b"SCRIPT",
