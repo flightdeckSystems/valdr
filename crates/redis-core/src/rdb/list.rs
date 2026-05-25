@@ -106,6 +106,38 @@ pub fn load_quicklist2_object(r: &mut impl Read) -> io::Result<RedisObject> {
     Ok(RedisObject::new_list_from_vec(list))
 }
 
+/// Deserialize an `RDB_TYPE_LIST_ZIPLIST` value: a single ziplist blob whose
+/// entries are the list elements (the obsolete pre-quicklist encoding).
+pub fn load_list_ziplist_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let entries = super::ziplist::decode_ziplist(&blob)?;
+    let mut list: VecDeque<RedisString> = VecDeque::with_capacity(entries.len());
+    for entry in entries {
+        list.push_back(RedisString::from_vec(entry));
+    }
+    Ok(RedisObject::new_list_from_vec(list))
+}
+
+/// Deserialize an `RDB_TYPE_LIST_QUICKLIST` (v1) value: `load_len` node count,
+/// then each node is a ziplist blob stored as an RDB string. Pre-7.0 lists.
+pub fn load_quicklist_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let (num_nodes, _) = load_len(r)?;
+    let mut list: VecDeque<RedisString> = VecDeque::new();
+    for _ in 0..num_nodes {
+        let blob = read_rdb_string(r)?;
+        let entries = super::ziplist::decode_ziplist(&blob).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("quicklist ziplist node decode failed: {}", e),
+            )
+        })?;
+        for entry in entries {
+            list.push_back(RedisString::from_vec(entry));
+        }
+    }
+    Ok(RedisObject::new_list_from_vec(list))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

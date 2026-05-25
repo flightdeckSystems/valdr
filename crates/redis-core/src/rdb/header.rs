@@ -40,6 +40,7 @@ pub const RDB_TYPE_STRING: u8 = 0;
 pub const RDB_TYPE_LIST: u8 = 1;
 pub const RDB_TYPE_SET: u8 = 2;
 pub const RDB_TYPE_HASH: u8 = 4;
+pub const RDB_TYPE_HASH_ZIPMAP: u8 = 9;
 pub const RDB_TYPE_LIST_ZIPLIST: u8 = 10;
 pub const RDB_TYPE_SET_INTSET: u8 = 11;
 pub const RDB_TYPE_LIST_QUICKLIST: u8 = 14;

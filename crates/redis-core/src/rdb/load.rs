@@ -12,7 +12,23 @@
 
 use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Whether RDB/DUMP CRC64 checksums are verified on load. Toggled by
+/// `DEBUG SET-SKIP-CHECKSUM-VALIDATION`; mirrors `server.skip_checksum_validation`
+/// in Valkey. The corrupt-dump tests set this so a payload whose body is
+/// deliberately corrupt but whose trailing checksum was not recomputed still
+/// reaches the type-level integrity checks instead of being rejected on CRC.
+static SKIP_CHECKSUM_VALIDATION: AtomicBool = AtomicBool::new(false);
+
+pub fn set_skip_checksum_validation(skip: bool) {
+    SKIP_CHECKSUM_VALIDATION.store(skip, Ordering::Relaxed);
+}
+
+pub fn skip_checksum_validation() -> bool {
+    SKIP_CHECKSUM_VALIDATION.load(Ordering::Relaxed)
+}
 
 use crate::db::RedisDb;
 use crate::object::EXPIRY_NONE;
@@ -25,7 +41,8 @@ use super::header::{
     RDB_OPCODE_EXPIRETIME, RDB_OPCODE_EXPIRETIME_MS, RDB_OPCODE_FREQ, RDB_OPCODE_FUNCTION2,
     RDB_OPCODE_IDLE, RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
     RDB_OPCODE_SLOT_IMPORT, RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
-    RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_JSON_NATIVE,
+    RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
+    RDB_TYPE_JSON_NATIVE,
     RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
     RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
     RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
@@ -36,7 +53,7 @@ use super::set::load_set_object;
 use super::stream::{load_stream_object_2, load_stream_object_3, load_stream_object_legacy};
 use super::string::load_string_object;
 use super::varint::load_len;
-use super::zset::load_zset_object;
+use super::zset::{load_zset_object, load_zset_v1_object};
 
 /// Options controlling whole-RDB load behavior.
 ///
@@ -157,7 +174,7 @@ pub fn load_into_dbs_with_options(
     );
     let payload = &body[..body.len() - 8];
 
-    if stored_crc != 0 {
+    if stored_crc != 0 && !skip_checksum_validation() {
         let computed = crc64(0, payload);
         if computed != stored_crc {
             return Err(io::Error::new(
@@ -262,6 +279,147 @@ pub fn load_into_dbs_with_options(
     ))
 }
 
+const CHECK_FOREIGN_MIN: u16 = 12;
+const CHECK_FOREIGN_MAX: u16 = 79;
+const CHECK_NATIVE_VERSION: u16 = 80;
+
+/// Result of a `valkey-check-rdb` scan: the offset-prefixed report lines (each
+/// already `[offset N] msg`) and whether the file is OK.
+pub struct RdbCheckReport {
+    pub lines: Vec<String>,
+    pub ok: bool,
+}
+
+/// Scan an RDB file the way `valkey-check-rdb` does: validate the signature and
+/// version, classify foreign (12-79) / future (>80) versions, walk every
+/// opcode/object tracking the byte offset, and report the first error or a
+/// final "RDB looks OK" line. Mirrors `valkey-check-rdb.c`.
+pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
+    let mut lines: Vec<String> = Vec::new();
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            lines.push("--- RDB ERROR DETECTED ---".to_string());
+            lines.push(format!("[offset 0] Can't open RDB file {}: {}", path.display(), e));
+            return RdbCheckReport { lines, ok: false };
+        }
+    };
+    if data.len() < 9 {
+        lines.push("--- RDB ERROR DETECTED ---".to_string());
+        lines.push("[offset 0] Unexpected EOF reading RDB file".to_string());
+        return RdbCheckReport { lines, ok: false };
+    }
+    let is_redis = &data[0..6] == b"REDIS0";
+    let is_valkey = &data[0..6] == b"VALKEY";
+    if !is_redis && !is_valkey {
+        lines.push("--- RDB ERROR DETECTED ---".to_string());
+        lines.push("[offset 0] Wrong signature trying to load DB from file".to_string());
+        return RdbCheckReport { lines, ok: false };
+    }
+    let version: u16 = std::str::from_utf8(&data[6..9])
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if version < 1
+        || (version < CHECK_FOREIGN_MIN && !is_redis)
+        || (version > CHECK_FOREIGN_MAX && !is_valkey)
+    {
+        lines.push("--- RDB ERROR DETECTED ---".to_string());
+        lines.push(format!("[offset 9] Can't handle RDB format version {}", version));
+        return RdbCheckReport { lines, ok: false };
+    }
+    let is_future = version > CHECK_NATIVE_VERSION;
+    let is_foreign = (CHECK_FOREIGN_MIN..=CHECK_FOREIGN_MAX).contains(&version);
+    let version_word = if is_future { "future" } else { "foreign" };
+    if is_future {
+        lines.push(format!("[offset 9] Future RDB version {} detected", version));
+    } else if is_foreign {
+        lines.push(format!("[offset 9] Foreign RDB version {} detected", version));
+    }
+
+    // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of the
+    // object stream. Any trailing CRC64 (present only for rdb_ver >= 5) follows
+    // EOF and is simply never read — and old versions (e.g. RDB v4) have no CRC
+    // at all, so stripping a fixed 8-byte footer would truncate real data.
+    let mut reader = Cursor::new(&data[..]);
+    reader.set_position(9);
+
+    let scan: io::Result<()> = (|| {
+        loop {
+            let opcode = read_byte(&mut reader)?;
+            match opcode {
+                RDB_OPCODE_AUX => {
+                    skip_rdb_string(&mut reader)?;
+                    skip_rdb_string(&mut reader)?;
+                }
+                RDB_OPCODE_SELECTDB | RDB_OPCODE_IDLE => {
+                    let _ = load_len(&mut reader)?;
+                }
+                RDB_OPCODE_RESIZEDB => {
+                    let _ = load_len(&mut reader)?;
+                    let _ = load_len(&mut reader)?;
+                }
+                RDB_OPCODE_EXPIRETIME_MS => {
+                    read_u64_le(&mut reader)?;
+                }
+                RDB_OPCODE_EXPIRETIME => {
+                    read_u32_le(&mut reader)?;
+                }
+                RDB_OPCODE_FREQ => {
+                    read_byte(&mut reader)?;
+                }
+                RDB_OPCODE_EOF => break,
+                RDB_OPCODE_MODULE_AUX
+                | RDB_OPCODE_FUNCTION2
+                | RDB_OPCODE_SLOT_INFO
+                | RDB_OPCODE_SLOT_IMPORT => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("unsupported RDB opcode 0x{:02x}", opcode),
+                    ));
+                }
+                type_byte => {
+                    let _key = read_rdb_string(&mut reader)?;
+                    if let Err(e) = load_value_payload(&mut reader, type_byte) {
+                        if e.to_string().contains("not yet handled") {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "Unknown object type {} in RDB file with {} version {}",
+                                    type_byte, version_word, version
+                                ),
+                            ));
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    match scan {
+        Ok(()) => {
+            let off = reader.position();
+            if is_foreign || is_future {
+                lines.push(format!(
+                    "[offset {}] \\o/ RDB looks OK, but loading requires config 'rdb-version-check relaxed'",
+                    off
+                ));
+            } else {
+                lines.push(format!("[offset {}] \\o/ RDB looks OK! \\o/", off));
+            }
+            RdbCheckReport { lines, ok: true }
+        }
+        Err(e) => {
+            let off = reader.position();
+            lines.push("--- RDB ERROR DETECTED ---".to_string());
+            lines.push(format!("[offset {}] {}", off, e));
+            RdbCheckReport { lines, ok: false }
+        }
+    }
+}
+
 /// Load the value payload for a given RDB type byte, returning a `RedisObject`.
 ///
 /// `RDB_TYPE_STRING` uses the encoding-aware `load_string_object`.
@@ -278,40 +436,22 @@ pub fn load_value_payload(
         RDB_TYPE_HASH => load_hash_object(reader),
         RDB_TYPE_LIST => load_list_object(reader),
         RDB_TYPE_SET => load_set_object(reader),
-        RDB_TYPE_HASH_ZIPLIST => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_HASH_ZIPLIST (13) not yet supported on load; set hash-max-listpack-entries 0 in C Valkey before SAVE",
-        )),
-        RDB_TYPE_HASH_LISTPACK => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_HASH_LISTPACK (16) not yet supported on load; set hash-max-listpack-entries 0 in C Valkey before SAVE",
-        )),
+        RDB_TYPE_HASH_LISTPACK => super::hash::load_hash_listpack_object(reader),
         RDB_TYPE_HASH_2 => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "RDB_TYPE_HASH_2 (22) field-level expiry not yet supported on load",
         )),
+        RDB_TYPE_HASH_ZIPLIST => super::hash::load_hash_ziplist_object(reader),
+        RDB_TYPE_HASH_ZIPMAP => super::hash::load_hash_zipmap_object(reader),
         RDB_TYPE_LIST_QUICKLIST_2 => load_quicklist2_object(reader),
-        RDB_TYPE_LIST_ZIPLIST | RDB_TYPE_LIST_QUICKLIST => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "LIST ziplist/quicklist (v1) encoding not supported on load; these are obsolete formats from Redis < 7.0",
-        )),
-        RDB_TYPE_SET_INTSET | RDB_TYPE_SET_LISTPACK => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "SET intset/listpack encoding not supported on load; set set-max-intset-entries 0 and set-max-listpack-entries 0 in C Valkey before SAVE",
-        )),
+        RDB_TYPE_LIST_ZIPLIST => super::list::load_list_ziplist_object(reader),
+        RDB_TYPE_LIST_QUICKLIST => super::list::load_quicklist_object(reader),
+        RDB_TYPE_SET_INTSET => super::set::load_set_intset_object(reader),
+        RDB_TYPE_SET_LISTPACK => super::set::load_set_listpack_object(reader),
         RDB_TYPE_ZSET_2 => load_zset_object(reader),
-        RDB_TYPE_ZSET => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_ZSET (3) text-encoded scores not supported; set zset-max-listpack-entries 0 in C Valkey 7+ and use SAVE to produce ZSET_2",
-        )),
-        RDB_TYPE_ZSET_ZIPLIST => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_ZSET_ZIPLIST (12) not supported on load; set zset-max-listpack-entries 0 before SAVE",
-        )),
-        RDB_TYPE_ZSET_LISTPACK => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RDB_TYPE_ZSET_LISTPACK (17) not supported on load; set zset-max-listpack-entries 0 before SAVE",
-        )),
+        RDB_TYPE_ZSET => load_zset_v1_object(reader),
+        RDB_TYPE_ZSET_ZIPLIST => super::zset::load_zset_ziplist_object(reader),
+        RDB_TYPE_ZSET_LISTPACK => super::zset::load_zset_listpack_object(reader),
         RDB_TYPE_STREAM_LISTPACKS_3 => load_stream_object_3(reader),
         RDB_TYPE_STREAM_LISTPACKS_2 => load_stream_object_2(reader),
         RDB_TYPE_STREAM_LISTPACKS => load_stream_object_legacy(reader),
@@ -354,7 +494,7 @@ pub fn verify_dump_payload(bytes: &[u8], relaxed_version: bool) -> io::Result<u1
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "cannot read DUMP CRC"))?,
     );
     let computed_crc = crc64(0, &bytes[..bytes.len() - 8]);
-    if stored_crc != computed_crc {
+    if !skip_checksum_validation() && stored_crc != computed_crc {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "DUMP payload CRC mismatch",

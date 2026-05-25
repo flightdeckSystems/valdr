@@ -287,6 +287,57 @@ fn parse_args(argv: Vec<String>) -> Result<CliArgs, String> {
 /// Read a Valkey-style config file and update `args` with the directives we
 /// understand. Lines are split on the first run of whitespace; blank lines and
 /// `#`-prefixed comments are skipped; unknown directives are ignored.
+///
+/// Unquote a single config-file value the way `sdssplitargs` does: when the
+/// value is wrapped in matching single or double quotes, strip them and (for
+/// double quotes) translate `\n \r \t \b \a \xHH` escapes. Bare values are
+/// returned unchanged. Without this, a quoted `appendfilename " a\nb "` would
+/// keep its literal quotes and backslash-n instead of an embedded newline.
+fn unquote_config_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2
+        || (bytes[0] != b'"' && bytes[0] != b'\'')
+        || bytes[bytes.len() - 1] != bytes[0]
+    {
+        return value.to_string();
+    }
+    let quote = bytes[0];
+    let inner = &bytes[1..bytes.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        if quote == b'"' && inner[i] == b'\\' && i + 1 < inner.len() {
+            let c = inner[i + 1];
+            match c {
+                b'x' if i + 3 < inner.len()
+                    && inner[i + 2].is_ascii_hexdigit()
+                    && inner[i + 3].is_ascii_hexdigit() =>
+                {
+                    let hi = (inner[i + 2] as char).to_digit(16).unwrap() as u8;
+                    let lo = (inner[i + 3] as char).to_digit(16).unwrap() as u8;
+                    out.push(hi * 16 + lo);
+                    i += 4;
+                    continue;
+                }
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'b' => out.push(0x08),
+                b'a' => out.push(0x07),
+                _ => out.push(c),
+            }
+            i += 2;
+        } else if quote == b'\'' && inner[i] == b'\\' && i + 1 < inner.len() && inner[i + 1] == b'\'' {
+            out.push(b'\'');
+            i += 2;
+        } else {
+            out.push(inner[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
     let contents = fs::read_to_string(path)
         .map_err(|e| format!("cannot read config file '{}': {}", path.display(), e))?;
@@ -321,12 +372,12 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             }
             "dir" => {
                 if !value.is_empty() {
-                    args.dir = value.to_string();
+                    args.dir = unquote_config_value(value);
                 }
             }
             "dbfilename" => {
                 if !value.is_empty() {
-                    args.dbfilename = value.to_string();
+                    args.dbfilename = unquote_config_value(value);
                 }
             }
             "appendonly" => {
@@ -334,12 +385,12 @@ fn apply_config_file(args: &mut CliArgs, path: &Path) -> Result<(), String> {
             }
             "appendfilename" => {
                 if !value.is_empty() {
-                    args.appendfilename = value.to_string();
+                    args.appendfilename = unquote_config_value(value);
                 }
             }
             "appenddirname" => {
                 if !value.is_empty() {
-                    args.appenddirname = value.to_string();
+                    args.appenddirname = unquote_config_value(value);
                 }
             }
             "appendfsync" => {
@@ -476,9 +527,46 @@ fn emit_startup_log() {
     let _ = io::stdout().flush();
 }
 
+/// `valkey-check-rdb [flags] <rdb-file>` entrypoint, reached when the binary is
+/// invoked under that name (argv[0]). Flags like `--stats`/`--format` are
+/// accepted and ignored; the first non-flag argument is the RDB file.
+fn run_check_rdb(args: &[String]) -> i32 {
+    let file = match args.iter().find(|a| !a.starts_with("--")) {
+        Some(f) => f,
+        None => {
+            eprintln!("Usage: valkey-check-rdb <rdb-file-name>");
+            return 1;
+        }
+    };
+    let report = redis_core::rdb::load::check_rdb_file(Path::new(file));
+    for line in &report.lines {
+        println!("{}", line);
+    }
+    if report.ok {
+        0
+    } else {
+        1
+    }
+}
+
 fn main() {
     let _clock = redis_core::monotonic::monotonic_init();
     let argv: Vec<String> = std::env::args().collect();
+
+    let prog = argv
+        .first()
+        .map(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    if prog.contains("check-rdb") {
+        std::process::exit(run_check_rdb(&argv[1..]));
+    }
+
     let args = match parse_args(argv) {
         Ok(a) => a,
         Err(e) => {

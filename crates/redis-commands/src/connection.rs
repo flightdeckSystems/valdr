@@ -1505,6 +1505,16 @@ pub fn debug_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     if ascii_eq_ignore_case(sub.as_bytes(), b"SET-ACTIVE-EXPIRE") {
         return ctx.reply_simple_string(b"OK");
     }
+    if ascii_eq_ignore_case(sub.as_bytes(), b"SET-SKIP-CHECKSUM-VALIDATION") {
+        if ctx.arg_count() != 3 {
+            return Err(RedisError::wrong_number_of_args(
+                b"debug set-skip-checksum-validation",
+            ));
+        }
+        let flag = ctx.arg_owned(2usize)?;
+        redis_core::rdb::load::set_skip_checksum_validation(flag.as_bytes() != b"0");
+        return ctx.reply_simple_string(b"OK");
+    }
     if ascii_eq_ignore_case(sub.as_bytes(), b"DIGEST-VALUE") {
         if ctx.arg_count() < 3 {
             return Err(RedisError::wrong_number_of_args(b"debug digest-value"));

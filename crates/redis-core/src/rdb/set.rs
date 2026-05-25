@@ -28,6 +28,7 @@ use redis_types::RedisString;
 use crate::object::RedisObject;
 
 use super::header::{read_rdb_string, write_rdb_string};
+use super::listpack::decode_listpack;
 use super::varint::{load_len, write_len};
 
 /// Serialize an `RDB_TYPE_SET` value payload.
@@ -57,6 +58,82 @@ pub fn load_set_object(r: &mut impl Read) -> io::Result<RedisObject> {
     for _ in 0..n {
         let member_bytes = read_rdb_string(r)?;
         members.insert(RedisString::from_vec(member_bytes));
+    }
+    Ok(RedisObject::new_set_from_set(members))
+}
+
+/// Deserialize an `RDB_TYPE_SET_LISTPACK` value: a single listpack blob whose
+/// elements are the set members.
+pub fn load_set_listpack_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let elements = decode_listpack(&blob)?;
+    let mut members: HashSet<RedisString> = HashSet::with_capacity(elements.len());
+    for member in elements {
+        if !members.insert(RedisString::from_vec(member)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate member in set listpack",
+            ));
+        }
+    }
+    Ok(RedisObject::new_set_from_set(members))
+}
+
+/// Deserialize an `RDB_TYPE_SET_INTSET` value: an intset blob stored as an RDB
+/// string. Layout: `u32 LE encoding (2|4|8 bytes per int)`, `u32 LE length`,
+/// then `length` little-endian signed integers. Members are stored as their
+/// decimal string form, matching how Valkey materialises an intset on load.
+pub fn load_set_intset_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    if blob.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "intset blob too short for header",
+        ));
+    }
+    let encoding = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    let length = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
+    if encoding != 2 && encoding != 4 && encoding != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid intset encoding width {}", encoding),
+        ));
+    }
+    let body = &blob[8..];
+    if body.len() != length.saturating_mul(encoding) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "intset length does not match blob size",
+        ));
+    }
+    let mut members: HashSet<RedisString> = HashSet::with_capacity(length);
+    let mut prev: Option<i64> = None;
+    for i in 0..length {
+        let off = i * encoding;
+        let value: i64 = match encoding {
+            2 => i16::from_le_bytes([body[off], body[off + 1]]) as i64,
+            4 => i32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]) as i64,
+            _ => i64::from_le_bytes([
+                body[off],
+                body[off + 1],
+                body[off + 2],
+                body[off + 3],
+                body[off + 4],
+                body[off + 5],
+                body[off + 6],
+                body[off + 7],
+            ]),
+        };
+        if let Some(p) = prev {
+            if value <= p {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "intset entries not strictly ascending (corrupt or unsorted)",
+                ));
+            }
+        }
+        prev = Some(value);
+        members.insert(RedisString::from_vec(value.to_string().into_bytes()));
     }
     Ok(RedisObject::new_set_from_set(members))
 }

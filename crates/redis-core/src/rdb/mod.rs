@@ -22,6 +22,7 @@ pub mod set;
 pub mod stream;
 pub mod string;
 pub mod varint;
+pub mod ziplist;
 pub mod zset;
 
 pub use load::{

@@ -1009,9 +1009,49 @@ fn encode_aof_manifest(manifest: &AofManifest) -> Vec<u8> {
     out
 }
 
+/// Whether a manifest filename must be written in quoted/escaped (`sdscatrepr`)
+/// form. Mirrors `sdsneedsrepr`: any whitespace, quote, backslash, or
+/// non-printable byte (and the empty string) forces quoting so the round-trip
+/// survives `split_manifest_args`.
+fn manifest_name_needs_repr(name: &[u8]) -> bool {
+    name.is_empty()
+        || name.iter().any(|&b| {
+            b == b'\\'
+                || b == b'"'
+                || b == b'\''
+                || b.is_ascii_whitespace()
+                || !(0x20..=0x7e).contains(&b)
+        })
+}
+
+/// Append a manifest filename, quoting and escaping it like `sdscatrepr` when
+/// it contains characters that would otherwise break the whitespace-delimited
+/// manifest line (spaces, quotes, backslashes, control bytes).
+fn append_manifest_name(out: &mut Vec<u8>, name: &[u8]) {
+    if !manifest_name_needs_repr(name) {
+        out.extend_from_slice(name);
+        return;
+    }
+    out.push(b'"');
+    for &b in name {
+        match b {
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'"' => out.extend_from_slice(b"\\\""),
+            0x0a => out.extend_from_slice(b"\\n"),
+            0x0d => out.extend_from_slice(b"\\r"),
+            0x09 => out.extend_from_slice(b"\\t"),
+            0x07 => out.extend_from_slice(b"\\a"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x20..=0x7e => out.push(b),
+            other => out.extend_from_slice(format!("\\x{:02x}", other).as_bytes()),
+        }
+    }
+    out.push(b'"');
+}
+
 fn encode_manifest_line(out: &mut Vec<u8>, file: &AofManifestFile) {
     out.extend_from_slice(b"file ");
-    out.extend_from_slice(&file.name);
+    append_manifest_name(out, &file.name);
     out.extend_from_slice(b" seq ");
     out.extend_from_slice(file.seq.to_string().as_bytes());
     out.extend_from_slice(b" type ");
@@ -1220,8 +1260,49 @@ fn split_manifest_args(line: &[u8]) -> io::Result<Vec<Vec<u8>>> {
         let mut arg = Vec::new();
         if let Some(q) = quote {
             while i < line.len() && line[i] != q {
-                if line[i] == b'\\' && i + 1 < line.len() {
-                    i += 1;
+                if q == b'"' && line[i] == b'\\' && i + 1 < line.len() {
+                    let c = line[i + 1];
+                    match c {
+                        b'x' if i + 3 < line.len()
+                            && line[i + 2].is_ascii_hexdigit()
+                            && line[i + 3].is_ascii_hexdigit() =>
+                        {
+                            let hi = (line[i + 2] as char).to_digit(16).unwrap() as u8;
+                            let lo = (line[i + 3] as char).to_digit(16).unwrap() as u8;
+                            arg.push(hi * 16 + lo);
+                            i += 4;
+                        }
+                        b'n' => {
+                            arg.push(b'\n');
+                            i += 2;
+                        }
+                        b'r' => {
+                            arg.push(b'\r');
+                            i += 2;
+                        }
+                        b't' => {
+                            arg.push(b'\t');
+                            i += 2;
+                        }
+                        b'b' => {
+                            arg.push(0x08);
+                            i += 2;
+                        }
+                        b'a' => {
+                            arg.push(0x07);
+                            i += 2;
+                        }
+                        _ => {
+                            arg.push(c);
+                            i += 2;
+                        }
+                    }
+                    continue;
+                }
+                if q == b'\'' && line[i] == b'\\' && i + 1 < line.len() && line[i + 1] == b'\'' {
+                    arg.push(b'\'');
+                    i += 2;
+                    continue;
                 }
                 arg.push(line[i]);
                 i += 1;
@@ -1262,8 +1343,13 @@ fn trim_manifest_line(line: &[u8]) -> &[u8] {
     &line[start..end]
 }
 
+/// Whether `path` is a bare filename with no directory component. Upstream
+/// `pathIsBaseName` also rejects `\` for Windows, but on our POSIX targets a
+/// backslash is an ordinary filename byte (not a path separator), and AOF
+/// filenames legitimately containing one must round-trip — so only `/` is
+/// treated as a separator here.
 fn path_is_base_name(path: &[u8]) -> bool {
-    !path.contains(&b'/') && !path.contains(&b'\\')
+    !path.contains(&b'/')
 }
 
 fn parse_i64_ascii(bytes: &[u8]) -> Option<i64> {

@@ -32,6 +32,7 @@ use redis_types::RedisString;
 use crate::object::RedisObject;
 
 use super::header::read_rdb_string;
+use super::listpack::decode_listpack;
 use super::varint::{load_len, write_len};
 
 /// Serialize an `RDB_TYPE_HASH` value payload.
@@ -66,6 +67,148 @@ pub fn load_hash_object(r: &mut impl Read) -> io::Result<RedisObject> {
             RedisString::from_vec(field_bytes),
             RedisString::from_vec(value_bytes),
         );
+    }
+    Ok(RedisObject::new_hash_from_map(hash))
+}
+
+/// Deserialize an `RDB_TYPE_HASH_LISTPACK` value: a single listpack blob whose
+/// elements alternate field, value. Reads from `r` after the type byte.
+pub fn load_hash_listpack_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let elements = decode_listpack(&blob)?;
+    if elements.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "hash listpack has an odd number of elements",
+        ));
+    }
+    let mut hash: HashMap<RedisString, RedisString> = HashMap::with_capacity(elements.len() / 2);
+    let mut it = elements.into_iter();
+    while let (Some(field), Some(value)) = (it.next(), it.next()) {
+        if hash
+            .insert(RedisString::from_vec(field), RedisString::from_vec(value))
+            .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate field in hash listpack",
+            ));
+        }
+    }
+    Ok(RedisObject::new_hash_from_map(hash))
+}
+
+/// Deserialize an `RDB_TYPE_HASH_ZIPLIST` value: a single ziplist blob whose
+/// entries alternate field, value (the pre-listpack encoding).
+pub fn load_hash_ziplist_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let elements = super::ziplist::decode_ziplist(&blob)?;
+    if elements.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "hash ziplist has an odd number of elements",
+        ));
+    }
+    let mut hash: HashMap<RedisString, RedisString> = HashMap::with_capacity(elements.len() / 2);
+    let mut it = elements.into_iter();
+    while let (Some(field), Some(value)) = (it.next(), it.next()) {
+        if hash
+            .insert(RedisString::from_vec(field), RedisString::from_vec(value))
+            .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate field in hash ziplist",
+            ));
+        }
+    }
+    Ok(RedisObject::new_hash_from_map(hash))
+}
+
+/// Decode a zipmap length field: 1 byte if `< 254`, else `254` + 4 little-endian
+/// bytes. `0xFF` (the end marker) must be handled by the caller before this.
+/// Returns `(length, bytes_consumed)`.
+fn zipmap_len(blob: &[u8], p: usize) -> io::Result<(usize, usize)> {
+    let b = *blob
+        .get(p)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap truncated length"))?;
+    if b < 254 {
+        Ok((b as usize, 1))
+    } else if b == 254 {
+        if p + 5 > blob.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zipmap truncated 32-bit length",
+            ));
+        }
+        Ok((
+            u32::from_le_bytes(blob[p + 1..p + 5].try_into().unwrap()) as usize,
+            5,
+        ))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zipmap end marker found where a length was expected",
+        ))
+    }
+}
+
+/// Deserialize an `RDB_TYPE_HASH_ZIPMAP` value: the oldest small-hash encoding
+/// (Redis 2.6). Layout after a 1-byte entry-count hint: repeated
+/// `<klen><key><vlen><free><value>` with a `0xFF` terminator; `free` is the
+/// number of trailing padding bytes after the value.
+pub fn load_hash_zipmap_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    if blob.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty zipmap blob",
+        ));
+    }
+    let mut hash: HashMap<RedisString, RedisString> = HashMap::new();
+    let mut p = 1;
+    loop {
+        let marker = *blob.get(p).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "zipmap overran without terminator")
+        })?;
+        if marker == 0xFF {
+            break;
+        }
+        let (klen, kadv) = zipmap_len(&blob, p)?;
+        p += kadv;
+        let kend = p
+            .checked_add(klen)
+            .filter(|&e| e <= blob.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap key overran"))?;
+        let key = blob[p..kend].to_vec();
+        p = kend;
+
+        let (vlen, vadv) = zipmap_len(&blob, p)?;
+        p += vadv;
+        let free = *blob
+            .get(p)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap missing free byte"))?
+            as usize;
+        p += 1;
+        let vend = p
+            .checked_add(vlen)
+            .filter(|&e| e <= blob.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap value overran"))?;
+        let value = blob[p..vend].to_vec();
+        p = vend
+            .checked_add(free)
+            .filter(|&e| e <= blob.len())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap free padding overran"))?;
+
+        if hash
+            .insert(RedisString::from_vec(key), RedisString::from_vec(value))
+            .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate field in zipmap",
+            ));
+        }
     }
     Ok(RedisObject::new_hash_from_map(hash))
 }

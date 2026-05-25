@@ -29,6 +29,7 @@ use std::io::{self, Read, Write};
 use crate::object::{InlineZSet, RedisObject};
 
 use super::header::read_rdb_string;
+use super::listpack::decode_listpack;
 use super::varint::{load_len, write_len};
 
 /// Serialize an `RDB_TYPE_ZSET_2` value payload.
@@ -70,6 +71,136 @@ pub fn load_zset_object(r: &mut impl Read) -> io::Result<RedisObject> {
         }
         let member = redis_types::RedisString::from_vec(member_bytes);
         zset.upsert(member, score);
+    }
+    Ok(RedisObject::new_zset_from_inline(zset))
+}
+
+/// Deserialize an `RDB_TYPE_ZSET_LISTPACK` value: a single listpack blob whose
+/// elements alternate member, score. Scores are stored as their string form
+/// (decimal, or `inf`/`-inf`) inside the listpack, unlike `ZSET_2`'s raw f64.
+pub fn load_zset_listpack_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let elements = decode_listpack(&blob)?;
+    if elements.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zset listpack has an odd number of elements",
+        ));
+    }
+    let mut zset = InlineZSet::new();
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut it = elements.into_iter();
+    while let (Some(member), Some(score_bytes)) = (it.next(), it.next()) {
+        if !seen.insert(member.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate member in zset listpack",
+            ));
+        }
+        let score_str = std::str::from_utf8(&score_bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "non-UTF-8 score in zset listpack",
+            )
+        })?;
+        let score: f64 = score_str.trim().parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("non-numeric score in zset listpack: {score_str:?}"),
+            )
+        })?;
+        if score.is_nan() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NaN score in zset listpack — rejected at load boundary",
+            ));
+        }
+        zset.upsert(redis_types::RedisString::from_vec(member), score);
+    }
+    Ok(RedisObject::new_zset_from_inline(zset))
+}
+
+/// Read an `RDB_TYPE_ZSET` (v1) double score: a 1-byte length then that many
+/// ASCII bytes parsed as f64, with the sentinels 255=-inf, 254=+inf, 253=NaN.
+/// Mirrors `rdbLoadDoubleValue` in rdb.c.
+fn load_double_value(r: &mut impl Read) -> io::Result<f64> {
+    let mut tag = [0u8; 1];
+    r.read_exact(&mut tag)?;
+    match tag[0] {
+        255 => Ok(f64::NEG_INFINITY),
+        254 => Ok(f64::INFINITY),
+        253 => Ok(f64::NAN),
+        len => {
+            let mut buf = vec![0u8; len as usize];
+            r.read_exact(&mut buf)?;
+            let s = std::str::from_utf8(&buf).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 double in ZSET")
+            })?;
+            s.trim().parse::<f64>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("non-numeric double in ZSET: {s:?}"),
+                )
+            })
+        }
+    }
+}
+
+/// Deserialize an `RDB_TYPE_ZSET` (v1) value: member then a text-encoded double
+/// score, repeated. The original (pre-ZSET_2) sorted-set encoding.
+pub fn load_zset_v1_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let (n, _) = load_len(r)?;
+    let mut zset = InlineZSet::new();
+    for _ in 0..n {
+        let member_bytes = read_rdb_string(r)?;
+        let score = load_double_value(r)?;
+        if score.is_nan() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NaN score in RDB_TYPE_ZSET payload — rejected at load boundary",
+            ));
+        }
+        zset.upsert(redis_types::RedisString::from_vec(member_bytes), score);
+    }
+    Ok(RedisObject::new_zset_from_inline(zset))
+}
+
+/// Deserialize an `RDB_TYPE_ZSET_ZIPLIST` value: a ziplist whose entries
+/// alternate member, score (score as a string). The pre-listpack encoding.
+pub fn load_zset_ziplist_object(r: &mut impl Read) -> io::Result<RedisObject> {
+    let blob = read_rdb_string(r)?;
+    let elements = super::ziplist::decode_ziplist(&blob)?;
+    if elements.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zset ziplist has an odd number of elements",
+        ));
+    }
+    let mut zset = InlineZSet::new();
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut it = elements.into_iter();
+    while let (Some(member), Some(score_bytes)) = (it.next(), it.next()) {
+        if !seen.insert(member.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "duplicate member in zset ziplist",
+            ));
+        }
+        let score_str = std::str::from_utf8(&score_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 score in zset ziplist"))?;
+        let score: f64 = score_str.trim().parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("non-numeric score in zset ziplist: {score_str:?}"),
+            )
+        })?;
+        if score.is_nan() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NaN score in zset ziplist — rejected at load boundary",
+            ));
+        }
+        zset.upsert(redis_types::RedisString::from_vec(member), score);
     }
     Ok(RedisObject::new_zset_from_inline(zset))
 }
