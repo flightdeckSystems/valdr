@@ -260,6 +260,48 @@ Likely owner: scripting throughput plus expire-cycle latency reporting. This is
 not a good Agent-1 quick pull unless we decide to carve the expensive
 expire-latency test behind a separate profile.
 
+## Maxmemory Scout
+
+Patch: expose `evicted_clients:0` in `INFO stats`. This is a compatibility
+field needed by `unit/maxmemory`; it does not implement client eviction.
+
+Verification:
+
+```bash
+cargo build --bin redis-server
+python3 harness/oracle/tcl-survey.py \
+  --runner-id tcl-maxmemory-evicted-clients-info-v3 \
+  --profile single-node-external \
+  --skip-build \
+  --timeout-s 120 \
+  --baseport 32111 \
+  --portcount 4000 \
+  --files unit/maxmemory
+```
+
+Evidence:
+
+`harness/oracle/results/tcl-survey/20260525T044638Z/unit__maxmemory.json`
+
+Result:
+
+```text
+unit/maxmemory: still timeout/no-summary
+```
+
+The first Tcl-expression crash is gone, but the file now reaches the
+output-buffer/client-eviction section and fails there:
+
+```text
+eviction due to output buffers of many MGET clients
+eviction due to input buffer of a dead client
+eviction due to output buffers of pubsub
+```
+
+Interpretation: `unit/maxmemory` is not a quick +13 unlock. It probably needs
+the output-buffer accounting / client-eviction subsystem before it becomes
+counted or green.
+
 ## Next Overnight Targets
 
 1. Survey-profile change: add a `single-node-external` TCL profile that allows

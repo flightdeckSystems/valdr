@@ -92,9 +92,7 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let acl_denied_auth = metrics.acl_access_denied_auth.load(Ordering::Relaxed);
     let acl_denied_cmd = metrics.acl_access_denied_cmd.load(Ordering::Relaxed);
     let acl_denied_key = metrics.acl_access_denied_key.load(Ordering::Relaxed);
-    let acl_denied_channel = metrics
-        .acl_access_denied_channel
-        .load(Ordering::Relaxed);
+    let acl_denied_channel = metrics.acl_access_denied_channel.load(Ordering::Relaxed);
     let expired_keys = metrics.expired_keys.load(Ordering::Relaxed);
     let evicted_keys = metrics.evicted_keys.load(Ordering::Relaxed);
     let active_time_us = metrics.active_time_main_thread_us.load(Ordering::Relaxed);
@@ -273,16 +271,13 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             crate::hash::expired_fields_count()
         );
         let _ = writeln!(buf, "evicted_keys:{}\r", evicted_keys);
+        let _ = writeln!(buf, "evicted_clients:0\r");
         let _ = writeln!(buf, "keyspace_hits:{}\r", hits);
         let _ = writeln!(buf, "keyspace_misses:{}\r", misses);
         let _ = writeln!(buf, "acl_access_denied_auth:{}\r", acl_denied_auth);
         let _ = writeln!(buf, "acl_access_denied_cmd:{}\r", acl_denied_cmd);
         let _ = writeln!(buf, "acl_access_denied_key:{}\r", acl_denied_key);
-        let _ = writeln!(
-            buf,
-            "acl_access_denied_channel:{}\r",
-            acl_denied_channel
-        );
+        let _ = writeln!(buf, "acl_access_denied_channel:{}\r", acl_denied_channel);
         let _ = writeln!(buf, "migrate_cached_sockets:0\r");
         let _ = writeln!(buf, "pubsub_channels:0\r");
         let _ = writeln!(buf, "pubsub_patterns:0\r");
