@@ -766,9 +766,7 @@ pub fn wake_blocked_xreadgroup_for_key(
             Ok(Some(stream)) => {
                 if !stream.groups.contains_key(&group) {
                     encode_nogroup_error(key.as_bytes(), group.as_bytes())
-                } else if new_entry.id
-                    <= stream.groups[&group].last_delivered_id
-                {
+                } else if new_entry.id <= stream.groups[&group].last_delivered_id {
                     to_reblock.push(waiter);
                     continue;
                 } else {

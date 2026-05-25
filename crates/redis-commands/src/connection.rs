@@ -476,6 +476,8 @@ fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
         ("repl-disable-tcp-nodelay", "no"),
         ("slave-read-only", "yes"),
         ("replica-read-only", "yes"),
+        ("slave-serve-stale-data", "yes"),
+        ("replica-serve-stale-data", "yes"),
         ("repl-diskless-sync", "yes"),
     ]
 }
@@ -563,6 +565,11 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
     } else {
         "no".to_string()
     };
+    let live_replica_serve_stale_data = if cfg.replica_serve_stale_data() {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    };
     let live_repl_diskless = if cfg.repl_diskless_sync() {
         "yes".to_string()
     } else {
@@ -629,6 +636,9 @@ fn config_pairs_with_dynamic(cfg: &Arc<LiveConfig>) -> Vec<(String, String)> {
             "repl-timeout" => Some(live_repl_timeout.clone()),
             "repl-disable-tcp-nodelay" => Some(live_repl_disable_nodelay.clone()),
             "slave-read-only" | "replica-read-only" => Some(live_slave_read_only.clone()),
+            "slave-serve-stale-data" | "replica-serve-stale-data" => {
+                Some(live_replica_serve_stale_data.clone())
+            }
             "repl-diskless-sync" => Some(live_repl_diskless.clone()),
             "rdb-version-check" => Some(live_rdb_version_check.clone()),
             "client-output-buffer-limit" => Some(live_client_obuf_limit.clone()),
@@ -944,6 +954,9 @@ fn apply_config_set(cfg: &Arc<LiveConfig>, key: &[u8], value: &[u8]) {
         }
         b"slave-read-only" | b"replica-read-only" => {
             cfg.set_slave_read_only(value == b"yes");
+        }
+        b"slave-serve-stale-data" | b"replica-serve-stale-data" => {
+            cfg.set_replica_serve_stale_data(value == b"yes");
         }
         b"repl-diskless-sync" => {
             cfg.set_repl_diskless_sync(value == b"yes");

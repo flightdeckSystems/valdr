@@ -113,7 +113,10 @@ pub fn decode_ziplist(blob: &[u8]) -> io::Result<Vec<Vec<u8>>> {
                     if p + 3 > blob.len() {
                         return Err(corrupt("ziplist truncated int16"));
                     }
-                    (i16::from_le_bytes(blob[p + 1..p + 3].try_into().unwrap()) as i64, 3)
+                    (
+                        i16::from_le_bytes(blob[p + 1..p + 3].try_into().unwrap()) as i64,
+                        3,
+                    )
                 }
                 ZIP_INT_24B => {
                     if p + 4 > blob.len() {
@@ -129,13 +132,19 @@ pub fn decode_ziplist(blob: &[u8]) -> io::Result<Vec<Vec<u8>>> {
                     if p + 5 > blob.len() {
                         return Err(corrupt("ziplist truncated int32"));
                     }
-                    (i32::from_le_bytes(blob[p + 1..p + 5].try_into().unwrap()) as i64, 5)
+                    (
+                        i32::from_le_bytes(blob[p + 1..p + 5].try_into().unwrap()) as i64,
+                        5,
+                    )
                 }
                 ZIP_INT_64B => {
                     if p + 9 > blob.len() {
                         return Err(corrupt("ziplist truncated int64"));
                     }
-                    (i64::from_le_bytes(blob[p + 1..p + 9].try_into().unwrap()), 9)
+                    (
+                        i64::from_le_bytes(blob[p + 1..p + 9].try_into().unwrap()),
+                        9,
+                    )
                 }
                 _ => {
                     if (0xf1..=0xfd).contains(&enc) {
@@ -181,7 +190,10 @@ mod tests {
     fn decodes_string_entries() {
         let zl = build_ziplist(&[b"a", b"1", b"bb", b"22"]);
         let decoded = decode_ziplist(&zl).unwrap();
-        assert_eq!(decoded, vec![b"a".to_vec(), b"1".to_vec(), b"bb".to_vec(), b"22".to_vec()]);
+        assert_eq!(
+            decoded,
+            vec![b"a".to_vec(), b"1".to_vec(), b"bb".to_vec(), b"22".to_vec()]
+        );
     }
 
     #[test]

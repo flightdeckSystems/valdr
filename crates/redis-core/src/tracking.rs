@@ -576,7 +576,10 @@ fn runtime_deliver_messages(
             if current.resp_proto == 3 {
                 write_or_defer_tracking_push(current, tracking_resp3_push(&delivery.keys));
             } else if current.in_pubsub_mode() {
-                write_or_defer_tracking_push(current, tracking_resp2_pubsub_message(&delivery.keys));
+                write_or_defer_tracking_push(
+                    current,
+                    tracking_resp2_pubsub_message(&delivery.keys),
+                );
             }
             continue;
         }

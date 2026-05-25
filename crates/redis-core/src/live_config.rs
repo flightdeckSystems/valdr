@@ -179,6 +179,9 @@ pub struct LiveConfig {
     /// Replicas may serve read commands (`slave-read-only`/`replica-read-only`).
     /// Default `true`; matches real Redis.
     pub slave_read_only: AtomicBool,
+    /// Replicas may serve commands while the master link is down
+    /// (`replica-serve-stale-data`/`slave-serve-stale-data`). Default `true`.
+    pub replica_serve_stale_data: AtomicBool,
     /// Whether the primary is in import mode (`import-mode` config key).
     pub import_mode: AtomicBool,
     /// Optional availability-zone string surfaced by HELLO.
@@ -330,6 +333,7 @@ impl Default for LiveConfig {
             repl_timeout: AtomicU64::new(DEFAULT_REPL_TIMEOUT),
             repl_disable_tcp_nodelay: AtomicBool::new(false),
             slave_read_only: AtomicBool::new(true),
+            replica_serve_stale_data: AtomicBool::new(true),
             import_mode: AtomicBool::new(false),
             availability_zone: Mutex::new(String::new()),
             repl_diskless_sync: AtomicBool::new(true),
@@ -790,6 +794,14 @@ impl LiveConfig {
     /// Update the slave-read-only flag.
     pub fn set_slave_read_only(&self, v: bool) {
         self.slave_read_only.store(v, Ordering::Relaxed);
+    }
+
+    pub fn replica_serve_stale_data(&self) -> bool {
+        self.replica_serve_stale_data.load(Ordering::Relaxed)
+    }
+
+    pub fn set_replica_serve_stale_data(&self, v: bool) {
+        self.replica_serve_stale_data.store(v, Ordering::Relaxed);
     }
 
     pub fn import_mode(&self) -> bool {

@@ -186,8 +186,12 @@ pub fn load_zset_ziplist_object(r: &mut impl Read) -> io::Result<RedisObject> {
                 "duplicate member in zset ziplist",
             ));
         }
-        let score_str = std::str::from_utf8(&score_bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 score in zset ziplist"))?;
+        let score_str = std::str::from_utf8(&score_bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "non-UTF-8 score in zset ziplist",
+            )
+        })?;
         let score: f64 = score_str.trim().parse().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

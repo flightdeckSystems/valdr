@@ -337,7 +337,11 @@ fn unquote_config_value(value: &str) -> String {
                 _ => out.push(c),
             }
             i += 2;
-        } else if quote == b'\'' && inner[i] == b'\\' && i + 1 < inner.len() && inner[i + 1] == b'\'' {
+        } else if quote == b'\''
+            && inner[i] == b'\\'
+            && i + 1 < inner.len()
+            && inner[i + 1] == b'\''
+        {
             out.push(b'\'');
             i += 2;
         } else {

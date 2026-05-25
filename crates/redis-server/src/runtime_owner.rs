@@ -419,21 +419,20 @@ impl ClientSlot {
     fn multi_memory_usage(&self) -> usize {
         const WATCH_OVERHEAD: usize = 64;
 
-        self.queued_argv_memory_usage()
-            .saturating_add(
-                self.client
-                    .mstate
-                    .as_ref()
-                    .map(|m| {
-                        m.argv_len_sums
-                            + m.watched_keys.len() * WATCH_OVERHEAD
-                            + m.watched_keys
-                                .iter()
-                                .map(|w| w.key.string_bytes().len())
-                                .sum::<usize>()
-                    })
-                    .unwrap_or(0),
-            )
+        self.queued_argv_memory_usage().saturating_add(
+            self.client
+                .mstate
+                .as_ref()
+                .map(|m| {
+                    m.argv_len_sums
+                        + m.watched_keys.len() * WATCH_OVERHEAD
+                        + m.watched_keys
+                            .iter()
+                            .map(|w| w.key.string_bytes().len())
+                            .sum::<usize>()
+                })
+                .unwrap_or(0),
+        )
     }
 
     fn subscription_memory_usage(&self) -> usize {
@@ -465,7 +464,11 @@ impl ClientSlot {
     }
 
     fn name_memory_usage(&self) -> usize {
-        self.client.name.as_ref().map(|s| s.as_bytes().len()).unwrap_or(0)
+        self.client
+            .name
+            .as_ref()
+            .map(|s| s.as_bytes().len())
+            .unwrap_or(0)
     }
 
     fn watched_key_memory_usage(&self) -> usize {

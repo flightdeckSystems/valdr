@@ -418,7 +418,9 @@ fn read_target_reply(stream: &mut TcpStream) -> RedisResult<Result<Vec<u8>, Vec<
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                return Err(RedisError::runtime(b"IOERR error or timeout reading from target"));
+                return Err(RedisError::runtime(
+                    b"IOERR error or timeout reading from target",
+                ));
             }
             Err(e) => {
                 return Err(RedisError::runtime(
@@ -448,11 +450,9 @@ fn send_target_command(stream: &mut TcpStream, args: &[&[u8]]) -> RedisResult<Ve
 fn connect_migrate_target(opts: &MigrateOptions) -> RedisResult<TcpStream> {
     let host = std::str::from_utf8(&opts.host)
         .map_err(|_| RedisError::runtime(b"ERR invalid host name"))?;
-    let addrs = (host, opts.port)
-        .to_socket_addrs()
-        .map_err(|e| {
-            RedisError::runtime(format!("IOERR target lookup failed: {}", e).into_bytes())
-        })?;
+    let addrs = (host, opts.port).to_socket_addrs().map_err(|e| {
+        RedisError::runtime(format!("IOERR target lookup failed: {}", e).into_bytes())
+    })?;
     let timeout = Duration::from_millis(opts.timeout_ms.max(1));
     let mut last_error = None;
     for addr in addrs {
@@ -505,7 +505,10 @@ pub fn migrate_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     mark_migrate_socket_cached();
 
     if let Some((username, password)) = &opts.auth2 {
-        send_target_command(&mut stream, &[b"AUTH", username.as_slice(), password.as_slice()])?;
+        send_target_command(
+            &mut stream,
+            &[b"AUTH", username.as_slice(), password.as_slice()],
+        )?;
     } else if let Some(password) = &opts.auth {
         send_target_command(&mut stream, &[b"AUTH", password.as_slice()])?;
     }

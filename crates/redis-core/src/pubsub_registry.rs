@@ -136,11 +136,7 @@ impl PubSubRegistry {
     }
 
     /// Add `client_id` to the subscriber set for shard `channel`.
-    pub fn subscribe_shard_channel(
-        &mut self,
-        channel: RedisString,
-        client_id: ClientId,
-    ) -> bool {
+    pub fn subscribe_shard_channel(&mut self, channel: RedisString, client_id: ClientId) -> bool {
         self.shard_channels
             .entry(channel)
             .or_default()

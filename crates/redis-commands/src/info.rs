@@ -226,6 +226,11 @@ pub fn info_command(ctx: &mut CommandContext) -> RedisResult<()> {
             format_human_bytes(used_memory)
         );
         let _ = writeln!(buf, "used_memory_estimated:true\r");
+        let _ = writeln!(
+            buf,
+            "used_memory_vm_functions:{}\r",
+            crate::eval::function_vm_memory_used_estimate()
+        );
         let _ = writeln!(buf, "total_system_memory:0\r");
         let _ = writeln!(buf, "mem_not_counted_for_evict:0\r");
         let (mem_clients_normal, mem_clients_slaves) = client_memory_info_totals();

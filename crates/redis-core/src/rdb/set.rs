@@ -112,7 +112,9 @@ pub fn load_set_intset_object(r: &mut impl Read) -> io::Result<RedisObject> {
         let off = i * encoding;
         let value: i64 = match encoding {
             2 => i16::from_le_bytes([body[off], body[off + 1]]) as i64,
-            4 => i32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]) as i64,
+            4 => {
+                i32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]) as i64
+            }
             _ => i64::from_le_bytes([
                 body[off],
                 body[off + 1],

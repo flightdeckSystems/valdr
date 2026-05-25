@@ -42,11 +42,11 @@ use super::header::{
     RDB_OPCODE_IDLE, RDB_OPCODE_MODULE_AUX, RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB,
     RDB_OPCODE_SLOT_IMPORT, RDB_OPCODE_SLOT_INFO, RDB_TYPE_BLOOM_NATIVE, RDB_TYPE_HASH,
     RDB_TYPE_HASH_2, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_ZIPLIST, RDB_TYPE_HASH_ZIPMAP,
-    RDB_TYPE_JSON_NATIVE,
-    RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_LIST_ZIPLIST,
-    RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS,
-    RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET,
-    RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST, RDB_VERSION,
+    RDB_TYPE_JSON_NATIVE, RDB_TYPE_LIST, RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2,
+    RDB_TYPE_LIST_ZIPLIST, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+    RDB_TYPE_STREAM_LISTPACKS, RDB_TYPE_STREAM_LISTPACKS_2, RDB_TYPE_STREAM_LISTPACKS_3,
+    RDB_TYPE_STRING, RDB_TYPE_ZSET, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, RDB_TYPE_ZSET_ZIPLIST,
+    RDB_VERSION,
 };
 use super::list::{load_list_object, load_quicklist2_object};
 use super::set::load_set_object;
@@ -300,7 +300,11 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
         Ok(d) => d,
         Err(e) => {
             lines.push("--- RDB ERROR DETECTED ---".to_string());
-            lines.push(format!("[offset 0] Can't open RDB file {}: {}", path.display(), e));
+            lines.push(format!(
+                "[offset 0] Can't open RDB file {}: {}",
+                path.display(),
+                e
+            ));
             return RdbCheckReport { lines, ok: false };
         }
     };
@@ -325,16 +329,25 @@ pub fn check_rdb_file(path: &Path) -> RdbCheckReport {
         || (version > CHECK_FOREIGN_MAX && !is_valkey)
     {
         lines.push("--- RDB ERROR DETECTED ---".to_string());
-        lines.push(format!("[offset 9] Can't handle RDB format version {}", version));
+        lines.push(format!(
+            "[offset 9] Can't handle RDB format version {}",
+            version
+        ));
         return RdbCheckReport { lines, ok: false };
     }
     let is_future = version > CHECK_NATIVE_VERSION;
     let is_foreign = (CHECK_FOREIGN_MIN..=CHECK_FOREIGN_MAX).contains(&version);
     let version_word = if is_future { "future" } else { "foreign" };
     if is_future {
-        lines.push(format!("[offset 9] Future RDB version {} detected", version));
+        lines.push(format!(
+            "[offset 9] Future RDB version {} detected",
+            version
+        ));
     } else if is_foreign {
-        lines.push(format!("[offset 9] Foreign RDB version {} detected", version));
+        lines.push(format!(
+            "[offset 9] Foreign RDB version {} detected",
+            version
+        ));
     }
 
     // Scan the whole file: the RDB_OPCODE_EOF marker is the true end of the

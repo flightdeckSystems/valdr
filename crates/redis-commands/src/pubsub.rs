@@ -17,11 +17,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use redis_core::client_info::client_info_registry;
 use redis_core::command_context::{
     encode_pubsub_message_resp2, encode_pubsub_message_resp3, encode_pubsub_pmessage_resp2,
     encode_pubsub_pmessage_resp3, CommandContext,
 };
-use redis_core::client_info::client_info_registry;
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::util::string_match_len;
 use redis_protocol::RespFrame;

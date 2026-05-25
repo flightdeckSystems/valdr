@@ -169,7 +169,10 @@ pub fn load_hash_zipmap_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let mut p = 1;
     loop {
         let marker = *blob.get(p).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "zipmap overran without terminator")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "zipmap overran without terminator",
+            )
         })?;
         if marker == 0xFF {
             break;
@@ -198,7 +201,9 @@ pub fn load_hash_zipmap_object(r: &mut impl Read) -> io::Result<RedisObject> {
         p = vend
             .checked_add(free)
             .filter(|&e| e <= blob.len())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "zipmap free padding overran"))?;
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "zipmap free padding overran")
+            })?;
 
         if hash
             .insert(RedisString::from_vec(key), RedisString::from_vec(value))

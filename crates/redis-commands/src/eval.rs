@@ -72,6 +72,7 @@ struct FunctionDefinition {
     description: Option<Vec<u8>>,
     no_writes: bool,
     allow_oom: bool,
+    allow_stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,7 @@ struct RuntimeFunctionRegistration {
     callback: RegistryKey,
     no_writes: bool,
     allow_oom: bool,
+    allow_stale: bool,
 }
 
 /// Parser-callback adapter that accumulates one RESP frame into a
@@ -545,7 +547,14 @@ fn lua_arg_to_bytes(v: &LuaValue) -> Result<Vec<u8>, LuaError> {
 fn install_sandbox(lua: &Lua) -> mlua::Result<()> {
     let globals = lua.globals();
     for name in [
-        "io", "debug", "package", "require", "loadfile", "dofile", "print",
+        "io",
+        "debug",
+        "package",
+        "require",
+        "loadfile",
+        "dofile",
+        "print",
+        "getmetatable",
     ] {
         globals.set(name, LuaValue::Nil)?;
     }
@@ -2018,6 +2027,25 @@ fn snapshot_function_libraries() -> Vec<LoadedFunctionLibrary> {
     guard.values().cloned().collect()
 }
 
+pub(crate) fn function_vm_memory_used_estimate() -> usize {
+    snapshot_function_libraries()
+        .iter()
+        .map(|library| {
+            library.name.len()
+                + library.code.len()
+                + library
+                    .functions
+                    .iter()
+                    .map(|function| {
+                        function.name.len()
+                            + function.description.as_ref().map_or(0, Vec::len)
+                            + 256
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
 fn function_library_frame(library: &LoadedFunctionLibrary, with_code: bool) -> RespFrame {
     let mut functions = library.functions.clone();
     functions.sort_by(|a, b| ascii_casecmp_bytes(&a.name, &b.name));
@@ -2052,6 +2080,9 @@ fn function_definition_frame(function: &FunctionDefinition) -> RespFrame {
     }
     if function.allow_oom {
         flags.push(RespFrame::bulk(RedisString::from_static(b"allow-oom")));
+    }
+    if function.allow_stale {
+        flags.push(RespFrame::bulk(RedisString::from_static(b"allow-stale")));
     }
     let flags = RespFrame::array(flags);
     RespFrame::Map(vec![
@@ -2141,6 +2172,26 @@ fn function_command_would_exceed_maxmemory(ctx: &CommandContext<'_>) -> bool {
         return false;
     }
     approximate_memory_used(ctx.db()).saturating_add(1024) > maxmemory
+}
+
+fn stale_replica_scripts_blocked(ctx: &CommandContext<'_>) -> bool {
+    redis_core::replication::global_replication_state().is_replica()
+        && !ctx.live_config().replica_serve_stale_data()
+}
+
+fn stale_replica_masterdown_error() -> RedisError {
+    RedisError::runtime(
+        b"MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.",
+    )
+}
+
+fn stale_replica_lua_call_allowed(args: &[Vec<u8>]) -> bool {
+    args.first()
+        .is_some_and(|name| ascii_eq_ci(name.as_slice(), b"INFO"))
+}
+
+fn stale_replica_lua_call_error() -> LuaError {
+    LuaError::RuntimeError("Can not execute the command on a stale replica".to_string())
 }
 
 fn hex_encode(bytes: &[u8]) -> Vec<u8> {
@@ -2241,6 +2292,7 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     for function in &mut functions {
         function.no_writes |= source_flags.no_writes;
         function.allow_oom |= source_flags.allow_oom;
+        function.allow_stale |= source_flags.allow_stale;
     }
     let loaded = LoadedFunctionLibrary {
         name: library_name.clone(),
@@ -2253,7 +2305,7 @@ pub fn function_load_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        install_function_library(&mut guard, loaded, replace)?;
+        install_function_library(&mut guard, loaded, replace, true)?;
     }
 
     ctx.reply_bulk(&library_name)
@@ -2380,7 +2432,7 @@ pub fn function_restore_command(ctx: &mut CommandContext<'_>) -> RedisResult<()>
     }
     let replace = matches!(mode, RestoreMode::Replace);
     for library in libraries {
-        install_function_library(&mut guard, library, replace)?;
+        install_function_library(&mut guard, library, replace, false)?;
     }
     ctx.reply_simple_string(b"OK")
 }
@@ -2499,6 +2551,9 @@ fn fcall_command_generic(ctx: &mut CommandContext<'_>, ro: bool) -> RedisResult<
             b"ERR Can not execute a script with write flag using *_ro command.",
         ));
     }
+    if stale_replica_scripts_blocked(ctx) && !definition.allow_stale {
+        return Err(stale_replica_masterdown_error());
+    }
 
     let numkeys = numkeys as usize;
     let mut keys: Vec<RedisString> = Vec::with_capacity(numkeys);
@@ -2517,12 +2572,21 @@ fn install_function_library(
     libraries: &mut HashMap<Vec<u8>, LoadedFunctionLibrary>,
     loaded: LoadedFunctionLibrary,
     replace: bool,
+    quote_library_collision: bool,
 ) -> RedisResult<()> {
     let old_key = function_library_key(libraries, &loaded.name);
     if old_key.is_some() && !replace {
-        let mut msg = b"ERR Library '".to_vec();
+        let mut msg = if quote_library_collision {
+            b"ERR Library '".to_vec()
+        } else {
+            b"ERR Library ".to_vec()
+        };
         msg.extend_from_slice(&loaded.name);
-        msg.extend_from_slice(b"' already exists");
+        if quote_library_collision {
+            msg.extend_from_slice(b"' already exists");
+        } else {
+            msg.extend_from_slice(b" already exists");
+        }
         return Err(RedisError::runtime(msg));
     }
     for (key, library) in libraries.iter() {
@@ -2739,7 +2803,7 @@ fn parse_register_function_args(args: MultiValue) -> mlua::Result<FunctionDefini
                 "calling server.register_function with a single argument is only applicable to Lua table (representing named arguments).".to_string(),
             ));
         };
-        let (name, description, no_writes, allow_oom, _) =
+        let (name, description, no_writes, allow_oom, allow_stale, _) =
             parse_register_function_named_args(table)?;
         validate_function_name(&name)?;
         return Ok(FunctionDefinition {
@@ -2747,6 +2811,7 @@ fn parse_register_function_args(args: MultiValue) -> mlua::Result<FunctionDefini
             description,
             no_writes,
             allow_oom,
+            allow_stale,
         });
     }
 
@@ -2764,6 +2829,7 @@ fn parse_register_function_args(args: MultiValue) -> mlua::Result<FunctionDefini
         description: None,
         no_writes: false,
         allow_oom: false,
+        allow_stale: false,
     })
 }
 
@@ -2785,13 +2851,15 @@ fn parse_runtime_register_function_args(
                 "calling server.register_function with a single argument is only applicable to Lua table (representing named arguments).".to_string(),
             ));
         };
-        let (name, _, no_writes, allow_oom, callback) = parse_register_function_named_args(table)?;
+        let (name, _, no_writes, allow_oom, allow_stale, callback) =
+            parse_register_function_named_args(table)?;
         validate_function_name(&name)?;
         return Ok(RuntimeFunctionRegistration {
             name,
             callback: lua.create_registry_value(callback)?,
             no_writes,
             allow_oom,
+            allow_stale,
         });
     }
 
@@ -2809,17 +2877,19 @@ fn parse_runtime_register_function_args(
         callback: lua.create_registry_value(callback)?,
         no_writes: false,
         allow_oom: false,
+        allow_stale: false,
     })
 }
 
 fn parse_register_function_named_args(
     table: LuaTable,
-) -> mlua::Result<(Vec<u8>, Option<Vec<u8>>, bool, bool, LuaFunction)> {
+) -> mlua::Result<(Vec<u8>, Option<Vec<u8>>, bool, bool, bool, LuaFunction)> {
     let mut name: Option<Vec<u8>> = None;
     let mut callback: Option<LuaFunction> = None;
     let mut description: Option<Vec<u8>> = None;
     let mut no_writes = false;
     let mut allow_oom = false;
+    let mut allow_stale = false;
 
     for pair in table.pairs::<LuaValue, LuaValue>() {
         let (key, value) = pair?;
@@ -2852,6 +2922,7 @@ fn parse_register_function_named_args(
             let parsed = parse_function_flags(&flags)?;
             no_writes = parsed.no_writes;
             allow_oom = parsed.allow_oom;
+            allow_stale = parsed.allow_stale;
         } else {
             return Err(LuaError::RuntimeError(
                 "unknown argument given to server.register_function".to_string(),
@@ -2867,7 +2938,14 @@ fn parse_register_function_named_args(
     let callback = callback.ok_or_else(|| {
         LuaError::RuntimeError("server.register_function must get a callback argument".to_string())
     })?;
-    Ok((name, description, no_writes, allow_oom, callback))
+    Ok((
+        name,
+        description,
+        no_writes,
+        allow_oom,
+        allow_stale,
+        callback,
+    ))
 }
 
 fn lua_string_value_bytes(value: LuaValue, error: &str) -> mlua::Result<Vec<u8>> {
@@ -2910,6 +2988,7 @@ fn valid_function_library_name(name: &[u8]) -> bool {
 struct FunctionFlags {
     no_writes: bool,
     allow_oom: bool,
+    allow_stale: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2917,6 +2996,7 @@ struct EvalScriptFlags {
     has_shebang: bool,
     no_writes: bool,
     allow_oom: bool,
+    allow_stale: bool,
 }
 
 fn parse_function_flags(flags: &LuaTable) -> mlua::Result<FunctionFlags> {
@@ -2932,6 +3012,8 @@ fn parse_function_flags(flags: &LuaTable) -> mlua::Result<FunctionFlags> {
                     parsed.no_writes = true;
                 } else if ascii_eq_ci(flag.as_ref(), b"allow-oom") {
                     parsed.allow_oom = true;
+                } else if ascii_eq_ci(flag.as_ref(), b"allow-stale") {
+                    parsed.allow_stale = true;
                 } else if !is_known_function_flag(flag.as_ref()) {
                     return Err(LuaError::RuntimeError("unknown flag given".to_string()));
                 }
@@ -2995,8 +3077,7 @@ fn parse_eval_shebang(script_bytes: &[u8]) -> RedisResult<(EvalScriptFlags, &[u8
             } else if ascii_eq_ci(flag, b"allow-oom") {
                 flags.allow_oom = true;
             } else if ascii_eq_ci(flag, b"allow-stale") {
-                // Accepted for compatibility; stale-replica execution is outside
-                // this single-node scripting unlock.
+                flags.allow_stale = true;
             } else {
                 return Err(RedisError::runtime(
                     b"ERR Unexpected flag in script shebang",
@@ -3012,6 +3093,7 @@ fn function_source_eval_flags(code: &[u8]) -> EvalScriptFlags {
         has_shebang: ascii_contains_ci(code, b"#!lua"),
         no_writes: ascii_contains_ci(code, b"flags=no-writes"),
         allow_oom: ascii_contains_ci(code, b"flags=allow-oom"),
+        allow_stale: ascii_contains_ci(code, b"flags=allow-stale"),
     }
 }
 
@@ -3164,8 +3246,14 @@ fn run_loaded_function(
         None
     };
     let read_only = ro || definition.no_writes;
+    let stale_replica_blocked = stale_replica_scripts_blocked(ctx);
+    let function_allow_stale = definition.allow_stale;
     let (_, library_body) = parse_function_library_header(&library.code)?;
     let lua = Lua::new();
+    let builtin_getmetatable: LuaValue = lua
+        .globals()
+        .raw_get("getmetatable")
+        .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_sandbox(&lua)
         .map_err(|e| RedisError::runtime(format!("ERR Lua sandbox: {}", e).into_bytes()))?;
     install_cjson(&lua)
@@ -3193,6 +3281,12 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if stale_replica_blocked
+                        && function_allow_stale
+                        && !stale_replica_lua_call_allowed(&arg_bytes)
+                    {
+                        return Err(stale_replica_lua_call_error());
+                    }
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
@@ -3226,6 +3320,18 @@ fn run_loaded_function(
             scope.create_function_mut(
                 move |lua_inner, args: MultiValue| -> mlua::Result<LuaValue> {
                     let arg_bytes = collect_call_args(args)?;
+                    if stale_replica_blocked
+                        && function_allow_stale
+                        && !stale_replica_lua_call_allowed(&arg_bytes)
+                    {
+                        let t = lua_inner.create_table()?;
+                        t.raw_set(
+                            "err",
+                            lua_inner
+                                .create_string("Can not execute the command on a stale replica")?,
+                        )?;
+                        return Ok(LuaValue::Table(t));
+                    }
                     if read_only && call_is_write_command(&arg_bytes) {
                         record_script_rejected_command(
                             &arg_bytes,
@@ -3343,6 +3449,8 @@ fn run_loaded_function(
         lua.load(library_body).set_name("function_library").exec()?;
         load_phase.set(false);
 
+        lua.globals()
+            .raw_set("getmetatable", builtin_getmetatable.clone())?;
         lua.globals().set("redis", redis_tbl.clone())?;
         lua.globals().set("server", redis_tbl.clone())?;
         lua.load(
@@ -3375,6 +3483,11 @@ fn run_loaded_function(
                 ));
             }
             if registration.allow_oom != definition.allow_oom {
+                return Err(LuaError::RuntimeError(
+                    "Function flags changed while loading library".to_string(),
+                ));
+            }
+            if registration.allow_stale != definition.allow_stale {
                 return Err(LuaError::RuntimeError(
                     "Function flags changed while loading library".to_string(),
                 ));
