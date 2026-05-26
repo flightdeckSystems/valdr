@@ -48,7 +48,7 @@
 
   <div class="wrap">
     <div class="stats">
-      <div class="stat"><div class="num good">877</div><div class="lbl">upstream Valkey TCL tests passing (within built slice)</div></div>
+      <div class="stat"><div class="num good">2,989</div><div class="lbl">upstream Valkey TCL tests passing (single-node suite, 99.3%)</div></div>
       <div class="stat"><div class="num accent">23 / 23</div><div class="lbl">RESP wire frames byte-exact vs C</div></div>
       <div class="stat"><div class="num accent">378 / 378</div><div class="lbl">RDB load/save round-trips vs C</div></div>
       <div class="stat"><div class="num">5</div><div class="lbl"><code>unsafe</code> blocks, all <code>fork</code>/<code>waitpid</code></div></div>
@@ -60,7 +60,7 @@
       <h2>What it is</h2>
       <p class="lead"><code>valkey-rs</code> is a from-scratch reimplementation of the <a href="https://github.com/valkey-io/valkey">Redis/Valkey</a> server in Rust — RESP2/3 protocol, all core data types, streams, pub/sub, transactions, Lua scripting, ACL, eviction, TLS, RDB + AOF persistence, and replication basics. It runs as an ordinary <code>redis-server</code> binary that existing Redis clients talk to unchanged. <strong>~80k lines of Rust</strong> stand in for upstream's <strong>~187k lines of C</strong>.</p>
       <div class="callout">
-        <strong>Thinking about adopting?</strong> The 877 above is the pass rate <em>within the slice we've built</em>, not coverage of all upstream Valkey behavior. There is no clustering, no loadable C modules, and replication isn't gated yet. Read <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/SCOPE_AND_GAPS.md">Scope and gaps</a> before wiring it into anything load-bearing.
+        <strong>Thinking about adopting?</strong> The 2,989 above is the single-node suite passing today — <em>not</em> coverage of all upstream Valkey behavior. There is no clustering, no loadable C modules, and replication isn't gated yet. Read <a href="https://github.com/ianm199/valkey-rs/blob/main/docs/SCOPE_AND_GAPS.md">Scope and gaps</a> before wiring it into anything load-bearing.
       </div>
     </section>
 
@@ -95,12 +95,12 @@ $ redis-cli get hello
           <p>We save → C loads, and C saves → we load, across every encoding (listpack, intset, skiplist, quicklist, streams). The resulting keyspaces are diffed.</p>
         </div>
         <div class="card">
-          <span class="badge good">877 pass</span>
+          <span class="badge good">2,989 / 3,010</span>
           <h3>Upstream TCL suite</h3>
           <p>Valkey's own TCL test harness runs unmodified against our binary via a symlink trick. <a href="./convergence.html">See the full per-section convergence →</a></p>
         </div>
       </div>
-      <p class="muted" style="margin-top:14px;">The TCL number is scoped to the unit files we've attacked, not the full 4,299-block upstream denominator. The <a href="./convergence.html">conformance page</a> breaks it down honestly, section by section.</p>
+      <p class="muted" style="margin-top:14px;">As of 2026-05-26 the single-node suite (54 files, <code>single-node-external</code> profile) passes <strong>2,989 / 3,010</strong> (99.3%); the full upstream denominator is <strong>4,299</strong> blocks — the remainder is cluster, replication, and loadable-module surface we don't target. The <a href="./convergence.html">conformance page</a> breaks it down by capability, with drill-down to each file.</p>
     </section>
 
     <section>

@@ -669,13 +669,6 @@ impl Client {
         std::mem::take(&mut self.reply_buf)
     }
 
-    /// `process_input` parses raw bytes from the socket into commands.
-    /// Translation packet for `networking.c::processInputBuffer` fills this.
-    pub fn process_input(&mut self, _bytes: &[u8]) -> redis_types::RedisResult<()> {
-        // TODO(port): port networking.c::processInputBuffer here.
-        todo!("port networking.c::processInputBuffer in Phase 2")
-    }
-
     /// Whether the client is currently blocked (BLPOP, WAIT, etc).
     ///
     /// STUB — Phase B placeholder; real blocking state lives in a future

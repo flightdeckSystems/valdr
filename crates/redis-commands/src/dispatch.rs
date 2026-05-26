@@ -1969,6 +1969,13 @@ pub(crate) fn enforce_maxmemory_gate(
     if used <= maxmem {
         return None;
     }
+    if ctx.live_config().import_mode() {
+        return if is_denyoom_command {
+            Some(oom_error_reply())
+        } else {
+            None
+        };
+    }
     if is_server_paused_for(ctx.server(), PAUSE_ACTION_EVICT) {
         return if is_denyoom_command {
             Some(oom_error_reply())

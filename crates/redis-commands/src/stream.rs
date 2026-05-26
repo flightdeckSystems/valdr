@@ -3282,29 +3282,19 @@ fn xinfo_consumers(ctx: &mut CommandContext) -> RedisResult<()> {
 /// Must be called once at server startup, before any connections are accepted.
 /// Subsequent calls are no-ops (each underlying `OnceLock` only accepts the
 /// first value).
+///
+/// The RENAME-completion wake is deliberately not installed here. It is owned
+/// by the runtime owner in `redis-server`, which registers a hook that defers
+/// the wake onto the owner thread's own database list. Installing a second
+/// rename hook from this layer would race the owner's hook for the single
+/// `STREAM_RENAME_HOOK` slot and, if it won, wake clients against the
+/// transitional `global_databases()` store instead of the owner's keyspace.
 pub fn install_stream_hooks() {
     redis_core::db::install_stream_key_deleted_hook(Box::new(|key| {
         wake_xreadgroup_with_nogroup(key);
     }));
     redis_core::db::install_stream_db_flushed_hook(Box::new(|| {
         wake_all_xreadgroup_with_nogroup();
-    }));
-    redis_core::db::install_stream_rename_hook(Box::new(|dst_key, db_id| {
-        let db_arc = {
-            let idx = match redis_core::blocked_keys::blocked_keys_index().lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if !idx.has_waiters_for(dst_key) {
-                return;
-            }
-            redis_core::databases::global_databases().get(db_id)
-        };
-        let mut guard = match db_arc.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        wake_xreadgroup_after_rename(&mut guard, dst_key);
     }));
     redis_core::db::install_stream_key_overwritten_hook(Box::new(|key| {
         let waiters = {

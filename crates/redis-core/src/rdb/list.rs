@@ -60,7 +60,7 @@ pub fn save_list_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()>
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_list_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (n, _is_encoded) = load_len(r)?;
-    let mut list: VecDeque<RedisString> = VecDeque::with_capacity(n as usize);
+    let mut list: VecDeque<RedisString> = VecDeque::with_capacity(super::prealloc_capacity(n));
     for _ in 0..n {
         let elem_bytes = read_rdb_string(r)?;
         list.push_back(RedisString::from_vec(elem_bytes));
@@ -189,6 +189,18 @@ mod tests {
         for (i, e) in elems.iter().enumerate() {
             assert_eq!(result[i].as_bytes(), e.as_bytes());
         }
+    }
+
+    /// A crafted payload declares billions of elements but supplies no data.
+    /// Without the pre-allocation cap this would attempt a multi-gigabyte
+    /// `VecDeque` allocation and abort the process; with the cap it must fail
+    /// cleanly on the first absent element read instead.
+    #[test]
+    fn hostile_length_prefix_errors_without_aborting() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_len(&mut buf, u32::MAX as u64).unwrap();
+        let mut cursor = Cursor::new(&buf);
+        assert!(load_list_object(&mut cursor).is_err());
     }
 
     #[test]

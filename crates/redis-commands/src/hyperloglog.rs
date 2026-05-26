@@ -891,8 +891,7 @@ pub fn hll_count(buf: &[u8]) -> Result<u64, RedisError> {
     } else if encoding == HLL_RAW {
         hll_raw_reg_histo(&buf[HLL_HDR_SIZE..], &mut reghisto);
     } else {
-        // TODO(architect): is panic correct here? Should be unreachable in practice.
-        panic!("Unknown HyperLogLog encoding {} in hll_count()", encoding);
+        return Err(RedisError::runtime(INVALID_HLL_ERR));
     }
 
     // Ertl improved estimator.

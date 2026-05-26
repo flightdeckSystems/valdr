@@ -11,7 +11,6 @@
 
 pub mod acl;
 pub mod bio;
-pub mod blocked;
 pub mod blocked_keys;
 pub mod childinfo;
 pub mod client;
@@ -24,7 +23,6 @@ pub mod databases;
 pub mod db;
 pub mod defrag;
 pub mod entry;
-pub mod evict;
 pub mod eviction;
 pub mod expire;
 pub mod fifo;

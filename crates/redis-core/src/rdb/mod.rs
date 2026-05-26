@@ -40,6 +40,23 @@ pub fn rdb_path(dir: &str, filename: &str) -> PathBuf {
     PathBuf::from(dir).join(filename)
 }
 
+/// Upper bound on how many elements an untrusted RDB/RESTORE length prefix may
+/// pre-allocate.
+///
+/// A malformed or hostile payload (a crafted `RESTORE`, or a corrupt RDB on
+/// disk) can declare an enormous element count in a length field. Passing that
+/// count straight to `with_capacity` makes the loader attempt a multi-gigabyte
+/// allocation and abort the process before the element-read loop reaches the
+/// (absent) data. Clamping the pre-allocation removes the abort: collections
+/// still grow naturally past this bound for genuinely large, well-formed
+/// payloads, and a short hostile payload fails cleanly on the next element read.
+pub(crate) const RDB_PREALLOC_CAP: usize = 1 << 16;
+
+/// Clamp an untrusted element count to [`RDB_PREALLOC_CAP`] for pre-allocation.
+pub(crate) fn prealloc_capacity(declared: u64) -> usize {
+    (declared as usize).min(RDB_PREALLOC_CAP)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS
 //   source:        RDB module surface

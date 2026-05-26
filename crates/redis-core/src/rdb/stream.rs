@@ -245,7 +245,7 @@ fn load_stream_inner(
 
         let (pel_size, _) = load_len(r)?;
         let mut group_pel_meta: HashMap<StreamId, (i64, u64)> =
-            HashMap::with_capacity(pel_size as usize);
+            HashMap::with_capacity(super::prealloc_capacity(pel_size));
         for _ in 0..pel_size {
             let raw = read_raw_id(r)?;
             let id = decode_raw_id(&raw)?;
@@ -354,7 +354,8 @@ fn decode_entries_from_listpack(blob: &[u8], node_id: &StreamId) -> io::Result<V
         ));
     }
 
-    let mut master_fields: Vec<RedisString> = Vec::with_capacity(master_num_fields as usize);
+    let mut master_fields: Vec<RedisString> =
+        Vec::with_capacity(super::prealloc_capacity(master_num_fields as u64));
     for _ in 0..master_num_fields {
         let field_bytes = take_bytes(&raw, &mut cursor, "master field name")?;
         master_fields.push(RedisString::from_vec(field_bytes));

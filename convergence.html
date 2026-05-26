@@ -9,7 +9,7 @@
   <meta property="og:description" content="The real convergence curve on Valkey's own TCL suite, reconstructed by replaying the suite against the Rust server built at each historical commit. Overall and per section.">
   <meta property="og:url" content="https://ianm199.github.io/valkey-rs/convergence.html">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/site.css?v=2">
 </head>
 <body>
   <header class="hero sub">
@@ -53,15 +53,15 @@
     </section>
 
     <section>
-      <h2>By section — current state</h2>
-      <p class="lead">Where each tracked unit file stands at the most recent sampled commit. Green bars are full passes; red is the still-converging remainder.</p>
+      <h2>By capability — current state</h2>
+      <p class="lead">Grouped by area and capability bucket at the most recent sampled commit. Each bar aggregates its files; <strong>click a bucket to drill down to the individual unit files</strong>. Green is a full pass; red is the still-converging remainder.</p>
       <div id="bars"></div>
     </section>
 
     <section>
-      <h2>By section — trajectory</h2>
-      <p class="lead">The same convergence, one sparkline per section, so you can see which areas landed early and which are still moving.</p>
-      <div class="section-grid" id="sparks"></div>
+      <h2>By capability — trajectory</h2>
+      <p class="lead">The same convergence over time, one sparkline per unit file, grouped under its capability bucket — so you can see which areas landed early and which are still moving.</p>
+      <div id="sparks"></div>
     </section>
 
     <section>
@@ -183,6 +183,60 @@ $ VALKEY_BIN_DIR=$(pwd)/../../target/debug \
     });
   }
 
+  // area -> capability bucket -> member unit files. Leaves room for more areas
+  // (Scripting, Persistence, Replication, Cluster, …) as coverage expands.
+  const TAXONOMY = {
+    "Single-node core": {
+      "Data types": ["unit/type/string", "unit/type/incr", "unit/type/list", "unit/type/list-2", "unit/type/list-3", "unit/type/hash", "unit/type/set", "unit/type/zset", "unit/hashexpire"],
+      "Streams": ["unit/type/stream", "unit/type/stream-cgroups"],
+      "Keyspace & generic": ["unit/keyspace", "unit/expire", "unit/scan", "unit/sort", "unit/dump", "unit/other"],
+      "Bitmaps, HLL & geo": ["unit/bitops", "unit/bitfield", "unit/hyperloglog", "unit/geo"],
+      "Scripting & functions": ["unit/scripting", "unit/functions"],
+      "Pub/Sub & transactions": ["unit/pubsub", "unit/pubsubshard", "unit/multi"],
+      "Protocol & connection": ["unit/protocol", "unit/networking", "unit/querybuf", "unit/replybufsize", "unit/quit", "unit/auth"],
+      "ACL & security": ["unit/acl", "unit/acl-v2"],
+      "Introspection & observability": ["unit/introspection", "unit/introspection-2", "unit/info", "unit/info-command", "unit/commandlog", "unit/slowlog", "unit/latency-monitor", "unit/tracking"],
+      "Memory & limits": ["unit/maxmemory", "unit/memefficiency", "unit/lazyfree", "unit/limits", "unit/obuf-limits", "unit/client-eviction", "unit/violations"],
+      "Server & lifecycle": ["unit/pause", "unit/shutdown", "unit/wait", "unit/aofrw", "unit/fuzzer"],
+    },
+  };
+
+  // Effective grouping for the loaded data: drop files that weren't measured,
+  // and sweep any tracked-but-untaxonomized file into an "Other" bucket so the
+  // chart can never silently hide a section.
+  function grouped(data) {
+    const present = new Set(data.sections.map(s => s.file));
+    const covered = new Set();
+    Object.values(TAXONOMY).forEach(bs => Object.values(bs).forEach(fs => fs.forEach(f => covered.add(f))));
+    const out = [];
+    Object.entries(TAXONOMY).forEach(([area, buckets]) => {
+      const entries = Object.entries(buckets)
+        .map(([b, fs]) => [b, fs.filter(f => present.has(f))])
+        .filter(([, fs]) => fs.length);
+      out.push([area, entries]);
+    });
+    const extra = [...present].filter(f => !covered.has(f));
+    if (extra.length) out[0][1].push(["Other", extra]);
+    return out;
+  }
+
+  function fileState(point, file) {
+    const s = (point.build_ok && point.sections[file]) || null;
+    if (s && s.passed != null) return { passed: s.passed, total: s.total, status: "ok" };
+    if (s && s.timed_out) return { passed: 0, total: 0, status: "timeout" };
+    return { passed: 0, total: 0, status: "no-summary" };
+  }
+
+  function aggFiles(point, files) {
+    let pass = 0, total = 0, incomplete = 0;
+    files.forEach(f => {
+      const st = fileState(point, f);
+      if (st.status === "ok") { pass += st.passed; total += st.total; }
+      else incomplete++;
+    });
+    return { pass, total, incomplete, n: files.length };
+  }
+
   function render(data) {
     const pts = data.points;
     const last = pts[pts.length - 1];
@@ -210,38 +264,100 @@ $ VALKEY_BIN_DIR=$(pwd)/../../target/debug \
     document.getElementById('overall-sub').textContent =
       `${fmt(passingNow)} of ${fmt(observedNow)} observed tests passing at ${last.sha} (${last.date}).`;
 
-    // bars
+    const labelOf = {};
+    data.sections.forEach(s => { labelOf[s.file] = s.label; });
+
+    // current state: area -> bucket (aggregate, click to expand) -> files
     const barsEl = document.getElementById('bars');
-    const maxTotal = Math.max(1, ...rows.map(r => r.total));
-    rows.slice().sort((a, b) => (b.passed) - (a.passed)).forEach(r => {
-      const row = document.createElement('div');
-      row.className = 'bar-row';
-      const pct = r.total ? (r.passed / r.total * 100) : 0;
-      const widthPct = (r.total / maxTotal * 100);
-      row.innerHTML =
-        `<div class="lbl">${r.label}</div>` +
-        `<div class="bar-track" style="width:${Math.max(8, widthPct)}%">` +
-        `<div class="bar-fill ${r.full ? '' : 'partial'}" style="width:${pct}%"></div></div>` +
-        `<div class="count">${r.passed} / ${r.total || '—'}</div>`;
-      barsEl.appendChild(row);
+    barsEl.innerHTML = '';
+    grouped(data).forEach(([area, bucketEntries]) => {
+      const block = document.createElement('div');
+      block.className = 'area-block';
+      let aPass = 0, aTotal = 0, aInc = 0;
+      const bucketRows = bucketEntries.map(([bname, files]) => {
+        const a = aggFiles(last, files);
+        aPass += a.pass; aTotal += a.total; aInc += a.incomplete;
+        return { bname, files, a };
+      });
+      const head = document.createElement('div');
+      head.className = 'area-head';
+      head.innerHTML = `<span class="name">${area}</span>` +
+        `<span class="agg">${fmt(aPass)} / ${fmt(aTotal)} passing` +
+        (aInc ? ` · ${aInc} incomplete` : '') + `</span>`;
+      block.appendChild(head);
+
+      const maxBucket = Math.max(1, ...bucketRows.map(b => b.a.total));
+      bucketRows.sort((x, y) => y.a.pass - x.a.pass).forEach(({ bname, files, a }) => {
+        const full = a.incomplete === 0 && a.total > 0 && a.pass === a.total;
+        const pct = a.total ? a.pass / a.total * 100 : 0;
+        const w = Math.max(12, a.total / maxBucket * 100);
+        const wrap = document.createElement('div');
+        wrap.className = 'bucket';
+        const row = document.createElement('div');
+        row.className = 'bucket-row';
+        row.innerHTML =
+          `<span class="caret">▶</span>` +
+          `<span class="bname">${bname} <span class="bmeta">${a.n} files</span></span>` +
+          `<div class="bar-track" style="width:${w}%"><div class="bar-fill ${full ? '' : 'partial'}" style="width:${pct}%"></div></div>` +
+          `<span class="count">${fmt(a.pass)} / ${a.total ? fmt(a.total) : '—'}` +
+          (a.incomplete ? ` <span class="incomplete">·${a.incomplete}⚠</span>` : '') + `</span>`;
+        const filesEl = document.createElement('div');
+        filesEl.className = 'bucket-files';
+        files.map(f => ({ f, st: fileState(last, f) }))
+          .sort((p, q) => q.st.passed - p.st.passed)
+          .forEach(({ f, st }) => {
+            const fr = document.createElement('div');
+            fr.className = 'file-row';
+            const fpct = st.total ? st.passed / st.total * 100 : 0;
+            const ffull = st.status === 'ok' && st.passed === st.total;
+            const cnt = st.status === 'ok'
+              ? `${st.passed} / ${st.total}`
+              : `<span class="incomplete">${st.status}</span>`;
+            fr.innerHTML =
+              `<span class="fname">${labelOf[f]} <code>${f.replace('unit/', '')}</code></span>` +
+              `<div class="mini-track"><div class="mini-fill ${ffull ? '' : 'partial'}" style="width:${fpct}%"></div></div>` +
+              `<span class="count">${cnt}</span>`;
+            filesEl.appendChild(fr);
+          });
+        row.addEventListener('click', () => {
+          row.classList.toggle('open');
+          filesEl.classList.toggle('open');
+        });
+        wrap.appendChild(row);
+        wrap.appendChild(filesEl);
+        block.appendChild(wrap);
+      });
+      barsEl.appendChild(block);
     });
 
-    // sparklines
+    // trajectory: per-file sparklines grouped under their capability bucket
     const sparksEl = document.getElementById('sparks');
-    data.sections.forEach(sec => {
-      const series = sectionSeries(data, sec.file);
-      const passedSeries = series.map(s => s.passed);
-      const max = Math.max(1, ...series.map(s => s.total), ...passedSeries);
-      const cur = series[series.length - 1];
-      const full = cur.total > 0 && cur.passed === cur.total;
-      const card = document.createElement('div');
-      card.className = 'spark';
-      card.innerHTML =
-        `<p class="name">${sec.label}</p>` +
-        `<p class="val"><b>${cur.passed}</b> / ${cur.total || '—'}` +
-        (full ? ` <span class="full">✓ full</span>` : '') + `</p>`;
-      card.appendChild(sparkline(passedSeries, max));
-      sparksEl.appendChild(card);
+    sparksEl.innerHTML = '';
+    grouped(data).forEach(([area, bucketEntries]) => {
+      bucketEntries.forEach(([bname, files]) => {
+        const h = document.createElement('p');
+        h.className = 'spark-group-head';
+        h.textContent = bname;
+        sparksEl.appendChild(h);
+        const grid = document.createElement('div');
+        grid.className = 'section-grid';
+        files.forEach(f => {
+          const series = sectionSeries(data, f);
+          const passedSeries = series.map(s => s.passed);
+          const max = Math.max(1, ...series.map(s => s.total), ...passedSeries);
+          const cur = series[series.length - 1];
+          const full = cur.total > 0 && cur.passed === cur.total;
+          const card = document.createElement('div');
+          card.className = 'spark';
+          card.innerHTML =
+            `<p class="name">${labelOf[f]}</p>` +
+            `<p class="val"><b>${cur.passed}</b> / ${cur.total || '—'}` +
+            (full ? ` <span class="full">✓</span>` : '') + `</p>`;
+          card.appendChild(sparkline(passedSeries, max));
+          grid.appendChild(card);
+        });
+        sparksEl.appendChild(grid);
+      });
     });
 
     // methodology + footer

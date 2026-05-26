@@ -22,15 +22,11 @@ use crate::object::{
 ///
 /// Single source of truth for the heuristic; both INFO and eviction call this.
 pub fn approximate_memory_used(db: &RedisDb) -> u64 {
-    let mut bytes: u64 = db.len() as u64 * 80;
-    let snapshot = db.keys_snapshot_with_types();
-    for (key, _kind_name) in &snapshot {
+    let mut bytes: u64 = 0;
+    for (key, obj) in db.iter_for_memory_accounting() {
+        bytes += 80;
         bytes += key.as_bytes().len() as u64;
-    }
-    for (key, _) in &snapshot {
-        if let Some(obj) = db.find(key) {
-            bytes += approximate_object_bytes(&obj.kind);
-        }
+        bytes += approximate_object_bytes(&obj.kind);
     }
     bytes
 }

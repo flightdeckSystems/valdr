@@ -15,7 +15,7 @@
 
     <g transform="translate(80,470)">
       <rect width="232" height="92" rx="12" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.14"/>
-      <text x="24" y="52" fill="#5fd6a6" font-size="38" font-weight="800">877</text>
+      <text x="24" y="52" fill="#5fd6a6" font-size="34" font-weight="800">2,989</text>
       <text x="24" y="76" fill="#8b95ab" font-size="17">TCL tests passing</text>
     </g>
     <g transform="translate(332,470)">

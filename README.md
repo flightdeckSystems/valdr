@@ -39,12 +39,12 @@ Other useful numbers:
 | Check | Result |
 |---|---:|
 | Source size | **~80k Rust LoC** vs upstream's ~187k C LoC |
-| `unsafe` blocks | **5**, all `fork(2)` / `waitpid(2)` wrappers |
+| `unsafe` blocks | **11**, all OS FFI — `fork`/`waitpid`/`kill`/`_exit`/`signal`, plus 2 AArch64 CPU-timer reads |
 
 What works today:
 
 - Strings, lists, hashes, sets, sorted sets, streams, HyperLogLog, bitmaps, geo.
-- Pub/sub, transactions, Lua scripting, ACL, multi-DB, eviction, TLS.
+- Pub/sub, transactions, Lua scripting, ACL, multi-DB, eviction.
 - Persistence through RDB v11 and AOF.
 - Replication basics, including PSYNC and WAIT.
 - Native RedisJSON-compatible `JSON.*` commands.
@@ -54,6 +54,7 @@ Not done yet:
 
 - Cluster mode.
 - Loadable C-ABI modules.
+- In-process TLS termination (rustls scaffold present but not wired to the runtime owner; TLS listener requests are currently refused).
 - A handful of Valkey 9.0 commands and edge cases.
 - Sustained production soak and performance tuning.
 
@@ -167,7 +168,7 @@ is documented in [`docs/RUNTIME_OWNERSHIP_PLAN.md`][runtime].
 | Scripting | `EVAL` / `EVALSHA` through Lua 5.1 |
 | Persistence | RDB v11 load/save, AOF |
 | Replication | PSYNC, full sync, WAIT |
-| Security | ACL, AUTH, TLS through rustls |
+| Security | ACL, AUTH (TLS scaffold present via rustls, not yet wired to the runtime) |
 | Memory policies | 8 maxmemory eviction policies |
 | Modules | Native RedisJSON + RedisBloom command subsets |
 | Cluster | Not implemented |
@@ -195,18 +196,18 @@ for the official profile, port rules, and contained safe-survey variant.
 
 ## Safety
 
-Most crates are safe Rust. The only `unsafe` blocks are in process-management
-code that wraps Unix `fork(2)` and `waitpid(2)` for background save / rewrite
-flows:
+Most crates are safe Rust. Every `unsafe` block is either OS FFI for
+process management (background save / rewrite) or an architectural CPU-timer
+read; none touch the data path:
 
 | Crate | `unsafe` blocks | Reason |
 |---|---:|---|
 | `redis-types` | 0 | |
 | `redis-protocol` | 0 | |
 | `redis-ds` | 0 | |
-| `redis-core` | 0 | |
-| `redis-commands` | 3 | `fork` / `_exit` for BGSAVE, BGREWRITEAOF, full sync |
-| `redis-server` | 2 | `waitpid` child reapers |
+| `redis-core` | 2 | AArch64 `mrs` reads of CPU timer registers (`cntvct_el0`, `cntfrq_el0`) |
+| `redis-commands` | 4 | `fork`/`_exit` for BGSAVE & BGREWRITEAOF; `kill`/`waitpid` for child management |
+| `redis-server` | 5 | `waitpid` child reapers, SIGTERM/SIGINT `signal` handler, post-fork `_exit` |
 
 Each block has a `// SAFETY:` invariant. The hook
 `harness/unsafe-budget.sh` fails changes that exceed the crate budgets.

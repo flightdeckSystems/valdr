@@ -54,7 +54,7 @@ pub fn save_set_object(w: &mut impl Write, obj: &RedisObject) -> io::Result<()> 
 /// Reads from `r` starting immediately after the type byte.
 pub fn load_set_object(r: &mut impl Read) -> io::Result<RedisObject> {
     let (n, _is_encoded) = load_len(r)?;
-    let mut members: HashSet<RedisString> = HashSet::with_capacity(n as usize);
+    let mut members: HashSet<RedisString> = HashSet::with_capacity(super::prealloc_capacity(n));
     for _ in 0..n {
         let member_bytes = read_rdb_string(r)?;
         members.insert(RedisString::from_vec(member_bytes));

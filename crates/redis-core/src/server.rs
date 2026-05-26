@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::client::ClientId;
 use crate::db::RedisDb;
-use crate::evict::{eviction_pool_alloc, EvictionPool};
 use crate::live_config::LiveConfig;
 use crate::persistence::{AofState, PersistenceState};
 
@@ -50,9 +49,6 @@ pub struct RedisServer {
     pub bind_addrs: Vec<Vec<u8>>,
     /// Live (CONFIG SET-tunable) configuration knobs.
     pub live_config: Arc<LiveConfig>,
-    /// LRU/LFU eviction candidate pool. Behind a mutex because the eviction
-    /// path mutates it but the server itself is shared through `Arc`.
-    pub eviction_pool: Mutex<EvictionPool>,
     /// Command-table handle. TODO(architect): real type later.
     pub commands_table: CommandTableHandle,
     /// Persistence runtime state reported by INFO and updated by reapers.
@@ -117,7 +113,6 @@ impl RedisServer {
             port,
             bind_addrs: Vec::new(),
             live_config: Arc::new(LiveConfig::new()),
-            eviction_pool: Mutex::new(eviction_pool_alloc()),
             commands_table: CommandTableHandle,
             persistence: PersistenceState::new(),
             cmd_time_snapshot: AtomicI64::new(0),

@@ -127,72 +127,6 @@ pub enum CommandKind {
 // Private helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-/// Reject if `size + append` would exceed the server's proto-max-bulk-len.
-///
-/// C: `checkStringLength` (t_string.c:45).
-fn check_string_length(
-    _ctx: &mut CommandContext,
-    size: i64,
-    append: i64,
-) -> Result<(), RedisError> {
-    todo!("C: t_string.c:45, checkStringLength")
-}
-
-/// Convert a raw expire argument (string of digits) to absolute milliseconds
-/// since epoch, applying unit scaling and optional timestamp addition.
-///
-/// C: `getExpireMillisecondsOrReply` (t_string.c:221).
-fn get_expire_milliseconds(
-    expire_val: &RedisString,
-    flags: u32,
-    unit: Unit,
-) -> Result<i64, RedisError> {
-    todo!("C: t_string.c:221, getExpireMillisecondsOrReply")
-}
-
-/// Parse optional command arguments for SET / GETEX / MSETEX.
-///
-/// Iterates `ctx.arg(start_idx..argc)`, setting bits in `flags`, updating
-/// `unit`, and capturing the expire and comparison values.  Unknown tokens
-/// yield `RedisError::syntax`.
-///
-/// C: `parseExtendedCommandArgumentsOrReply` (server.c — not visible here).
-fn parse_extended_command_args(
-    ctx: &CommandContext,
-    kind: CommandKind,
-    start_idx: usize,
-    flags: &mut u32,
-    unit: &mut Unit,
-    expire: &mut Option<RedisString>,
-    comparison: &mut Option<RedisString>,
-) -> Result<(), RedisError> {
-    todo!("C: parseExtendedCommandArgumentsOrReply (server.c)")
-}
-
-/// Parse a decimal integer from the raw bytes of a `RedisString`.
-///
-/// C: `getLongLongFromObjectOrReply` (partial) — error-reply path is
-/// replaced by returning `Err(RedisError::not_integer())`.
-fn parse_integer(s: &RedisString) -> Result<i64, RedisError> {
-    todo!("C: getLongLongFromObjectOrReply — integer parse")
-}
-
-/// Parse an integer from a `RedisObject::String`.
-///
-/// C: `getLongLongFromObjectOrReply`.
-fn parse_integer_from_object(obj: &RedisObject) -> Result<i64, RedisError> {
-    todo!("C: getLongLongFromObjectOrReply")
-}
-
-/// Parse a float from a `RedisObject::String`.
-///
-/// C: `getLongDoubleFromObjectOrReply`.
-/// PERF(port): C uses 80-bit `long double` on x86; Rust uses `f64` (64-bit).
-/// Results may diverge at the precision boundary.
-fn parse_float_from_object(obj: &RedisObject) -> Result<f64, RedisError> {
-    todo!("C: getLongDoubleFromObjectOrReply")
-}
-
 /// Return the byte slice of a `RedisObject::String`, or `None` if wrong type.
 ///
 /// C: `objectGetVal(o)` when encoding is raw/embstr.
@@ -226,52 +160,6 @@ fn double_to_bytes(v: f64) -> Vec<u8> {
     let mut buf = Vec::new();
     write!(buf, "{}", v).ok();
     buf
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Generic / shared command logic
-// ──────────────────────────────────────────────────────────────────────────
-
-/// Core implementation shared by SET, SETNX, SETEX, PSETEX, GETSET.
-///
-/// C: `setGenericCommand` (t_string.c:76).
-pub fn set_generic_command(
-    ctx: &mut CommandContext,
-    flags: u32,
-    key: &RedisString,
-    val: RedisString,
-    expire_val: Option<&RedisString>,
-    unit: Unit,
-    ok_reply: Option<&[u8]>,
-    abort_reply: Option<&[u8]>,
-    comparison: Option<&RedisString>,
-) -> Result<(), RedisError> {
-    todo!("C: t_string.c:76, setGenericCommand")
-}
-
-/// Shared MSET / MSETNX logic.
-///
-/// C: `msetGenericCommand` (t_string.c:548).
-fn mset_generic_command(ctx: &mut CommandContext, nx: bool) -> Result<(), RedisError> {
-    todo!("C: t_string.c:548, msetGenericCommand")
-}
-
-/// Shared INCR / DECR / INCRBY / DECRBY logic.
-///
-/// C: `incrDecrCommand` (t_string.c:697).
-fn incr_decr_command(ctx: &mut CommandContext, incr: i64) -> Result<(), RedisError> {
-    todo!("C: t_string.c:697, incrDecrCommand")
-}
-
-/// Read-path GET used by SET+GET, GETDEL, GETSET.
-///
-/// Replies with the current string value (or null) and returns
-/// `Ok(true)` if the key existed and was a string, `Ok(false)` if absent,
-/// `Err(WrongType)` on type mismatch.
-///
-/// C: `getGenericCommand` (t_string.c:302) — returns C_OK / C_ERR.
-pub(crate) fn get_generic_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
-    todo!("C: t_string.c:302, getGenericCommand")
 }
 
 // ──────────────────────────────────────────────────────────────────────────

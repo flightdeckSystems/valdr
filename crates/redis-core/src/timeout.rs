@@ -77,8 +77,6 @@ pub fn check_blocked_client_timeout(
     if client.is_blocked() {
         let timeout = client.blocking_timeout();
         if timeout != 0 && timeout < now {
-            // C: unblockClientOnTimeout(c)
-            let _ = crate::blocked::unblock_client_on_timeout(client, server);
             return true;
         }
     }
@@ -134,7 +132,7 @@ pub fn clients_cron_handle_timeout(
         //    }
         if server.cluster_enabled() {
             // TODO(port): call cluster::redirect_blocked_client_if_needed(client);
-            // if redirected → crate::blocked::unblock_client_on_error(client, None)
+            // if redirected, unblock the client with a cluster-redirect error.
         }
     }
     false

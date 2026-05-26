@@ -123,6 +123,31 @@ svg .target { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 4; }
 .bar-fill { background: var(--good); height: 100%; border-radius: 6px; }
 .bar-fill.partial { background: var(--accent); }
 .bar-row .count { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.count { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* capability hierarchy (area -> bucket -> file drill-down) */
+.area-block { margin-top: 14px; }
+.area-head { display: flex; align-items: baseline; justify-content: space-between; padding: 10px 0 8px; border-bottom: 2px solid var(--line); }
+.area-head .name { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+.area-head .agg { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bucket { border-bottom: 1px solid var(--line); }
+.bucket-row { display: grid; grid-template-columns: 16px minmax(150px, 220px) 1fr 110px; align-items: center; gap: 12px; padding: 11px 6px; font-size: 14px; cursor: pointer; border-radius: 6px; }
+.bucket-row:hover { background: #f6f8fc; }
+.bucket-row .caret { color: var(--muted); font-size: 10px; transition: transform 0.15s ease; }
+.bucket-row.open .caret { transform: rotate(90deg); }
+.bucket-row .bname { font-weight: 600; }
+.bucket-row .bmeta { color: var(--muted); font-weight: 400; font-size: 12px; }
+.bucket-files { display: none; padding: 2px 0 12px 34px; }
+.bucket-files.open { display: block; }
+.file-row { display: grid; grid-template-columns: minmax(140px, 210px) 1fr 88px; align-items: center; gap: 12px; padding: 5px 0; font-size: 13px; }
+.file-row .fname { color: var(--text); }
+.file-row .fname code { color: var(--muted); font-size: 11px; }
+.mini-track { background: #eef1f6; border-radius: 5px; height: 9px; overflow: hidden; }
+.mini-fill { background: var(--good); height: 100%; border-radius: 5px; }
+.mini-fill.partial { background: var(--accent); }
+.incomplete { color: var(--warn); font-size: 11px; }
+.spark-group-head { font-size: 14px; font-weight: 700; margin: 22px 0 8px; color: var(--text); }
+.spark-group-head:first-child { margin-top: 4px; }
 
 .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-top: 12px; }
 .legend .key { display: inline-flex; align-items: center; gap: 6px; }
