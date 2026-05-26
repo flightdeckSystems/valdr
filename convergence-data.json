@@ -1,0 +1,909 @@
+{
+  "generated_at": "2026-05-26T03:10:36.768300+00:00",
+  "method": "Upstream Valkey TCL suite replayed against the Rust server built at each sampled commit. Same deny-tags as harness/oracle/tcl-survey.py (needs:repl, needs:debug, external:skip), no --durable.",
+  "sections": [
+    {
+      "file": "unit/type/string",
+      "label": "Strings"
+    },
+    {
+      "file": "unit/type/incr",
+      "label": "Incr"
+    },
+    {
+      "file": "unit/type/list",
+      "label": "Lists"
+    },
+    {
+      "file": "unit/type/hash",
+      "label": "Hashes"
+    },
+    {
+      "file": "unit/type/set",
+      "label": "Sets"
+    },
+    {
+      "file": "unit/type/zset",
+      "label": "Sorted sets"
+    },
+    {
+      "file": "unit/type/stream",
+      "label": "Streams"
+    },
+    {
+      "file": "unit/type/stream-cgroups",
+      "label": "Stream groups"
+    },
+    {
+      "file": "unit/protocol",
+      "label": "Protocol"
+    },
+    {
+      "file": "unit/keyspace",
+      "label": "Keyspace"
+    },
+    {
+      "file": "unit/expire",
+      "label": "Expire"
+    },
+    {
+      "file": "unit/bitops",
+      "label": "Bitops"
+    },
+    {
+      "file": "unit/geo",
+      "label": "Geo"
+    },
+    {
+      "file": "unit/scan",
+      "label": "Scan"
+    }
+  ],
+  "points": [
+    {
+      "date": "2026-05-16",
+      "iso": "2026-05-16T22:04:07-04:00",
+      "sha": "fbdefec43",
+      "build_ok": false,
+      "note": "build failed: For more information about an error, try `rustc --explain E0061`. | warning: `redis-core` (lib) generated 5 warnings | error: could not compile `redis-core` (lib) due to 19 previous errors; 5 warnings emitted",
+      "sections": {}
+    },
+    {
+      "date": "2026-05-17",
+      "iso": "2026-05-17T23:17:16-04:00",
+      "sha": "81c646a49",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-18",
+      "iso": "2026-05-18T23:30:36-04:00",
+      "sha": "3420794c0",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-19",
+      "iso": "2026-05-19T22:44:30-04:00",
+      "sha": "970f2a1ef",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-20",
+      "iso": "2026-05-20T11:36:43-04:00",
+      "sha": "47915ba1b",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-21",
+      "iso": "2026-05-21T23:59:58-04:00",
+      "sha": "ca0ab1b22",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-22",
+      "iso": "2026-05-22T23:38:51-04:00",
+      "sha": "c6ed196ff",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-23",
+      "iso": "2026-05-23T13:47:18-04:00",
+      "sha": "a93a2ad1a",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-24",
+      "iso": "2026-05-24T23:59:56-04:00",
+      "sha": "32667a1b6",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    },
+    {
+      "date": "2026-05-25",
+      "iso": "2026-05-25T23:06:49-04:00",
+      "sha": "6e2d817c5",
+      "build_ok": true,
+      "note": "ok",
+      "sections": {
+        "unit/type/string": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/incr": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/list": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/hash": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/set": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/zset": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/type/stream-cgroups": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/protocol": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/keyspace": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/expire": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/bitops": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/geo": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        },
+        "unit/scan": {
+          "passed": null,
+          "failed": null,
+          "total": 0,
+          "timed_out": false
+        }
+      }
+    }
+  ]
+}
