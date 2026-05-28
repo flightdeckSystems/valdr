@@ -73,77 +73,12 @@ pub fn install_swapdb_wake_hook(f: Box<SwapDbWakeFn>) {
     let _ = SWAPDB_WAKE_HOOK.set(f);
 }
 
-type StreamKeyDeletedFn = dyn Fn(&RedisString) + Send + Sync;
-static STREAM_KEY_DELETED_HOOK: OnceLock<Box<StreamKeyDeletedFn>> = OnceLock::new();
-
-/// Install the hook called when a stream key is deleted (DEL / FLUSHDB-side).
-///
-/// The hook receives the key that was deleted and wakes any XREADGROUP BLOCK
-/// clients waiting on that key with a NOGROUP error. Installed once from
-/// `redis-commands`; subsequent calls are no-ops.
-pub fn install_stream_key_deleted_hook(f: Box<StreamKeyDeletedFn>) {
-    let _ = STREAM_KEY_DELETED_HOOK.set(f);
-}
-
-fn fire_stream_key_deleted_hook(key: &RedisString) {
-    if let Some(hook) = STREAM_KEY_DELETED_HOOK.get() {
-        hook(key);
-    }
-}
-
-type StreamDbFlushedFn = dyn Fn() + Send + Sync;
-static STREAM_DB_FLUSHED_HOOK: OnceLock<Box<StreamDbFlushedFn>> = OnceLock::new();
-
-/// Install the hook called when a database is flushed (FLUSHDB / FLUSHALL).
-///
-/// Wakes all XREADGROUP BLOCK clients with NOGROUP errors. Installed once
-/// from `redis-commands`; subsequent calls are no-ops.
-pub fn install_stream_db_flushed_hook(f: Box<StreamDbFlushedFn>) {
-    let _ = STREAM_DB_FLUSHED_HOOK.set(f);
-}
-
-fn fire_stream_db_flushed_hook() {
-    if let Some(hook) = STREAM_DB_FLUSHED_HOOK.get() {
-        hook();
-    }
-}
-
-type StreamRenameHookFn = dyn Fn(&RedisString, u32) + Send + Sync;
-static STREAM_RENAME_HOOK: OnceLock<Box<StreamRenameHookFn>> = OnceLock::new();
-
-/// Install the hook called after RENAME/RENAMENX completes.
-///
-/// The hook receives the destination key name and the database index. The
-/// `redis-commands` layer wakes any XREADGROUP BLOCK clients parked on that
-/// key: if the new value has the expected group, entries are delivered;
-/// otherwise NOGROUP is sent. Installed once from `redis-commands`; subsequent
-/// calls are no-ops.
-pub fn install_stream_rename_hook(f: Box<StreamRenameHookFn>) {
-    let _ = STREAM_RENAME_HOOK.set(f);
-}
-
-fn fire_stream_rename_hook(dst_key: &RedisString, db_id: u32) {
-    if let Some(hook) = STREAM_RENAME_HOOK.get() {
-        hook(dst_key, db_id);
-    }
-}
-
-type StreamKeyOverwrittenFn = dyn Fn(&RedisString) + Send + Sync;
-static STREAM_KEY_OVERWRITTEN_HOOK: OnceLock<Box<StreamKeyOverwrittenFn>> = OnceLock::new();
-
-/// Install the hook called when a stream key is overwritten with a non-stream
-/// value (e.g. SET mystream val). Wakes blocked XREADGROUP clients with
-/// WRONGTYPE error. Installed once from `redis-commands`; subsequent calls
-/// are no-ops.
-pub fn install_stream_key_overwritten_hook(f: Box<StreamKeyOverwrittenFn>) {
-    let _ = STREAM_KEY_OVERWRITTEN_HOOK.set(f);
-}
-
-fn fire_stream_key_overwritten_hook(key: &RedisString) {
-    if let Some(hook) = STREAM_KEY_OVERWRITTEN_HOOK.get() {
-        hook(key);
-    }
-}
+pub use crate::stream_hooks::{
+    install_stream_db_flushed_hook, install_stream_key_deleted_hook,
+    install_stream_key_overwritten_hook, install_stream_rename_hook,
+    fire_stream_db_flushed_hook, fire_stream_key_deleted_hook,
+    fire_stream_key_overwritten_hook, fire_stream_rename_hook,
+};
 
 /// Carry-all for the components needed to fire keyspace notifications from
 /// code paths that do not have a `CommandContext` (lazy expiry, active expiry).
@@ -851,7 +786,7 @@ impl RedisDb {
 
     fn set_key_prepared(&mut self, key: RedisString, value: RedisObject, flags: u32) {
         let may_have_blocked_stream_waiters =
-            STREAM_KEY_OVERWRITTEN_HOOK.get().is_some() && crate::blocked_keys::blocked_keys_any();
+            crate::stream_hooks::has_stream_key_overwritten_hook() && crate::blocked_keys::blocked_keys_any();
         let old_was_stream =
             may_have_blocked_stream_waiters && self.dict.get(&key).is_some_and(|o| o.is_stream());
         let needs_watch_signal = flags & SETKEY_NO_SIGNAL == 0 && watched_keys_any();

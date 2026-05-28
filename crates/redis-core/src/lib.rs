@@ -16,6 +16,8 @@ pub mod childinfo;
 pub mod client;
 pub mod client_info;
 pub mod command_context;
+pub mod reply_traits;
+pub mod stream_hooks;
 pub mod commandlog;
 pub mod conn_socket;
 pub mod conn_tls;

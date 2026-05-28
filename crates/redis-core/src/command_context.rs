@@ -21,6 +21,9 @@ use redis_protocol::frame::encode_resp2;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
+pub use crate::reply_traits::{ArgIndex, ReplyArrayLen, ReplyErrorArg};
+
+
 /// Storage for the database reachable from a `CommandContext`.
 ///
 /// In production the server hands every command a shared `&mut RedisDb` so
@@ -148,75 +151,6 @@ pub struct CommandContext<'a> {
 /// case) and `&[u8]` (used by translated code that builds raw error message
 /// bytes inline). Once all translated code switches to `RedisError`, the
 /// `&[u8]` impl can be removed.
-pub trait ReplyErrorArg {
-    fn into_reply_error_payload(self) -> RedisString;
-}
-
-impl ReplyErrorArg for &RedisError {
-    fn into_reply_error_payload(self) -> RedisString {
-        self.to_resp_payload()
-    }
-}
-
-impl ReplyErrorArg for &[u8] {
-    fn into_reply_error_payload(self) -> RedisString {
-        RedisString::from_bytes(self)
-    }
-}
-
-impl<const N: usize> ReplyErrorArg for &[u8; N] {
-    fn into_reply_error_payload(self) -> RedisString {
-        RedisString::from_bytes(self)
-    }
-}
-
-/// Flexible reply-array length argument.
-///
-/// Translated callers pass `usize`, `i64`, and `i32` interchangeably; this
-/// trait normalises them to `i64` for the underlying writer. Phase 3 may
-/// tighten this once we settle on a single int type for protocol sizes.
-pub trait ReplyArrayLen {
-    fn into_reply_len(self) -> i64;
-}
-
-impl ReplyArrayLen for i64 {
-    fn into_reply_len(self) -> i64 {
-        self
-    }
-}
-impl ReplyArrayLen for usize {
-    fn into_reply_len(self) -> i64 {
-        self as i64
-    }
-}
-impl ReplyArrayLen for i32 {
-    fn into_reply_len(self) -> i64 {
-        self as i64
-    }
-}
-
-/// Flexible argv-index trait. Translated code mixes `usize`, `i32`, and
-/// arithmetic on `i64` for indexing into `client.argv`.
-pub trait ArgIndex {
-    fn into_arg_index(self) -> RedisResult<usize>;
-}
-
-impl ArgIndex for usize {
-    fn into_arg_index(self) -> RedisResult<usize> {
-        Ok(self)
-    }
-}
-impl ArgIndex for i64 {
-    fn into_arg_index(self) -> RedisResult<usize> {
-        usize::try_from(self).map_err(|_| RedisError::runtime(b"argv index out of range"))
-    }
-}
-impl ArgIndex for i32 {
-    fn into_arg_index(self) -> RedisResult<usize> {
-        usize::try_from(self).map_err(|_| RedisError::runtime(b"argv index out of range"))
-    }
-}
-
 impl<'a> CommandContext<'a> {
     /// Construct a context with an isolated owned scratch database.
     ///
