@@ -16,10 +16,40 @@
 </header>
 
 <p class="lead">
-  Wire-compatible single-node alpha. 3,015 of the upstream Valkey TCL tests
-  pass against the current build. Memory-safe TLS via rustls — no OpenSSL,
+  Wire-compatible single-node alpha. Memory-safe TLS via rustls — no OpenSSL,
   no fork-based persistence, no loadable C module ABI.
 </p>
+
+<section>
+  <h2>Coverage</h2>
+  <p>The same passing result, told three honest ways.</p>
+  <pre><code>Of what we run, this passes
+████████████████████████████████████████  100.0%   3,015 / 3,015 counted assertions
+
+The single-node Valkey surface we built
+███████████████████████████████████████░   97.0%   2,466 / 2,541 source-test blocks proven
+
+The full upstream Valkey suite (incl. cluster, sentinel, modules)
+███████████████████████░░░░░░░░░░░░░░░░░   57.4%   2,466 / 4,299 source-test blocks
+</code></pre>
+  <p>
+    The other 1,758 source-test blocks aren't failing — they're out of scope:
+  </p>
+  <pre><code>Loadable C modules (by design — Rust subsets instead)  ████████████████████   587
+Cluster mode (not implemented)                         ███████████████████░   564
+Integration tests (replication, recovery, multi-srv)   ████████████████░░░░   473
+Sentinel HA (not implemented)                          ███░░░░░░░░░░░░░░░░░   100
+Platform (TLS infra tests, IO threads, MPTCP)          █░░░░░░░░░░░░░░░░░░░    33
+</code></pre>
+  <p class="note">
+    Numbers from <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>,
+    regenerated 2026-05-27 against Valkey unstable @ 0321a69. The "single-node
+    core" envelope is the 54-file set under <code>unit/</code> and
+    <code>unit/type/</code>; the 75 unproven blocks are in five known frontier
+    files (<code>aofrw</code>, <code>stream-cgroups</code>,
+    <code>replybufsize</code>, …) — listed there.
+  </p>
+</section>
 
 <section>
   <h2>Quick start</h2>
@@ -44,12 +74,6 @@ printf 'PING\r\n' | nc 127.0.0.1 6379
     Valkey binary loads, C Valkey saves and we load. AUTH and full ACL.
     TLS via rustls. INFO, CLIENT INFO, CLIENT LIST, COMMAND, SLOWLOG, and
     CONFIG GET / SET for the supported keys.
-  </p>
-  <p>
-    The official upstream test runner discovers 54 files under
-    <code>unit/</code> and <code>unit/type/</code>; 3,015 counted assertions
-    pass on the current build. Coverage artifact:
-    <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
   </p>
 </section>
 
