@@ -123,42 +123,49 @@ benchmarked against both adversaries; both adversaries built from
 | Pipeline-smoke median (GET/PING_MBULK/SET × p=1/16/100) | 1.057x | 1.124x |
 | JSON cache mix median (4 KB docs, p=1) | — (see note) | 1.001x |
 
-The two Valkey versions perform very similarly on this matrix — 9.1.0 is
-slightly faster on ping/get/incr; 8.1.7 is slightly faster on data-structure
-ops (`set`, `lrange_*`, `zpopmin`, `spop`). The "production-current" comparison
-(8.1.7) and the "hardest bar" comparison (9.1.0) give essentially the same
-story.
+The two Valkey versions perform within 2% of each other on this matrix
+overall. 8.1.7 turns out to be the slightly faster adversary on most rows —
+`get`, `incr`, all the data-structure ops, `lrange_*`, `zpopmin`, `spop`,
+`mset` — which is why our ratio against 8.1.7 (1.134×) lands slightly below
+our ratio against 9.1.0 (1.150×) even though the same Valdr binary is being
+benchmarked. The handful 9.1.0 is faster on: `ping_inline`, `rpush`, `xadd`
+(all close to parity between the two).
 
 ### Per-command, both adversaries side-by-side
 
-| Command | Valdr rps | Valkey 8.1.7 rps | Ratio | Valkey 9.1.0 rps | Ratio |
-|---|---:|---:|---:|---:|---:|
-| PING_INLINE | 5,263,158 | 3,703,704 | 1.421x | 4,000,000 | 1.316x |
-| PING_MBULK | 7,142,857 | 5,555,556 | 1.286x | 5,555,556 | 1.286x |
-| SET | 3,703,704 | 3,030,303 | 1.222x | 2,564,102 | 1.500x |
-| GET | 4,761,905 | 3,846,154 | 1.238x | 3,448,276 | 1.318x |
-| INCR | 4,166,667 | 4,000,000 | 1.042x | 3,571,428 | 1.077x |
-| LPUSH | 2,777,778 | 2,439,024 | 1.139x | 2,380,952 | 1.077x |
-| RPUSH | 2,702,703 | 2,702,703 | 1.000x | 2,777,778 | 0.900x |
-| LPOP | 2,564,102 | 2,272,727 | 1.128x | 2,173,913 | 1.150x |
-| RPOP | 2,380,952 | 2,500,000 | 0.952x | 2,439,024 | 0.976x |
-| SADD | 2,380,952 | 3,225,806 | 0.738x | 3,125,000 | 0.744x |
-| HSET | 1,724,138 | 2,500,000 | 0.690x | 2,500,000 | 0.702x |
-| SPOP | 2,857,143 | 4,000,000 | 0.714x | 3,703,704 | 0.771x |
-| ZADD | 1,923,077 | 2,439,024 | 0.788x | 2,222,222 | 0.833x |
-| ZPOPMIN | 2,857,143 | 4,166,667 | 0.686x | 3,703,704 | 0.730x |
-| LRANGE_100 (first 100) | 176,367 | 129,032 | 1.367x | 114,943 | 1.626x |
-| LRANGE_300 (first 300) | 56,180 | 38,971 | 1.442x | 37,722 | 1.656x |
-| LRANGE_500 (first 500) | 34,153 | 23,175 | 1.474x | 21,777 | 1.613x |
-| LRANGE_600 (first 600) | 27,778 | 18,685 | 1.487x | 18,123 | 1.617x |
-| MSET (10 keys) | 636,943 | 456,621 | 1.395x | 442,478 | 1.421x |
-| MGET (10 keys) | 1,030,928 | — | — | 740,741 | 1.392x |
-| XADD | 1,123,596 | 1,388,889 | 0.809x | 1,408,451 | 0.780x |
-| FUNCTION_LOAD | 578,035 | 58,893 | 9.815x | 56,593 | 10.394x |
-| FCALL | 847,458 | 1,428,571 | 0.593x | 1,351,351 | 0.643x |
+Each adversary measured in its own run; the two `Valdr rps` columns reflect
+what Valdr did during that adversary's run (run-to-run variance is normally
+~3–8% on the un-quantized rps numbers; `valkey-benchmark` rounds some
+default-suite outputs to common figures, hence many identical pairs).
+
+| Command | Valdr rps (8.1.7 run) | Valkey 8.1.7 rps | Ratio | Valdr rps (9.1.0 run) | Valkey 9.1.0 rps | Ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| PING_INLINE | 5,263,158 | 3,703,704 | 1.421× | 5,263,158 | 4,000,000 | 1.316× |
+| PING_MBULK | 7,142,857 | 5,555,556 | 1.286× | 7,142,857 | 5,555,556 | 1.286× |
+| SET | 3,703,704 | 3,030,303 | 1.222× | 3,846,154 | 2,564,102 | 1.500× |
+| GET | 4,761,905 | 3,846,154 | 1.238× | 4,545,454 | 3,448,276 | 1.318× |
+| INCR | 4,166,667 | 4,000,000 | 1.042× | 3,846,154 | 3,571,428 | 1.077× |
+| LPUSH | 2,777,778 | 2,439,024 | 1.139× | 2,564,102 | 2,380,952 | 1.077× |
+| RPUSH | 2,702,703 | 2,702,703 | 1.000× | 2,500,000 | 2,777,778 | 0.900× |
+| LPOP | 2,564,102 | 2,272,727 | 1.128× | 2,500,000 | 2,173,913 | 1.150× |
+| RPOP | 2,380,952 | 2,500,000 | 0.952× | 2,380,952 | 2,439,024 | 0.976× |
+| SADD | 2,380,952 | 3,225,806 | 0.738× | 2,325,581 | 3,125,000 | 0.744× |
+| HSET | 1,724,138 | 2,500,000 | 0.690× | 1,754,386 | 2,500,000 | 0.702× |
+| SPOP | 2,857,143 | 4,000,000 | 0.714× | 2,857,143 | 3,703,704 | 0.771× |
+| ZADD | 1,923,077 | 2,439,024 | 0.788× | 1,851,852 | 2,222,222 | 0.833× |
+| ZPOPMIN | 2,857,143 | 4,166,667 | 0.686× | 2,702,703 | 3,703,704 | 0.730× |
+| LRANGE_100 (first 100) | 176,367 | 129,032 | 1.367× | 186,916 | 114,943 | 1.626× |
+| LRANGE_300 (first 300) | 56,180 | 38,971 | 1.442× | 62,461 | 37,722 | 1.656× |
+| LRANGE_500 (first 500) | 34,153 | 23,175 | 1.474× | 35,137 | 21,777 | 1.613× |
+| LRANGE_600 (first 600) | 27,778 | 18,685 | 1.487× | 29,308 | 18,123 | 1.617× |
+| MSET (10 keys) | 636,943 | 456,621 | 1.395× | 628,931 | 442,478 | 1.421× |
+| MGET (10 keys) | — | — | — | 1,030,928 | 740,741 | 1.392× |
+| XADD | 1,123,596 | 1,388,889 | 0.809× | 1,098,901 | 1,408,451 | 0.780× |
+| FUNCTION_LOAD | 578,035 | 58,893 | 9.815× | 588,235 | 56,593 | 10.394× |
+| FCALL | 847,458 | 1,428,571 | 0.593× | 869,565 | 1,351,351 | 0.643× |
 
 The honest pattern:
-- **Wins** (ratio > 1.2x against both): `ping_*`, `set`, `get`, `mset`,
+- **Wins** (ratio > 1.2× against both): `ping_*`, `set`, `get`, `mset`,
   `mget`, all `lrange` variants, `function_load`.
 - **Parity** (0.95×–1.20× against both): `incr`, `lpush`, `rpush`, `lpop`, `rpop`.
 - **Behind** (0.6×–0.85×): `sadd`, `hset`, `spop`, `zadd`, `zpopmin`, `xadd`, `fcall`.
@@ -172,17 +179,17 @@ The honest pattern:
 The single best summary of where Valdr wins: GET/SET/PING_MBULK throughput
 at three pipeline depths against both adversaries.
 
-| Workload | Pipeline | Valdr rps | Valkey 8.1.7 ratio | Valkey 9.1.0 ratio |
-|---|---:|---:|---:|---:|
-| GET | 1 | 161,551 | 0.831x | 0.919x |
-| GET | 16 | 2,590,674 | 1.067x | 1.124x |
-| GET | 100 | 6,024,096 | **1.474x** | **1.530x** |
-| PING_MBULK | 1 | 179,533 | 0.946x | 1.013x |
-| PING_MBULK | 16 | 2,375,297 | 0.998x | 1.019x |
-| PING_MBULK | 100 | 7,407,407 | **1.385x** | **1.496x** |
-| SET | 1 | 165,016 | 0.864x | 0.932x |
-| SET | 16 | 2,028,397 | 1.075x | 1.262x |
-| SET | 100 | 3,636,363 | **1.501x** | **1.549x** |
+| Workload | Pipeline | Valdr rps (8.1.7 run) | Valkey 8.1.7 rps | Ratio | Valdr rps (9.1.0 run) | Valkey 9.1.0 rps | Ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GET | 1 | 149,925 | 157,233 | 0.954× | 161,551 | 175,747 | 0.919× |
+| GET | 16 | 2,202,643 | 2,083,333 | 1.057× | 2,590,674 | 2,304,148 | 1.124× |
+| GET | 100 | 5,555,556 | 4,201,680 | **1.322×** | 6,024,096 | 3,937,008 | **1.530×** |
+| PING_MBULK | 1 | 152,905 | 160,514 | 0.953× | 179,533 | 177,305 | 1.013× |
+| PING_MBULK | 16 | 2,267,574 | 2,232,143 | 1.016× | 2,375,297 | 2,331,002 | 1.019× |
+| PING_MBULK | 100 | 7,246,377 | 5,102,041 | **1.420×** | 7,407,407 | 4,950,495 | **1.496×** |
+| SET | 1 | 150,376 | 159,236 | 0.944× | 165,016 | 176,991 | 0.932× |
+| SET | 16 | 1,941,748 | 1,757,469 | 1.105× | 2,028,397 | 1,607,717 | 1.262× |
+| SET | 100 | 3,610,108 | 2,695,418 | **1.339×** | 3,636,363 | 2,347,418 | **1.549×** |
 
 At single-request pipeline depth, Valdr trails by 5-17% (per-request RESP
 parsing + dispatch overhead). At pipeline=16, parity. At pipeline=100,
