@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${IMAGE:-valkey-rs:smoke}"
-CONTAINER="valkey-rs-smoke-$$"
-VOLUME="valkey-rs-smoke-$$"
+IMAGE="${IMAGE:-valdr:smoke}"
+CONTAINER="valdr-smoke-$$"
+VOLUME="valdr-smoke-$$"
 TMPDIR="$(mktemp -d)"
 PYTHON="${PYTHON:-python3}"
 

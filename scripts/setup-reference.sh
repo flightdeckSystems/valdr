@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # scripts/setup-reference.sh — clone the pinned upstream Valkey source.
 #
-# valkey-rs verifies itself against upstream Valkey via three oracles
+# valdr verifies itself against upstream Valkey via three oracles
 # (wire-diff, rdb-diff, and the upstream TCL test suite). All three need
 # the real Valkey source built locally. This script clones it at the
 # pinned commit recorded in harness/source.toml.
 #
-# Run once after cloning valkey-rs. Idempotent — safe to re-run.
+# Run once after cloning valdr. Idempotent — safe to re-run.
 #
 # Usage:
 #   bash scripts/setup-reference.sh

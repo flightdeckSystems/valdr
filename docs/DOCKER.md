@@ -1,6 +1,6 @@
 # Docker
 
-`valkey-rs` ships as a single `redis-server` binary inside a small Debian
+`valdr` ships as a single `redis-server` binary inside a small Debian
 runtime image. The container listens on port 6379 and stores persistence files
 under `/data`.
 
@@ -9,27 +9,27 @@ under `/data`.
 Published images live at GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/ianm199/valkey-rs:alpha &&
-docker run --rm -p 6379:6379 -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
+docker pull ghcr.io/flightdecksystems/valdr:alpha &&
+docker run --rm -p 6379:6379 -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
 ```
 
 One-copy try/smoke flow using only Docker:
 
 ```bash
-docker network create valkey-rs-try >/dev/null 2>&1 || true
-docker rm -f valkey-rs-try >/dev/null 2>&1 || true
-docker pull ghcr.io/ianm199/valkey-rs:alpha
-docker run -d --name valkey-rs-try --network valkey-rs-try -v valkey-rs-data:/data ghcr.io/ianm199/valkey-rs:alpha
-docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try PING
-docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try SET hello world
-docker run --rm --network valkey-rs-try redis:7-alpine redis-cli -h valkey-rs-try GET hello
+docker network create valdr-try >/dev/null 2>&1 || true
+docker rm -f valdr-try >/dev/null 2>&1 || true
+docker pull ghcr.io/flightdecksystems/valdr:alpha
+docker run -d --name valdr-try --network valdr-try -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
+docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try PING
+docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try SET hello world
+docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try GET hello
 ```
 
 Stop it when done:
 
 ```bash
-docker rm -f valkey-rs-try
-docker network rm valkey-rs-try
+docker rm -f valdr-try
+docker network rm valdr-try
 ```
 
 Useful tags:
@@ -46,8 +46,8 @@ repository package settings after the first workflow publish.
 ## Build locally
 
 ```bash
-docker build -t valkey-rs:local .
-docker run --rm -p 6379:6379 -v valkey-rs-data:/data valkey-rs:local
+docker build -t valdr:local .
+docker run --rm -p 6379:6379 -v valdr-data:/data valdr:local
 ```
 
 Or with Compose:
@@ -69,8 +69,8 @@ bash harness/docker/smoke.sh
 Set `IMAGE=...` to test a different image name:
 
 ```bash
-docker pull ghcr.io/ianm199/valkey-rs:alpha
-SKIP_BUILD=1 IMAGE=ghcr.io/ianm199/valkey-rs:alpha bash harness/docker/smoke.sh
+docker pull ghcr.io/flightdecksystems/valdr:alpha
+SKIP_BUILD=1 IMAGE=ghcr.io/flightdecksystems/valdr:alpha bash harness/docker/smoke.sh
 ```
 
 ## Benchmark with Docker
@@ -80,7 +80,7 @@ network and runs `redis-benchmark` from `redis:7-alpine` against it. It does
 not require a local Redis/Valkey install:
 
 ```bash
-IMAGE=ghcr.io/ianm199/valkey-rs:alpha \
+IMAGE=ghcr.io/flightdecksystems/valdr:alpha \
 REQUESTS=100000 \
 CLIENTS=50 \
 PIPELINE=16 \
@@ -98,8 +98,8 @@ PIPELINE=100 REQUESTS=200000 TESTS=get,set,incr,ping_mbulk bash harness/docker/b
 CSV=1 OUTPUT=harness/bench/results/docker-alpha.csv bash harness/docker/bench.sh
 
 # Benchmark a locally built image without pulling.
-docker build -t valkey-rs:local .
-PULL=0 IMAGE=valkey-rs:local bash harness/docker/bench.sh
+docker build -t valdr:local .
+PULL=0 IMAGE=valdr:local bash harness/docker/bench.sh
 ```
 
 ## Runtime config
@@ -107,7 +107,7 @@ PULL=0 IMAGE=valkey-rs:local bash harness/docker/bench.sh
 The image runs:
 
 ```bash
-redis-server /etc/valkey-rs/redis.conf
+redis-server /etc/valdr/redis.conf
 ```
 
 The bundled config is:
@@ -129,7 +129,7 @@ Publish from a machine logged into GHCR with package-write permission:
 
 ```bash
 SHA="$(git rev-parse --short HEAD)"
-IMAGE="ghcr.io/ianm199/valkey-rs"
+IMAGE="ghcr.io/flightdecksystems/valdr"
 
 docker build \
   -t "$IMAGE:alpha" \

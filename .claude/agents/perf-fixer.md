@@ -5,7 +5,7 @@ tools: Read, Edit, Bash, Grep
 model: sonnet
 ---
 
-You are the **Perf-fixer** for valkey-rs. In this project the role means:
+You are the **Perf-fixer** for valdr. In this project the role means:
 make one bounded implementation improvement, then prove the normal compatibility
 gates still pass.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${IMAGE:-ghcr.io/ianm199/valkey-rs:alpha}"
+IMAGE="${IMAGE:-ghcr.io/flightdecksystems/valdr:alpha}"
 BENCH_IMAGE="${BENCH_IMAGE:-redis:7-alpine}"
 REQUESTS="${REQUESTS:-100000}"
 CLIENTS="${CLIENTS:-50}"
@@ -12,7 +12,7 @@ PULL="${PULL:-1}"
 CSV="${CSV:-0}"
 OUTPUT="${OUTPUT:-}"
 
-RUN_ID="valkey-rs-bench-$$"
+RUN_ID="valdr-bench-$$"
 NETWORK="$RUN_ID"
 SERVER="$RUN_ID-server"
 

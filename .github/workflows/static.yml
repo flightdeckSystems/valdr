@@ -1,4 +1,4 @@
-# Deploy the valkey-rs project site (landing + performance + convergence) to GitHub Pages.
+# Deploy the valdr project site (landing + performance + convergence) to GitHub Pages.
 name: Deploy static content to Pages
 
 on:

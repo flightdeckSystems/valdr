@@ -7,7 +7,7 @@ oracle + profile-matrix + smoke-suite hotspot evidence (commits
 ## Decision
 
 The faithful event-loop runtime owner (option A in
-`docs/RUNTIME_OWNERSHIP_PLAN.md`) is the production direction for valkey-rs.
+`docs/RUNTIME_OWNERSHIP_PLAN.md`) is the production direction for valdr.
 Subsystem ownership is named explicitly below so translator packets cannot
 quietly redraw the boundary.
 

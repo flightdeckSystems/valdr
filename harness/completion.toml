@@ -1,7 +1,7 @@
 schema_version = 1
 
 [project]
-name = "valkey-rs-runtime-owner-owned-db-run"
+name = "valdr-runtime-owner-owned-db-run"
 target = "faithful RuntimeOwner-owned DB migration after the mio plain-TCP poller and hot-path wave"
 description = "This run is complete when the owner-owned DB architecture packet is recorded, selected-DB/cross-DB routing is prepared through CommandContext, RuntimeOwner owns the single live DB vector for normal command execution, and each implementation packet is followed by wire-smoke plus benchmark/profile/regression evidence."
 non_goals = [

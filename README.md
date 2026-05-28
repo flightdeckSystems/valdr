@@ -1,4 +1,4 @@
-# valkey-rs
+# valdr
 
 Single-node Valkey-compatible server: a Rust port of the upstream Valkey C implementation.
 
@@ -50,27 +50,27 @@ Single-node Valkey-compatible server: a Rust port of the upstream Valkey C imple
 ## Benchmark Commands
 
 <details>
-<summary>Run official valkey-benchmark against Valkey and valkey-rs Docker images</summary>
+<summary>Run official valkey-benchmark against Valkey and valdr Docker images</summary>
 
 ```bash
-docker network create valkey-rs-bench
+docker network create valdr-bench
 
 docker run -d --rm \
   --name valkey-ref \
-  --network valkey-rs-bench \
+  --network valdr-bench \
   valkey/valkey:8-alpine
 
 docker run -d --rm \
-  --name valkey-rs \
-  --network valkey-rs-bench \
-  ghcr.io/ianm199/valkey-rs:alpha
+  --name valdr \
+  --network valdr-bench \
+  ghcr.io/flightdecksystems/valdr:alpha
 
 sleep 1
 ```
 
 ```bash
 docker run --rm \
-  --network valkey-rs-bench \
+  --network valdr-bench \
   valkey/valkey:8-alpine \
   valkey-benchmark \
     -h valkey-ref \
@@ -87,10 +87,10 @@ docker run --rm \
 
 ```bash
 docker run --rm \
-  --network valkey-rs-bench \
+  --network valdr-bench \
   valkey/valkey:8-alpine \
   valkey-benchmark \
-    -h valkey-rs \
+    -h valdr \
     -p 6379 \
     -n 100000 \
     -c 50 \
@@ -103,8 +103,8 @@ docker run --rm \
 ```
 
 ```bash
-docker rm -f valkey-ref valkey-rs
-docker network rm valkey-rs-bench
+docker rm -f valkey-ref valdr
+docker network rm valdr-bench
 ```
 
 </details>
@@ -128,7 +128,7 @@ Official `valkey-benchmark` suite:
 
 Focused comparison:
 
-| Workload | Pipeline | Valkey rps | valkey-rs rps | Ratio | Valkey p99 ms | valkey-rs p99 ms |
+| Workload | Pipeline | Valkey rps | valdr rps | Ratio | Valkey p99 ms | valdr p99 ms |
 |---|---:|---:|---:|---:|---:|---:|
 | GET | 1 | 149,031 | 147,275 | 0.988x | 0.407 | 0.399 |
 | SET | 1 | 136,426 | 143,678 | 1.053x | 0.439 | 0.399 |
@@ -140,7 +140,7 @@ Focused comparison:
 
 Per-command `valkey-benchmark` breakdown:
 
-| Command | Valkey rps | valkey-rs rps | Ratio | Valkey p99 ms | valkey-rs p99 ms |
+| Command | Valkey rps | valdr rps | Ratio | Valkey p99 ms | valdr p99 ms |
 |---|---:|---:|---:|---:|---:|
 | PING_INLINE | 3,846,154 | 5,263,158 | 1.368x | 1.559 | 1.063 |
 | PING_MBULK | 5,000,000 | 7,142,857 | 1.429x | 1.231 | 0.703 |
@@ -184,8 +184,8 @@ cargo build --release
 ## Docker
 
 ```bash
-docker pull ghcr.io/ianm199/valkey-rs:alpha
-docker run --rm -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha
+docker pull ghcr.io/flightdecksystems/valdr:alpha
+docker run --rm -p 6379:6379 ghcr.io/flightdecksystems/valdr:alpha
 ```
 
 ## Test Commands
