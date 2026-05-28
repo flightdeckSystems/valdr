@@ -1,0 +1,165 @@
+/* Valdr site — plain, technical, no slop.
+ * No web fonts, no JS, no analytics. Serif body, system mono. One accent color.
+ */
+
+:root {
+  --text:   #1a1a1a;
+  --muted:  #6b7280;
+  --accent: #4c1d95;
+  --code-bg:     #f6f5f3;
+  --code-border: #e7e5e0;
+  --rule:        #e7e5e0;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: #fff;
+  color: var(--text);
+  font-family: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 18px;
+  line-height: 1.62;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 56px 28px 96px;
+}
+
+@media (max-width: 480px) {
+  main { padding: 40px 22px 72px; }
+  body { font-size: 17px; }
+}
+
+/* Header & wordmark */
+
+header {
+  margin-bottom: 28px;
+}
+
+h1 {
+  font-size: 44px;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tagline {
+  font-size: 22px;
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.lead {
+  margin: 18px 0 40px;
+  font-size: 19px;
+}
+
+/* Section structure */
+
+section {
+  margin: 36px 0;
+}
+
+h2 {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 14px;
+  letter-spacing: -0.005em;
+}
+
+h3 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 22px 0 8px;
+  font-style: italic;
+}
+
+p {
+  margin: 12px 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+
+a:hover { text-decoration-thickness: 2px; }
+
+/* Code */
+
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, "JetBrains Mono", Consolas, monospace;
+  font-size: 14px;
+}
+
+code {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  line-height: 1.5;
+  margin: 14px 0;
+}
+
+pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 14px;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 15px;
+  font-style: italic;
+  margin-top: 10px;
+}
+
+/* The single horizontal rule between "What doesn't" and "Why" */
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 56px 0;
+}
+
+/* Footer */
+
+footer {
+  margin-top: 72px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+footer p {
+  margin: 4px 0;
+}
+
+footer .verified {
+  font-size: 12px;
+}
+
+footer a {
+  color: var(--muted);
+}

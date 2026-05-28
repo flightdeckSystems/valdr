@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valdr — Valkey, in safe Rust</title>
+<meta name="description" content="Valdr is a Rust port of the Valkey server. Wire-compatible single-node alpha. 3,015 upstream TCL tests pass. Memory-safe TLS via rustls — no OpenSSL, no fork.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<header>
+  <h1>Valdr</h1>
+  <p class="tagline">Valkey, in safe Rust.</p>
+</header>
+
+<p class="lead">
+  Wire-compatible single-node alpha. 3,015 of the upstream Valkey TCL tests
+  pass against the current build. Memory-safe TLS via rustls — no OpenSSL,
+  no fork-based persistence, no loadable C module ABI.
+</p>
+
+<section>
+  <h2>Quick start</h2>
+  <pre><code>docker pull ghcr.io/ianm199/valkey-rs:alpha
+docker run -d --name valdr -p 6379:6379 ghcr.io/ianm199/valkey-rs:alpha
+printf 'PING\r\n' | nc 127.0.0.1 6379
+# +PONG</code></pre>
+  <p class="note">
+    The container image is currently published under the legacy
+    <code>valkey-rs</code> namespace; rename to <code>valdr</code> is pending.
+    Or build from source: <code>cargo build --release --bin redis-server</code>.
+  </p>
+</section>
+
+<section>
+  <h2>What works</h2>
+  <p>
+    Strings, hashes, lists, sets, sorted sets. Streams with consumer groups
+    (XADD, XREAD, XREADGROUP, XACK, XCLAIM). Pub/Sub, sharded and regular.
+    Scripting (EVAL, EVALSHA, FCALL, FUNCTION LOAD). Transactions (MULTI,
+    EXEC, WATCH). RDB persistence in both directions — we save and the C
+    Valkey binary loads, C Valkey saves and we load. AUTH and full ACL.
+    TLS via rustls. INFO, CLIENT INFO, CLIENT LIST, COMMAND, SLOWLOG, and
+    CONFIG GET / SET for the supported keys.
+  </p>
+  <p>
+    The official upstream test runner discovers 54 files under
+    <code>unit/</code> and <code>unit/type/</code>; 3,015 counted assertions
+    pass on the current build. Coverage artifact:
+    <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
+  </p>
+</section>
+
+<section>
+  <h2>What doesn't yet</h2>
+  <p>
+    Replication code is in the tree (REPLICAOF, PSYNC, REPLCONF, WAIT) but
+    the integration test suite has never been run against Valdr — partial
+    resync in particular is unproven. Don't depend on replication. AOF
+    persistence is alpha; the rewrite path has known gaps and is not
+    release-gated. Cluster mode and Sentinel are not implemented. Loadable
+    C modules (the <code>.so</code> Redis Module API) are intentionally not —
+    Rust-native subsets of RedisJSON, RedisBloom, and a vector type exist
+    instead.
+  </p>
+  <p>
+    A handful of <code>unit/tls.tcl</code> tests assert OpenSSL CBC ciphers
+    (<code>AES256-SHA256</code>, <code>AES128-SHA256</code>). rustls refuses
+    CBC ciphers on principle; those tests cannot pass without abandoning the
+    safety thesis. That is a security upgrade, not a regression, but it is a
+    deliberate divergence from upstream Valkey worth knowing about.
+  </p>
+</section>
+
+<hr>
+
+<section>
+  <h2>Why this exists</h2>
+
+  <h3>The security thesis.</h3>
+  <p>
+    The high-severity Redis CVEs of the past decade have been memory-safety
+    bugs in C. CVE-2025-49844 (RediShell), CVSS 10.0, was a use-after-free
+    in the Lua garbage collector that lived in the source for thirteen
+    years. CVE-2025-46817 was an integer overflow in <code>unpack</code>.
+    CVE-2021-32625 was heap corruption through STRALGO LCS. The pattern is
+    consistent: the bug is in the substrate, not the protocol.
+  </p>
+  <p>
+    Valdr replaces the substrate. The data engine, the RESP parser, and the
+    TLS stack are all safe Rust. There is no <code>fork()</code>. There is
+    no loadable C module ABI. The honest exception: Valdr currently embeds
+    the Lua VM via mlua, which wraps the same upstream C interpreter. The
+    Lua subsystem is not yet memory-safe Rust — see
+    <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
+    for the path to replacing it with the sibling <code>lua-rs</code>
+    runtime. Until that lands, the RediShell class of vulnerability is not
+    eliminated by Valdr; everything outside the Lua VM is.
+  </p>
+
+  <h3>The methodology.</h3>
+  <p>
+    Valdr was built with a custom AI-driven C-to-Rust porting harness:
+    upstream Valkey pinned as source, the upstream test suite as oracle, a
+    type-vocabulary registry that enforces single-owner cross-crate types,
+    mechanical Stop hooks gating every commit (per-crate unsafe budget,
+    forbidden patterns, PORT STATUS trailers on every <code>.rs</code>
+    file), and bounded subagent roles whose write access is structurally
+    constrained. The Rust ports are how we prove the harness works. Next:
+    nginx.
+  </p>
+</section>
+
+<section>
+  <h2>Try it</h2>
+  <p>
+    Minimal TLS-enabled config — a six-line <code>redis.conf</code>:
+  </p>
+  <pre><code>bind 0.0.0.0
+port 0
+tls-port 6379
+tls-cert-file /certs/server.crt
+tls-key-file  /certs/server.key
+requirepass   &lt;a long random string&gt;</code></pre>
+  <p>
+    Connect:
+    <code>valkey-cli --tls --cacert ./server.crt -h &lt;host&gt; -p 6379 -a '&lt;password&gt;' PING</code>.
+  </p>
+</section>
+
+<footer>
+  <p>
+    Valdr · alpha · BSD 3-Clause ·
+    <a href="https://github.com/flightdeckSystems/valdr">github.com/flightdeckSystems/valdr</a>
+  </p>
+  <p class="verified">
+    Status verified 2026-05-28 against Valkey unstable @ 0321a69.
+  </p>
+</footer>
+
+</main>
+</body>
+</html>
