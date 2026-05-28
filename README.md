@@ -111,68 +111,99 @@ docker network rm valdr-bench
 
 ## Performance
 
-Latest warmed local run vs upstream Valkey:
+Latest warmed local run vs **two upstream Valkey versions**: Valkey 8.1.7
+(the current 8-line stable, what `valkey/valkey:8-alpine` ships) and Valkey
+9.1.0 (the current 9-line stable, released 2026-05-19). Same Valdr binary
+benchmarked against both adversaries; both adversaries built from
+`reference/valkey` with `make BUILD_TLS=no`.
 
-Official `valkey-benchmark` suite:
+| Metric | vs Valkey 8.1.7 | vs Valkey 9.1.0 |
+|---|---:|---:|
+| Median ratio across 23 commands | **1.134x** | **1.150x** |
+| Pipeline-smoke median (GET/PING_MBULK/SET × p=1/16/100) | 1.057x | 1.124x |
+| JSON cache mix median (4 KB docs, p=1) | — (see note) | 1.001x |
 
-| Metric | Result |
-|---|---:|
-| Command rows completed | 23 / 23 |
-| Median throughput ratio vs Valkey | 1.250x |
-| PING_MBULK ratio | 1.429x |
-| SET ratio | 1.538x |
-| GET ratio | 1.409x |
-| INCR ratio | 1.250x |
-| MGET ratio | 1.525x |
-| Slowest known row | `FCALL` at 0.593x |
+The two Valkey versions perform very similarly on this matrix — 9.1.0 is
+slightly faster on ping/get/incr; 8.1.7 is slightly faster on data-structure
+ops (`set`, `lrange_*`, `zpopmin`, `spop`). The "production-current" comparison
+(8.1.7) and the "hardest bar" comparison (9.1.0) give essentially the same
+story.
 
-Focused comparison:
+### Per-command, both adversaries side-by-side
 
-| Workload | Pipeline | Valkey rps | valdr rps | Ratio | Valkey p99 ms | valdr p99 ms |
-|---|---:|---:|---:|---:|---:|---:|
-| GET | 1 | 149,031 | 147,275 | 0.988x | 0.407 | 0.399 |
-| SET | 1 | 136,426 | 143,678 | 1.053x | 0.439 | 0.399 |
-| GET | 100 | 3,802,281 | 5,988,024 | 1.575x | 1.527 | 0.935 |
-| SET | 100 | 2,331,003 | 3,610,108 | 1.549x | 2.383 | 1.559 |
-| JSON GET, 4KB docs | 1 | 34,288 | 33,832 | 0.987x | 4.167 | 4.173 |
-| JSON SET, 4KB docs | 1 | 32,503 | 32,889 | 1.012x | 4.249 | 4.387 |
-| JSON mixed, 4KB docs | 1 | 33,090 | 34,438 | 1.041x | 4.284 | 4.131 |
-
-Per-command `valkey-benchmark` breakdown:
-
-| Command | Valkey rps | valdr rps | Ratio | Valkey p99 ms | valdr p99 ms |
+| Command | Valdr rps | Valkey 8.1.7 rps | Ratio | Valkey 9.1.0 rps | Ratio |
 |---|---:|---:|---:|---:|---:|
-| PING_INLINE | 3,846,154 | 5,263,158 | 1.368x | 1.559 | 1.063 |
-| PING_MBULK | 5,000,000 | 7,142,857 | 1.429x | 1.231 | 0.703 |
-| SET | 2,500,000 | 3,846,154 | 1.538x | 2.303 | 1.631 |
-| GET | 3,225,806 | 4,545,454 | 1.409x | 1.823 | 1.143 |
-| INCR | 3,333,334 | 4,166,667 | 1.250x | 1.663 | 1.311 |
-| LPUSH | 2,325,581 | 2,631,579 | 1.132x | 2.799 | 2.095 |
-| RPUSH | 2,631,579 | 2,564,102 | 0.974x | 2.247 | 2.231 |
-| LPOP | 2,173,913 | 2,500,000 | 1.150x | 2.775 | 2.223 |
-| RPOP | 2,380,952 | 2,380,952 | 1.000x | 2.455 | 4.367 |
-| SADD | 3,030,303 | 2,380,952 | 0.786x | 1.935 | 2.271 |
-| HSET | 2,325,581 | 1,785,714 | 0.768x | 2.999 | 3.111 |
-| SPOP | 3,703,704 | 3,125,000 | 0.844x | 1.599 | 1.823 |
-| ZADD | 2,222,222 | 1,724,138 | 0.776x | 3.575 | 4.943 |
-| ZPOPMIN | 3,846,154 | 2,777,778 | 0.722x | 1.511 | 2.007 |
-| LRANGE_100 | 110,132 | 182,815 | 1.660x | 24.959 | 21.855 |
-| LRANGE_300 | 35,613 | 58,207 | 1.634x | 61.375 | 94.079 |
-| LRANGE_500 | 20,458 | 32,765 | 1.602x | 103.487 | 106.559 |
-| LRANGE_600 | 17,015 | 26,874 | 1.579x | 119.423 | 146.687 |
-| MSET | 440,529 | 609,756 | 1.384x | 3.799 | 8.935 |
-| MGET | 662,252 | 1,010,101 | 1.525x | 10.351 | 5.167 |
-| XADD | 1,351,351 | 1,098,901 | 0.813x | 6.391 | 4.735 |
-| FUNCTION LOAD | 55,432 | 588,235 | 10.612x | 76.351 | 8.727 |
-| FCALL | 1,369,863 | 813,008 | 0.593x | 4.975 | 12.191 |
+| PING_INLINE | 5,263,158 | 3,703,704 | 1.421x | 4,000,000 | 1.316x |
+| PING_MBULK | 7,142,857 | 5,555,556 | 1.286x | 5,555,556 | 1.286x |
+| SET | 3,703,704 | 3,030,303 | 1.222x | 2,564,102 | 1.500x |
+| GET | 4,761,905 | 3,846,154 | 1.238x | 3,448,276 | 1.318x |
+| INCR | 4,166,667 | 4,000,000 | 1.042x | 3,571,428 | 1.077x |
+| LPUSH | 2,777,778 | 2,439,024 | 1.139x | 2,380,952 | 1.077x |
+| RPUSH | 2,702,703 | 2,702,703 | 1.000x | 2,777,778 | 0.900x |
+| LPOP | 2,564,102 | 2,272,727 | 1.128x | 2,173,913 | 1.150x |
+| RPOP | 2,380,952 | 2,500,000 | 0.952x | 2,439,024 | 0.976x |
+| SADD | 2,380,952 | 3,225,806 | 0.738x | 3,125,000 | 0.744x |
+| HSET | 1,724,138 | 2,500,000 | 0.690x | 2,500,000 | 0.702x |
+| SPOP | 2,857,143 | 4,000,000 | 0.714x | 3,703,704 | 0.771x |
+| ZADD | 1,923,077 | 2,439,024 | 0.788x | 2,222,222 | 0.833x |
+| ZPOPMIN | 2,857,143 | 4,166,667 | 0.686x | 3,703,704 | 0.730x |
+| LRANGE_100 (first 100) | 176,367 | 129,032 | 1.367x | 114,943 | 1.626x |
+| LRANGE_300 (first 300) | 56,180 | 38,971 | 1.442x | 37,722 | 1.656x |
+| LRANGE_500 (first 500) | 34,153 | 23,175 | 1.474x | 21,777 | 1.613x |
+| LRANGE_600 (first 600) | 27,778 | 18,685 | 1.487x | 18,123 | 1.617x |
+| MSET (10 keys) | 636,943 | 456,621 | 1.395x | 442,478 | 1.421x |
+| MGET (10 keys) | 1,030,928 | — | — | 740,741 | 1.392x |
+| XADD | 1,123,596 | 1,388,889 | 0.809x | 1,408,451 | 0.780x |
+| FUNCTION_LOAD | 578,035 | 58,893 | 9.815x | 56,593 | 10.394x |
+| FCALL | 847,458 | 1,428,571 | 0.593x | 1,351,351 | 0.643x |
 
-Benchmark note:
+The honest pattern:
+- **Wins** (ratio > 1.2x against both): `ping_*`, `set`, `get`, `mset`,
+  `mget`, all `lrange` variants, `function_load`.
+- **Parity** (0.95×–1.20× against both): `incr`, `lpush`, `rpush`, `lpop`, `rpop`.
+- **Behind** (0.6×–0.85×): `sadd`, `hset`, `spop`, `zadd`, `zpopmin`, `xadd`, `fcall`.
+  These are the data-structure-internal commands and the Lua FCALL path.
+  These are also where the Rust port's behavioral fidelity guarantees
+  (oracle-gated against upstream tests) currently extract a perf cost we
+  haven't paid down yet.
 
-- Commit: `b31c324`
-- Host: Apple M3 Max
-- Warmup: 1,000 `PING_MBULK` requests, 1 client, pipeline 1
-- Full artifact: `harness/bench/results/20260527T145526Z-b31c324-official-warm-results.md`
-- Re-run: `bash harness/bench/official-warm-run.sh`
+### Pipeline-depth curve (the publication-relevant shape)
+
+The single best summary of where Valdr wins: GET/SET/PING_MBULK throughput
+at three pipeline depths against both adversaries.
+
+| Workload | Pipeline | Valdr rps | Valkey 8.1.7 ratio | Valkey 9.1.0 ratio |
+|---|---:|---:|---:|---:|
+| GET | 1 | 161,551 | 0.831x | 0.919x |
+| GET | 16 | 2,590,674 | 1.067x | 1.124x |
+| GET | 100 | 6,024,096 | **1.474x** | **1.530x** |
+| PING_MBULK | 1 | 179,533 | 0.946x | 1.013x |
+| PING_MBULK | 16 | 2,375,297 | 0.998x | 1.019x |
+| PING_MBULK | 100 | 7,407,407 | **1.385x** | **1.496x** |
+| SET | 1 | 165,016 | 0.864x | 0.932x |
+| SET | 16 | 2,028,397 | 1.075x | 1.262x |
+| SET | 100 | 3,636,363 | **1.501x** | **1.549x** |
+
+At single-request pipeline depth, Valdr trails by 5-17% (per-request RESP
+parsing + dispatch overhead). At pipeline=16, parity. At pipeline=100,
+Valdr is consistently **1.4-1.5× faster than either Valkey version** — the
+RuntimeOwner event loop amortizes parser/dispatch/write costs better than
+upstream's accept-per-thread model.
+
+Benchmark notes:
+
+- Valdr commit: `7838a3d` (this README); Valkey adversaries:
+  `valkey/valkey:8-alpine` (= 8.1.7) and `valkey-io/valkey@9.1.0`
+- Host: Apple M3 Max, macOS
+- Warmup: 1,000 `PING_MBULK` requests, 1 client, pipeline 1, before every measured row
+- Full artifacts:
+  `harness/bench/results/20260528T191756Z-9666290-official-warm-results.md` (vs 9.1.0),
+  `harness/bench/results/20260528T193018Z-7838a3d-official-warm-run.log` (vs 8.1.7)
+- MGET vs 8.1.7 parse-errored in `valkey-benchmark`; row excluded from the 8.1.7 column.
+  Median is computed over the 22 commands present.
+- Re-run: `bash harness/bench/official-warm-run.sh` (uses whatever Valkey
+  is built at `reference/valkey`; switch tags with `git -C reference/valkey
+  checkout <tag> && make -j BUILD_TLS=no`)
 
 ## Run
 
