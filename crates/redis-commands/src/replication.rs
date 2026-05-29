@@ -979,6 +979,20 @@ fn handle_psync(
         let line = continue_reply(our_runid);
         ctx.client_mut().reply_buf.extend_from_slice(&line);
         ctx.client_mut().is_replica = true;
+        if master_offset > provided_offset {
+            let catch_up = {
+                let guard = match repl.backlog.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.read_at(provided_offset, (master_offset - provided_offset) as usize)
+            };
+            if let Some(bytes) = catch_up {
+                if !bytes.is_empty() {
+                    let _ = repl.send_to_replica(client_id, bytes);
+                }
+            }
+        }
         return Ok(());
     }
 

@@ -215,6 +215,15 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
             ));
         return Ok(());
     }
+    if queued_has_write_command(&ctx.client_ref().queued_argvs) {
+        if let Some(reply) = crate::dispatch::min_replicas_write_blocked(ctx) {
+            reset_multi_state(ctx.client_mut());
+            ctx.client_mut()
+                .reply_buf
+                .extend_from_slice(&execabort_from_error_reply(&reply));
+            return Ok(());
+        }
+    }
 
     let queued: Vec<Vec<RedisString>> = std::mem::take(&mut ctx.client_mut().queued_argvs);
     ctx.client_mut().set_flag_multi(false);
@@ -237,7 +246,7 @@ pub fn exec_command(ctx: &mut CommandContext) -> RedisResult<()> {
 
     ctx.client_mut().set_flag_deny_blocking(false);
 
-    let propagated_offset = propagate_transaction_commands(&propagated_commands);
+    let propagated_offset = propagate_transaction_commands(ctx, &propagated_commands);
     if propagated_offset > 0 {
         ctx.client_mut().last_write_repl_offset = propagated_offset;
     }
@@ -255,6 +264,14 @@ fn queued_has_denyoom_command(queued: &[Vec<RedisString>]) -> bool {
     queued.iter().any(|argv| {
         argv.first()
             .map(|name| command_is_denyoom(name.as_bytes()))
+            .unwrap_or(false)
+    })
+}
+
+fn queued_has_write_command(queued: &[Vec<RedisString>]) -> bool {
+    queued.iter().any(|argv| {
+        argv.first()
+            .map(|name| crate::dispatch::command_is_write(name.as_bytes()))
             .unwrap_or(false)
     })
 }
@@ -302,8 +319,19 @@ fn run_one_queued(
     (selected_db, propagated)
 }
 
-fn propagate_transaction_commands(commands: &[(u32, Vec<RedisString>)]) -> i64 {
-    append_transaction_commands_to_aof(commands);
+fn propagate_transaction_commands(
+    ctx: &mut CommandContext,
+    commands: &[(u32, Vec<RedisString>)],
+) -> i64 {
+    // If a queued REPLICAOF demoted this server to a replica during the EXEC,
+    // the entire transaction must not be propagated to the (now disconnected)
+    // replicas — matching Valkey, which discards pending propagation when it
+    // becomes a replica. The queued writes still executed locally; they are
+    // simply not forwarded.
+    if redis_core::replication::global_replication_state().is_replica() {
+        return 0;
+    }
+    append_transaction_commands_to_aof(ctx, commands);
     match commands {
         [] => 0,
         [(db_id, argv)] => crate::dispatch::propagate_command_from_wake(*db_id, argv),
@@ -327,7 +355,10 @@ fn propagate_transaction_commands(commands: &[(u32, Vec<RedisString>)]) -> i64 {
     }
 }
 
-fn append_transaction_commands_to_aof(commands: &[(u32, Vec<RedisString>)]) {
+fn append_transaction_commands_to_aof(
+    ctx: &mut CommandContext,
+    commands: &[(u32, Vec<RedisString>)],
+) {
     let Some(aof) = crate::aof::aof_writer() else {
         return;
     };
@@ -344,8 +375,17 @@ fn append_transaction_commands_to_aof(commands: &[(u32, Vec<RedisString>)]) {
             })
             .and_then(|()| aof.append_raw(&[RedisString::from_bytes(b"EXEC")])),
     };
-    if let Err(err) = result {
-        eprintln!("redis-server: transaction AOF append failed: {}", err);
+    match result {
+        Ok(()) => ctx
+            .server()
+            .persistence
+            .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Ok),
+        Err(err) => {
+            eprintln!("redis-server: transaction AOF append failed: {}", err);
+            ctx.server()
+                .persistence
+                .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Err);
+        }
     }
 }
 

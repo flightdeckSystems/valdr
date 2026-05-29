@@ -750,9 +750,17 @@ pub fn dispatch_command_name(ctx: &mut CommandContext<'_>, name: &[u8]) -> Redis
         if let Some(argv) = argv_snapshot.as_ref() {
             if let Err(e) = aof.append_selected(ctx.selected_db_id(), argv) {
                 eprintln!("redis-server: AOF append failed: {}", e);
-            } else if let Some(offset) = propagated_offset {
-                aof.note_repl_offset(offset);
-                crate::replication::maybe_wake_wait_clients();
+                ctx.server()
+                    .persistence
+                    .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Err);
+            } else {
+                ctx.server()
+                    .persistence
+                    .set_aof_last_write_status(redis_core::persistence::PersistenceStatus::Ok);
+                if let Some(offset) = propagated_offset {
+                    aof.note_repl_offset(offset);
+                    crate::replication::maybe_wake_wait_clients();
+                }
             }
         }
     }
@@ -954,6 +962,16 @@ pub(crate) fn command_is_no_multi(name: &[u8]) -> bool {
 pub(crate) fn command_is_write_or_may_replicate(name: &[u8]) -> bool {
     let metadata = command_metadata(name);
     metadata.write || metadata.may_replicate
+}
+
+pub(crate) fn command_is_write(name: &[u8]) -> bool {
+    command_metadata(name).write
+}
+
+/// Re-checkable min-replicas gate for EXEC: returns the NOREPLICAS reply when a
+/// write would be rejected under the current good-replica count, else None.
+pub(crate) fn min_replicas_write_blocked(ctx: &CommandContext<'_>) -> Option<Vec<u8>> {
+    enforce_min_replicas_gate(ctx)
 }
 
 pub(crate) fn command_acl_categories(name: &[u8]) -> Option<u64> {
@@ -1958,6 +1976,16 @@ fn enforce_replica_readonly_gate(
         return None;
     }
     if ctx.client_ref().is_replica || ctx.client_ref().replication_apply {
+        return None;
+    }
+    // Commands executing inside EXEC run via the transaction path, the way
+    // Valkey's exec loop calls `call()` directly rather than re-entering
+    // processCommand. The read-only-replica gate is applied once at queue time
+    // (flag_deny_blocking is false then), so a client that was already a replica
+    // cannot queue a write; but if a queued REPLICAOF demotes us mid-EXEC, the
+    // remaining queued writes must still execute (they are simply not
+    // propagated). flag_deny_blocking marks that in-EXEC execution context.
+    if ctx.client_ref().flag_deny_blocking() {
         return None;
     }
     if ascii_eq_ignore_case(name, b"REPLICAOF")

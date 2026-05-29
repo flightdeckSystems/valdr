@@ -45,6 +45,18 @@ fi
 ln -s "${RUST_BIN}" "${VALKEY_LINK}"
 echo "==> linked ${VALKEY_LINK} -> ${RUST_BIN}"
 
+# valkey-check-aof / valkey-check-rdb dispatch off argv[0] in our binary, so the
+# upstream utility tests (integration/aof.tcl, integration/rdb.tcl) just need
+# matching symlink names in the same bin dir.
+for util in valkey-check-aof valkey-check-rdb; do
+    UTIL_LINK="${BIN_DIR}/${util}"
+    if [[ -L "${UTIL_LINK}" || -e "${UTIL_LINK}" ]]; then
+        rm -f "${UTIL_LINK}"
+    fi
+    ln -s "${RUST_BIN}" "${UTIL_LINK}"
+    echo "==> linked ${UTIL_LINK} -> ${RUST_BIN}"
+done
+
 echo ""
 echo "Next:"
 echo "  cd ${ROOT}/reference/valkey"

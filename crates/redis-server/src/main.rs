@@ -47,6 +47,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 mod runtime_owner;
 
+mod check_aof;
 mod cli;
 mod startup;
 
@@ -83,6 +84,9 @@ fn main() {
         .unwrap_or_default();
     if prog.contains("check-rdb") {
         std::process::exit(run_check_rdb(&argv[1..]));
+    }
+    if prog.contains("check-aof") {
+        std::process::exit(check_aof::run_check_aof(&argv[1..]));
     }
 
     let args = match parse_args(argv) {

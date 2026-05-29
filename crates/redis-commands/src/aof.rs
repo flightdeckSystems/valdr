@@ -1742,6 +1742,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
         b"xclaim" if argv.len() >= 6 => {
             dispatch_via_handler(argv, db)?;
         }
+        b"multi" | b"exec" => {}
         _ => {
             dispatch_via_handler(argv, db)?;
         }

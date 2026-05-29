@@ -1293,7 +1293,7 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
         if deleted {
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &key);
             // TODO(port): signalModifiedKey(c, c->db, c->argv[j])
-            // TODO(port): server.dirty++
+            ctx.server().add_dirty(1);
             num_deleted += 1;
             if is_stream {
                 if ctx.client_ref().flag_deny_blocking() {
@@ -1303,6 +1303,9 @@ fn del_generic_command(ctx: &mut CommandContext, lazy: bool) -> Result<(), Redis
                 }
             }
         }
+    }
+    if num_deleted == 0 {
+        ctx.client_mut().set_prevent_propagation();
     }
     ctx.reply_integer(num_deleted)
 }

@@ -1433,7 +1433,14 @@ impl RuntimeOwner {
                     }
                 }
             };
-            let ok = self.apply_replica_command(request.argv, registry, server);
+            let ok = match request.kind {
+                redis_commands::replica_dialer::ReplicaApplyKind::Command(argv) => {
+                    self.apply_replica_command(argv, registry, server)
+                }
+                redis_commands::replica_dialer::ReplicaApplyKind::LoadRdb(bytes) => {
+                    self.load_replica_rdb(&bytes)
+                }
+            };
             let _ = request.done.send(ok);
             if ok {
                 redis_commands::aof::note_current_writer_repl_offset(request.offset_after);
@@ -1467,6 +1474,32 @@ impl RuntimeOwner {
         self.replica_apply_db_index = client.db_index;
 
         !client.reply_buf.starts_with(b"-")
+    }
+
+    /// Load a full-resync RDB snapshot into the owned databases, replacing their
+    /// contents. The dialer ships the bytes off the master stream; the owner is
+    /// the only thread allowed to mutate `self.dbs`, so the load happens here.
+    /// The bytes are staged through a temp file because the RDB loader reads
+    /// from a path.
+    fn load_replica_rdb(&mut self, bytes: &[u8]) -> bool {
+        let temp_path =
+            std::env::temp_dir().join(format!("valdr-replica-incoming-{}.rdb", std::process::id()));
+        if let Err(e) = std::fs::write(&temp_path, bytes) {
+            eprintln!("redis-server: replica: staging incoming RDB failed: {}", e);
+            return false;
+        }
+        let result = redis_core::rdb::load_into_dbs(&mut self.dbs, &temp_path);
+        let _ = std::fs::remove_file(&temp_path);
+        match result {
+            Ok(msg) => {
+                eprintln!("redis-server: replica: full-resync RDB loaded: {}", msg);
+                true
+            }
+            Err(e) => {
+                eprintln!("redis-server: replica: full-resync RDB load failed: {}", e);
+                false
+            }
+        }
     }
 
     fn slot_is_tls(&self, idx: usize) -> bool {
@@ -1729,6 +1762,19 @@ impl RuntimeOwner {
                 break;
             }
             progressed = true;
+            // A read shorter than the buffer means the socket receive queue is
+            // now drained: a stream `read` returns everything available up to
+            // the buffer size, so `n < READ_BUFFER_SIZE` proves there is no
+            // more pending data. Under mio's edge-triggered kqueue/epoll the
+            // next arrival re-arms the readable event, so we can stop here
+            // without paying a second `read` syscall purely to observe
+            // `WouldBlock`. This matches Valkey's single read per readable
+            // event (its `ae` loop is level-triggered) and the userspace
+            // readiness optimization in tokio PR #4840. At pipeline=1 it halves
+            // the read syscalls per request, the dominant per-request overhead.
+            if n < read_buf.len() {
+                break;
+            }
         }
         progressed
     }
@@ -2091,9 +2137,14 @@ impl RuntimeOwner {
                     buffer.consume_front(n);
                     slot.client.net_output_bytes =
                         slot.client.net_output_bytes.saturating_add(n as u64);
-                    if let Ok(mut guard) = client_info_registry().lock() {
-                        guard.update_client_metadata(&slot.client);
-                    }
+                    // `net_output_bytes` accrues on the client and is synced to
+                    // the observable registry by the end-of-dispatch
+                    // `update_client_info_snapshot` and the throttled memory
+                    // snapshot refresh. Taking the global `client_info_registry`
+                    // mutex on every successful write put a lock acquisition in
+                    // the per-request write path that Valkey's single-threaded
+                    // loop never pays; CLIENT LIST `tot-net-out` lagging by at
+                    // most one reply is invisible to callers.
                     progressed = true;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,

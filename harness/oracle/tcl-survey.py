@@ -69,6 +69,16 @@ DENY_TAG_PROFILES = {
         "cluster",
         "needs:cluster",
     ],
+    # Real dual-server replication. Unlike single-node-repl this ALLOWS
+    # external:skip + repl + needs:repl, so the nested `start_server` slaveof
+    # pairs in integration/replication*.tcl actually run (the harness spawns
+    # both Rust servers via the valkey-server symlink). Only debug/cluster are
+    # denied. Run sequential, never -j4 (oracle-suite-contention).
+    "integration-repl": [
+        "needs:debug",
+        "cluster",
+        "needs:cluster",
+    ],
 }
 
 

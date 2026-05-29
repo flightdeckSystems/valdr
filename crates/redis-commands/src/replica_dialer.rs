@@ -37,10 +37,23 @@ static GLOBAL_OUR_PORT: OnceLock<u16> = OnceLock::new();
 static GLOBAL_RDB_DIR: OnceLock<String> = OnceLock::new();
 static RUNTIME_APPLY_TX: OnceLock<Sender<ReplicaApplyRequest>> = OnceLock::new();
 
-/// Command received from the primary replication stream that must be applied by
-/// the runtime owner loop, not by the dialer thread.
+/// Work the dialer thread hands to the runtime owner loop because the owner —
+/// not the dialer — owns the live DB slice.
+///
+/// `Command` is an ordinary replicated write parsed off the primary stream.
+/// `LoadRdb` is the full-resync snapshot the primary streams after `FULLRESYNC`;
+/// it must be loaded into the owned databases, replacing their contents. Routing
+/// both through the same queue keeps every keyspace mutation on the owner's
+/// ownership boundary.
+pub enum ReplicaApplyKind {
+    Command(Vec<RedisString>),
+    LoadRdb(Vec<u8>),
+}
+
+/// A unit of replica-side work for the runtime owner loop, with the post-apply
+/// master offset and a completion channel the dialer blocks on.
 pub struct ReplicaApplyRequest {
-    pub argv: Vec<RedisString>,
+    pub kind: ReplicaApplyKind,
     pub offset_after: i64,
     pub done: Sender<bool>,
 }
@@ -132,14 +145,22 @@ fn handshake_sink_loop(host: RedisString, port: u16, our_port: u16, dialer_epoch
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
         }
-        if let Err(e) = read_fullresync_rdb(&stream) {
-            eprintln!("redis-server: replica: RDB sink failed: {}", e);
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
+        let rdb_bytes = match read_fullresync_rdb(&stream) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("redis-server: replica: RDB sink failed: {}", e);
+                thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        };
 
         if !repl.dialer_epoch_is_current(dialer_epoch) {
             return;
+        }
+        if !load_rdb_via_runtime_owner(rdb_bytes, initial_offset) {
+            eprintln!("redis-server: replica: RDB load failed");
+            thread::sleep(Duration::from_millis(200));
+            continue;
         }
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
         crate::aof::force_current_writer_fsynced_repl_offset(initial_offset);
@@ -546,6 +567,19 @@ fn run_command_apply_loop(
 }
 
 fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) -> bool {
+    send_to_runtime_owner(ReplicaApplyKind::Command(argv), offset_after)
+}
+
+/// Hand the freshly-received full-resync RDB snapshot to the runtime owner so it
+/// loads into the owned databases. The previous implementation read these bytes
+/// off the wire and discarded them, leaving a replica with an empty keyspace
+/// after a full sync; this routes them through the same ownership boundary as
+/// replicated commands.
+fn load_rdb_via_runtime_owner(rdb_bytes: Vec<u8>, offset_after: i64) -> bool {
+    send_to_runtime_owner(ReplicaApplyKind::LoadRdb(rdb_bytes), offset_after)
+}
+
+fn send_to_runtime_owner(kind: ReplicaApplyKind, offset_after: i64) -> bool {
     let tx = match RUNTIME_APPLY_TX.get() {
         Some(tx) => tx.clone(),
         None => return false,
@@ -553,7 +587,7 @@ fn apply_command_via_runtime_owner(argv: Vec<RedisString>, offset_after: i64) ->
     let (done_tx, done_rx) = mpsc::channel();
     if tx
         .send(ReplicaApplyRequest {
-            argv,
+            kind,
             offset_after,
             done: done_tx,
         })
