@@ -58,6 +58,7 @@ class CommandSpec:
     arity: int
     function: str  # C function name; informational
     group: str
+    container: str | None  # parent command name when this spec is a subcommand
     flags: tuple[str, ...]
     acl_categories: tuple[str, ...]
     key_specs: tuple[dict, ...]
@@ -88,6 +89,7 @@ def _to_spec(name: str, body: dict) -> CommandSpec:
         arity=body.get("arity", 0),
         function=body.get("function", ""),
         group=body.get("group", ""),
+        container=body.get("container"),
         flags=tuple(body.get("command_flags") or []),
         acl_categories=tuple(body.get("acl_categories") or []),
         key_specs=tuple(body.get("key_specs") or []),
@@ -183,6 +185,9 @@ def emit_rust(specs: list[CommandSpec]) -> str:
     lines.append("    pub arity: i32,")
     lines.append("    pub function: &'static str,")
     lines.append("    pub group: &'static str,")
+    lines.append("    /// Parent command name when this spec is a container subcommand")
+    lines.append("    /// (e.g. CONFIG GET => Some(\"CONFIG\")); None for top-level commands.")
+    lines.append("    pub container: Option<&'static str>,")
     lines.append("    pub flags: &'static [CommandFlag],")
     lines.append("    pub acl_categories: &'static [AclCategory],")
     lines.append("    pub key_specs_json: &'static str,")
@@ -200,11 +205,13 @@ def emit_rust(specs: list[CommandSpec]) -> str:
         key_specs_json = _escape_rust(json.dumps(list(s.key_specs)))
         args_json = _escape_rust(json.dumps(list(s.arguments)))
         deprecated = f'Some("{s.deprecated_since}")' if s.deprecated_since else "None"
+        container = f'Some("{s.container}")' if s.container else "None"
         lines.append("    GeneratedCommandSpec {")
         lines.append(f'        name: "{s.name}",')
         lines.append(f"        arity: {s.arity},")
         lines.append(f'        function: "{s.function}",')
         lines.append(f'        group: "{s.group}",')
+        lines.append(f"        container: {container},")
         lines.append(f"        flags: &[{flag_list}],")
         lines.append(f"        acl_categories: &[{acl_list}],")
         lines.append(f'        key_specs_json: "{key_specs_json}",')

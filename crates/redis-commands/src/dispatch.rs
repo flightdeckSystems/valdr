@@ -980,9 +980,8 @@ pub(crate) fn command_is_stale_allowed(name: &[u8]) -> bool {
 /// source of truth for the stale gate (shared by the dispatch path, EXEC
 /// pre-checks, and scripting).
 pub(crate) fn stale_replica_blocked(ctx: &CommandContext<'_>) -> bool {
-    let is_rep = redis_core::replication::global_replication_state().is_replica();
-    let serve_stale = ctx.live_config().replica_serve_stale_data();
-    is_rep && !serve_stale
+    redis_core::replication::global_replication_state().is_replica()
+        && !ctx.live_config().replica_serve_stale_data()
 }
 
 /// Re-checkable min-replicas gate for EXEC: returns the NOREPLICAS reply when a
@@ -1077,6 +1076,14 @@ fn command_metadata_table() -> &'static [(&'static [u8], CommandMetadata)] {
     COMMAND_METADATA_TABLE.get_or_init(|| {
         let mut rows: Vec<(&'static [u8], CommandMetadata)> = Vec::new();
         for spec in COMMANDS.iter() {
+            // Container subcommands (e.g. CONFIG GET, SLOWLOG GET) share a bare
+            // name with unrelated top-level commands (the string GET). Folding
+            // their flags into the top-level metadata is incorrect — it made the
+            // string GET inherit CONFIG GET's STALE/ADMIN. The top-level command
+            // metadata is keyed by bare name, so subcommands must not contribute.
+            if spec.container.is_some() {
+                continue;
+            }
             match rows
                 .iter_mut()
                 .find(|(name, _)| ascii_eq_ignore_case(name, spec.name.as_bytes()))
