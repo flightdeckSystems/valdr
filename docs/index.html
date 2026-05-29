@@ -34,15 +34,13 @@
   <h1>Valdr</h1>
   <p class="tagline">Valkey, in safe Rust. Alpha.</p>
 
-  <!-- ✍️ WRITE HERE — the one-paragraph pitch. This is the first thing
-       a visitor reads. Keep it tight. The current text is a placeholder
-       draft you can rewrite in your own voice. -->
+  <!-- ✍️ Hero lead — your pitch (written via the web editor). Edit freely. -->
   <p class="lead">
-    Single-node Valkey workalike. Safe-Rust data engine, RESP parser, and
-    TLS stack. No <code>fork()</code>, no C module ABI. The Lua VM still
-    wraps the upstream C interpreter — see
-    <a href="https://github.com/ianm199/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
-    for the path to replace it.
+    Valdr is intended to be a drop-in replacement for Valkey/Redis for
+    single-node use cases, written in mostly-safe Rust. Aiming to be part of a
+    future with safer critical infrastructure for the web. Valdr implements all
+    commands and features besides the C module ABI, clustering, and high
+    availability for now.
   </p>
 
   <p class="actions">
@@ -51,7 +49,6 @@
     <a href="https://github.com/ianm199/valdr">GitHub</a>
   </p>
 </header>
-
 
 <!-- ═════════════════════════════════════════════════════════════════════════
      COVERAGE
