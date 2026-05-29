@@ -8,23 +8,55 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<!-- ─────────────────────────────────────────────────────────────────────────
+     TOP NAV  (tsz-style: wordmark left · section links · GitHub right)
+     Edit the link labels here if you rename/reorder sections.
+     ───────────────────────────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="brand" href="/">Valdr</a>
+  <div class="navlinks">
+    <a href="#coverage">Coverage</a>
+    <a href="#scope">Scope</a>
+    <a href="#performance">Performance</a>
+    <a href="#about">About</a>
+    <a href="#try">Try it</a>
+  </div>
+  <a class="nav-gh" href="https://github.com/ianm199/valdr">GitHub ↗</a>
+</nav>
+
 <main>
 
-<header>
+<!-- ─────────────────────────────────────────────────────────────────────────
+     HERO  (centered, tsz-style)
+     ───────────────────────────────────────────────────────────────────────── -->
+<header class="hero">
   <h1>Valdr</h1>
   <p class="tagline">Valkey, in safe Rust. Alpha.</p>
+
+  <!-- ✍️ WRITE HERE — the one-paragraph pitch. This is the first thing
+       a visitor reads. Keep it tight. The current text is a placeholder
+       draft you can rewrite in your own voice. -->
+  <p class="lead">
+    Single-node Valkey workalike. Safe-Rust data engine, RESP parser, and
+    TLS stack. No <code>fork()</code>, no C module ABI. The Lua VM still
+    wraps the upstream C interpreter — see
+    <a href="https://github.com/ianm199/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
+    for the path to replace it.
+  </p>
+
+  <p class="actions">
+    <a href="#try">Run it</a>
+    <a href="#performance">Benchmarks</a>
+    <a href="https://github.com/ianm199/valdr">GitHub</a>
+  </p>
 </header>
 
-<p class="lead">
-  Single-node Valkey workalike. Safe-Rust data engine, RESP parser, and
-  TLS stack. No <code>fork()</code>, no C module ABI. The Lua VM still
-  wraps the upstream C interpreter — see
-  <a href="https://github.com/ianm199/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
-  for the path to replace it.
-</p>
 
-
-<section>
+<!-- ═════════════════════════════════════════════════════════════════════════
+     COVERAGE
+     ═════════════════════════════════════════════════════════════════════════ -->
+<section id="coverage">
   <h2>Coverage</h2>
 
 <pre><code>  Counted assertions             ██████████  3,015 / 3,015
@@ -40,12 +72,17 @@
     <a href="https://github.com/ianm199/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
   </p>
 
-  <!-- TODO(commentary): coverage section commentary slot -->
+  <!-- ✍️ WRITE HERE (optional) — a sentence or two in your own words on what
+       these numbers mean (e.g. "these are Valkey's own tests, not mine").
+       Add a <p>…</p> right here. -->
 
 </section>
 
 
-<section>
+<!-- ═════════════════════════════════════════════════════════════════════════
+     SCOPE
+     ═════════════════════════════════════════════════════════════════════════ -->
+<section id="scope">
   <h2>Scope</h2>
 
 <pre><code>  Strings, lists, hashes, sets, sorted sets  ████████████  full
@@ -65,12 +102,16 @@
   Sentinel HA                                ░░░░░░░░░░░░  not implemented
   Loadable C module ABI                      ░░░░░░░░░░░░  not implemented</code></pre>
 
-  <!-- TODO(commentary): scope section commentary slot -->
+  <!-- ✍️ WRITE HERE (optional) — your take on the scope choices, e.g. why
+       single-node first, why no cluster yet. Add a <p>…</p> here. -->
 
 </section>
 
 
-<section>
+<!-- ═════════════════════════════════════════════════════════════════════════
+     PERFORMANCE
+     ═════════════════════════════════════════════════════════════════════════ -->
+<section id="performance">
   <h2>Performance</h2>
 
 <pre><code>  GET    p=1     ░░░░░             0.95× / 0.92×
@@ -181,12 +222,47 @@
     </p>
   </details>
 
-  <!-- TODO(commentary): performance section commentary slot -->
+  <!-- ✍️ WRITE HERE (optional) — the honest perf story in your voice: fast on
+       pipelined reads, slower on data-structure-internal ops, and why. This is
+       a credibility win — say where you lose. Add a <p>…</p> here. -->
 
 </section>
 
 
-<section>
+<!-- ═════════════════════════════════════════════════════════════════════════
+     ABOUT  ← NEW. This is the "why" section. Fill it in; delete the placeholder.
+     ═════════════════════════════════════════════════════════════════════════ -->
+<section id="about">
+  <h2>About</h2>
+
+  <!-- ✍️ WRITE HERE — this is the section that carries your story. Things that
+       belong here (pick what fits, in your own words):
+         · The thesis: drop-in safe-Rust replacements as the path off
+           memory-unsafe C, without rewriting the ecosystem.
+         · How it was built: the AI agent harness + the upstream test suite as
+           the oracle the agent can't bypass.
+         · Who you are / what the bigger plan is (Lua, eventually nginx).
+       Replace the placeholder paragraphs below with your own. -->
+
+  <p class="placeholder">
+    [Draft] Valdr is an experiment in whether faithful, drop-in replacements
+    for memory-unsafe infrastructure can be produced with an AI porting harness
+    — verified against the original software's own test suite. Replace this with
+    your own words.
+  </p>
+
+  <p class="placeholder">
+    [Draft] Second paragraph slot — the bigger plan (a suite of safe-Rust
+    replacements; Lua today, more later). Delete or rewrite.
+  </p>
+
+</section>
+
+
+<!-- ═════════════════════════════════════════════════════════════════════════
+     TRY IT
+     ═════════════════════════════════════════════════════════════════════════ -->
+<section id="try">
   <h2>Try it</h2>
 
 <pre><code>docker pull ghcr.io/ianm199/valdr:alpha
