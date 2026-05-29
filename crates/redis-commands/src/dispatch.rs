@@ -79,6 +79,8 @@ struct HotRuntimeDispatch {
     get: Option<&'static RuntimeDispatchEntry>,
     set: Option<&'static RuntimeDispatchEntry>,
     incr: Option<&'static RuntimeDispatchEntry>,
+    sadd: Option<&'static RuntimeDispatchEntry>,
+    hset: Option<&'static RuntimeDispatchEntry>,
 }
 
 struct RuntimeDispatchIndex {
@@ -306,6 +308,22 @@ fn lookup_hot_runtime_command(name: &[u8]) -> Option<&'static RuntimeDispatchEnt
         {
             hot.incr
         }
+        [a, b, c, d]
+            if ascii_lower(*a) == b's'
+                && ascii_lower(*b) == b'a'
+                && ascii_lower(*c) == b'd'
+                && ascii_lower(*d) == b'd' =>
+        {
+            hot.sadd
+        }
+        [a, b, c, d]
+            if ascii_lower(*a) == b'h'
+                && ascii_lower(*b) == b's'
+                && ascii_lower(*c) == b'e'
+                && ascii_lower(*d) == b't' =>
+        {
+            hot.hset
+        }
         _ => None,
     }
 }
@@ -316,6 +334,8 @@ fn hot_runtime_dispatch() -> &'static HotRuntimeDispatch {
         get: lookup_runtime_command_indexed(b"GET"),
         set: lookup_runtime_command_indexed(b"SET"),
         incr: lookup_runtime_command_indexed(b"INCR"),
+        sadd: lookup_runtime_command_indexed(b"SADD"),
+        hset: lookup_runtime_command_indexed(b"HSET"),
     })
 }
 
