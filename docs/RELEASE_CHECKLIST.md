@@ -44,8 +44,8 @@ python3 harness/bench/pipeline-smoke.py --commands get,ping_mbulk,set,incr --pip
 ## Docker Pull And Try
 
 ```bash
-docker pull ghcr.io/flightdecksystems/valdr:alpha &&
-docker run --rm -p 6379:6379 -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
+docker pull ghcr.io/ianm199/valdr:alpha &&
+docker run --rm -p 6379:6379 -v valdr-data:/data ghcr.io/ianm199/valdr:alpha
 ```
 
 Docker-only one-copy smoke:
@@ -53,8 +53,8 @@ Docker-only one-copy smoke:
 ```bash
 docker network create valdr-try >/dev/null 2>&1 || true
 docker rm -f valdr-try >/dev/null 2>&1 || true
-docker pull ghcr.io/flightdecksystems/valdr:alpha
-docker run -d --name valdr-try --network valdr-try -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
+docker pull ghcr.io/ianm199/valdr:alpha
+docker run -d --name valdr-try --network valdr-try -v valdr-data:/data ghcr.io/ianm199/valdr:alpha
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try PING
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try SET hello world
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try GET hello
@@ -65,7 +65,7 @@ docker network rm valdr-try
 ## Docker Benchmark
 
 ```bash
-IMAGE=ghcr.io/flightdecksystems/valdr:alpha \
+IMAGE=ghcr.io/ianm199/valdr:alpha \
 REQUESTS=100000 \
 CLIENTS=50 \
 PIPELINE=16 \
@@ -91,8 +91,8 @@ After workflows complete:
 
 ```bash
 gh run list --branch main --limit 10
-docker manifest inspect ghcr.io/flightdecksystems/valdr:alpha
-SKIP_BUILD=1 IMAGE=ghcr.io/flightdecksystems/valdr:alpha bash harness/docker/smoke.sh
+docker manifest inspect ghcr.io/ianm199/valdr:alpha
+SKIP_BUILD=1 IMAGE=ghcr.io/ianm199/valdr:alpha bash harness/docker/smoke.sh
 ```
 
 Manual checks:

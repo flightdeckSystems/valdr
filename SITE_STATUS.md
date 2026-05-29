@@ -10,7 +10,7 @@ threads I noticed in passing.
 
 | | |
 |---|---|
-| **Live** | https://flightdecksystems.github.io/valdr/ |
+| **Live** | https://ianm199.github.io/valdr/ |
 | **Local preview** | http://127.0.0.1:8765/ (running from `docs/` via `python3 -m http.server 8765`) |
 | **Source files** | `docs/index.html`, `docs/style.css`, `docs/.nojekyll` |
 | **Deploy** | `.github/workflows/static.yml` — uploads `docs/` as the Pages artifact on every push that touches `docs/**`. ~30 s. |
@@ -54,7 +54,7 @@ not re-link).
      subsection rows, and `<td class="num ratio win|behind">` heatmap
      classes on the ratio cell
 6. **Try it** — Docker pull/run/PING + a `valkey-benchmark` invocation
-7. **Footer** — one line: `Valdr · alpha · BSD 3-Clause · github.com/flightdeckSystems/valdr`
+7. **Footer** — one line: `Valdr · alpha · BSD 3-Clause · github.com/ianm199/valdr`
 
 ---
 
@@ -107,7 +107,7 @@ pkill -f 'http.server 8765'
 Push live:
 
 ```bash
-# gh auth currently active as ianm199 (has write to flightdeckSystems/valdr)
+# gh auth currently active as ianm199 (has write to ianm199/valdr)
 git push origin main
 ```
 

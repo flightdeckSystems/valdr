@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${IMAGE:-ghcr.io/flightdecksystems/valdr:alpha}"
+IMAGE="${IMAGE:-ghcr.io/ianm199/valdr:alpha}"
 BENCH_IMAGE="${BENCH_IMAGE:-redis:7-alpine}"
 REQUESTS="${REQUESTS:-100000}"
 CLIENTS="${CLIENTS:-50}"

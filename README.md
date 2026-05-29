@@ -63,7 +63,7 @@ docker run -d --rm \
 docker run -d --rm \
   --name valdr \
   --network valdr-bench \
-  ghcr.io/flightdecksystems/valdr:alpha
+  ghcr.io/ianm199/valdr:alpha
 
 sleep 1
 ```
@@ -226,8 +226,8 @@ cargo build --release
 ## Docker
 
 ```bash
-docker pull ghcr.io/flightdecksystems/valdr:alpha
-docker run --rm -p 6379:6379 ghcr.io/flightdecksystems/valdr:alpha
+docker pull ghcr.io/ianm199/valdr:alpha
+docker run --rm -p 6379:6379 ghcr.io/ianm199/valdr:alpha
 ```
 
 ## Test Commands

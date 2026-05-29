@@ -19,7 +19,7 @@
   Single-node Valkey workalike. Safe-Rust data engine, RESP parser, and
   TLS stack. No <code>fork()</code>, no C module ABI. The Lua VM still
   wraps the upstream C interpreter — see
-  <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
+  <a href="https://github.com/ianm199/valdr/blob/main/docs/MLUA_EXIT_PLAN.md">MLUA_EXIT_PLAN.md</a>
   for the path to replace it.
 </p>
 
@@ -37,7 +37,7 @@
     Verified 2026-05-28 against
     <a href="https://github.com/valkey-io/valkey/releases/tag/9.1.0">Valkey 9.1.0</a>;
     bucketing in
-    <a href="https://github.com/flightdeckSystems/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
+    <a href="https://github.com/ianm199/valdr/blob/main/docs/TEST_AND_FEATURE_COVERAGE.md">docs/TEST_AND_FEATURE_COVERAGE.md</a>.
   </p>
 
   <!-- TODO(commentary): coverage section commentary slot -->
@@ -189,8 +189,8 @@
 <section>
   <h2>Try it</h2>
 
-<pre><code>docker pull ghcr.io/flightdecksystems/valdr:alpha
-docker run -d --name valdr -p 6379:6379 ghcr.io/flightdecksystems/valdr:alpha
+<pre><code>docker pull ghcr.io/ianm199/valdr:alpha
+docker run -d --name valdr -p 6379:6379 ghcr.io/ianm199/valdr:alpha
 printf 'PING\r\n' | nc 127.0.0.1 6379
 # +PONG
 
@@ -203,7 +203,7 @@ docker run --rm --network host valkey/valkey:8-alpine \
 <footer>
   <p>
     Valdr · alpha · BSD 3-Clause ·
-    <a href="https://github.com/flightdeckSystems/valdr">github.com/flightdeckSystems/valdr</a>
+    <a href="https://github.com/ianm199/valdr">github.com/ianm199/valdr</a>
   </p>
 </footer>
 

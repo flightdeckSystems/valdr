@@ -10,7 +10,7 @@ Initial public alpha release candidate.
   subsets.
 - Gates the current single-node claim with wire-diff smoke, RDB bidirectional
   tests, and scoped upstream TCL survey evidence.
-- Publishes Docker images at `ghcr.io/flightdecksystems/valdr:alpha`, `:main`, and
+- Publishes Docker images at `ghcr.io/ianm199/valdr:alpha`, `:main`, and
   `:sha-<short-sha>`.
 - Ships alpha benchmark tooling for local and Docker-only runs.
 

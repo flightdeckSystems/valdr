@@ -9,8 +9,8 @@ under `/data`.
 Published images live at GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/flightdecksystems/valdr:alpha &&
-docker run --rm -p 6379:6379 -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
+docker pull ghcr.io/ianm199/valdr:alpha &&
+docker run --rm -p 6379:6379 -v valdr-data:/data ghcr.io/ianm199/valdr:alpha
 ```
 
 One-copy try/smoke flow using only Docker:
@@ -18,8 +18,8 @@ One-copy try/smoke flow using only Docker:
 ```bash
 docker network create valdr-try >/dev/null 2>&1 || true
 docker rm -f valdr-try >/dev/null 2>&1 || true
-docker pull ghcr.io/flightdecksystems/valdr:alpha
-docker run -d --name valdr-try --network valdr-try -v valdr-data:/data ghcr.io/flightdecksystems/valdr:alpha
+docker pull ghcr.io/ianm199/valdr:alpha
+docker run -d --name valdr-try --network valdr-try -v valdr-data:/data ghcr.io/ianm199/valdr:alpha
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try PING
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try SET hello world
 docker run --rm --network valdr-try redis:7-alpine redis-cli -h valdr-try GET hello
@@ -69,8 +69,8 @@ bash harness/docker/smoke.sh
 Set `IMAGE=...` to test a different image name:
 
 ```bash
-docker pull ghcr.io/flightdecksystems/valdr:alpha
-SKIP_BUILD=1 IMAGE=ghcr.io/flightdecksystems/valdr:alpha bash harness/docker/smoke.sh
+docker pull ghcr.io/ianm199/valdr:alpha
+SKIP_BUILD=1 IMAGE=ghcr.io/ianm199/valdr:alpha bash harness/docker/smoke.sh
 ```
 
 ## Benchmark with Docker
@@ -80,7 +80,7 @@ network and runs `redis-benchmark` from `redis:7-alpine` against it. It does
 not require a local Redis/Valkey install:
 
 ```bash
-IMAGE=ghcr.io/flightdecksystems/valdr:alpha \
+IMAGE=ghcr.io/ianm199/valdr:alpha \
 REQUESTS=100000 \
 CLIENTS=50 \
 PIPELINE=16 \
@@ -129,7 +129,7 @@ Publish from a machine logged into GHCR with package-write permission:
 
 ```bash
 SHA="$(git rev-parse --short HEAD)"
-IMAGE="ghcr.io/flightdecksystems/valdr"
+IMAGE="ghcr.io/ianm199/valdr"
 
 docker build \
   -t "$IMAGE:alpha" \
