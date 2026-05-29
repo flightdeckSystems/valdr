@@ -64,7 +64,7 @@ bench: ## Full profile matrix (p1/p16/p100 + range-heavy) vs upstream. FORMAT=js
 	@VALKEY_BENCH_SKIP_BUILD=$(SKIP_BUILD) \
 	VALKEY_MATRIX_CLIENTS=$(CLIENTS) VALKEY_MATRIX_PAYLOAD=$(PAYLOAD) \
 	  bash harness/bench/run-profile-matrix.sh >/tmp/valdr-matrix.json
-	@if [ "$(FORMAT)" = "json" ]; then cat /tmp/valdr-matrix.json; else $(MAKE) -s bench-show; fi
+	@$(MAKE) -s bench-show FORMAT=$(FORMAT)
 
 bench-quick: ## Fast narrow matrix (reduced request counts, reuses existing binary). FORMAT=json for raw JSON
 	@echo "running quick narrow matrix (reusing existing binary)…" >&2
@@ -75,7 +75,7 @@ bench-quick: ## Fast narrow matrix (reduced request counts, reuses existing bina
 	VALKEY_MATRIX_RANGE_REQUESTS=25000 \
 	VALKEY_MATRIX_CLIENTS=$(CLIENTS) VALKEY_MATRIX_PAYLOAD=$(PAYLOAD) \
 	  bash harness/bench/run-profile-matrix.sh >/tmp/valdr-matrix.json
-	@if [ "$(FORMAT)" = "json" ]; then cat /tmp/valdr-matrix.json; else $(MAKE) -s bench-show; fi
+	@$(MAKE) -s bench-show FORMAT=$(FORMAT)
 
 bench-p1: ## Paired pipeline=1 parity probe (low-noise median+IQR; the per-request-overhead question)
 	@if [ "$(SKIP_BUILD)" != "1" ]; then cargo build --release -p redis-server; fi
@@ -83,10 +83,11 @@ bench-p1: ## Paired pipeline=1 parity probe (low-noise median+IQR; the per-reque
 	  --commands $(COMMANDS) --trials $(TRIALS) \
 	  --requests $(REQUESTS) --clients $(CLIENTS) --payload $(PAYLOAD)
 
-bench-show: ## Reprint the most recent profile matrix as an aligned table
+bench-show: ## Reprint the most recent matrix. FORMAT=wide for all columns, json for raw
 	@tsv="$(MATRIX_TSV)"; echo "── $$tsv ──"; \
-	grep '^#' "$$tsv" | sed 's/^# //'; \
-	grep -v '^#' "$$tsv" | column -t -s $$'\t'
+	if [ "$(FORMAT)" = "json" ]; then cat /tmp/valdr-matrix.json; \
+	elif [ "$(FORMAT)" = "wide" ]; then python3 harness/bench/format-matrix.py --wide "$$tsv"; \
+	else python3 harness/bench/format-matrix.py "$$tsv"; fi
 
 bench-release: ## The release-grade packet (warmup + all probes + Markdown bundle, ~90s)
 	bash harness/bench/official-warm-run.sh
