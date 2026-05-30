@@ -51,6 +51,7 @@ pub fn fsync_policy_str(code: u8) -> &'static str {
 
 /// Options controlling AOF replay strictness.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct AofLoadOptions {
     /// Accept an incomplete final command and replay the valid prefix.
     pub load_truncated: bool,
@@ -60,14 +61,6 @@ pub struct AofLoadOptions {
     pub allow_rdb_preamble: bool,
 }
 
-impl Default for AofLoadOptions {
-    fn default() -> Self {
-        Self {
-            load_truncated: false,
-            allow_rdb_preamble: false,
-        }
-    }
-}
 
 const AOF_MANIFEST_SUFFIX: &str = ".manifest";
 const BASE_AOF_SUFFIX: &str = ".base.aof";
@@ -1591,7 +1584,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             let obj = RedisObject::new_list_from_vec(dq);
             db.insert(key, obj);
         }
-        b"hmset" if argv.len() >= 4 && (argv.len() - 2) % 2 == 0 => {
+        b"hmset" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             let key = argv[1].clone();
             let mut map: InlineHash = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {
@@ -1627,7 +1620,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             let obj = RedisObject::new_set_from_set(hs);
             db.insert(key, obj);
         }
-        b"zadd" if argv.len() >= 4 && (argv.len() - 2) % 2 == 0 => {
+        b"zadd" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             use redis_core::object::{InlineZSet, ZSetEncoding};
             let key = argv[1].clone();
             let mut zs = match db.lookup_key_read(&key) {
@@ -1704,7 +1697,7 @@ fn dispatch_replay_command(argv: &[RedisString], db: &mut RedisDb) -> io::Result
             let expire_ms = current_ms() + ttl_sec * 1000;
             db.set_expire(key, expire_ms);
         }
-        b"hset" if argv.len() >= 4 && (argv.len() - 2) % 2 == 0 => {
+        b"hset" if argv.len() >= 4 && (argv.len() - 2).is_multiple_of(2) => {
             let key = argv[1].clone();
             let mut map: InlineHash = match db.lookup_key_read(&key) {
                 Some(obj) => match &obj.kind {

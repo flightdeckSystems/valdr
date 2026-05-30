@@ -116,11 +116,11 @@ pub fn session_write_pump<S: io::Write>(
 }
 
 fn pump_incoming(tls: &mut TlsIo) -> Result<bool, RedisError> {
-    session_read_pump(&mut *tls.session, &mut tls.io)
+    session_read_pump(&mut tls.session, &mut tls.io)
 }
 
 fn pump_outgoing(tls: &mut TlsIo) -> Result<(), RedisError> {
-    session_write_pump(&mut *tls.session, &mut tls.io)
+    session_write_pump(&mut tls.session, &mut tls.io)
 }
 
 impl ConnectionTypeTrait for TlsConnectionType {

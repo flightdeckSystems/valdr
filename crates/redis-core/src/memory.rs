@@ -62,9 +62,7 @@ pub fn approximate_object_bytes(kind: &ObjectKind) -> u64 {
         },
         ObjectKind::ZSet(enc) => match enc {
             ZSetEncoding::Inline(z) => z
-                .by_member
-                .iter()
-                .map(|(k, _)| k.as_bytes().len() as u64 + 24)
+                .by_member.keys().map(|k| k.as_bytes().len() as u64 + 24)
                 .sum(),
             ZSetEncoding::ListPack(b) => b.len() as u64,
             ZSetEncoding::SkipList(v) => {

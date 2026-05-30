@@ -310,10 +310,8 @@ pub fn geohash_encode(
     }
 
     // C: if (longitude > GEO_LONG_MAX || longitude < GEO_LONG_MIN || ...) return 0;
-    if longitude > GEO_LONG_MAX
-        || longitude < GEO_LONG_MIN
-        || latitude > GEO_LAT_MAX
-        || latitude < GEO_LAT_MIN
+    if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
+        || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
     {
         return None;
     }

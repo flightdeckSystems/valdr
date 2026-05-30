@@ -597,7 +597,7 @@ pub fn config_value_is_live_only(key: &[u8]) -> bool {
         b"rdb-version-check",
         b"client-output-buffer-limit",
     ];
-    LIVE_KEYS.iter().any(|name| key == *name)
+    LIVE_KEYS.contains(&key)
 }
 
 pub fn validate_config_set_pair(key: &[u8], value: &[u8]) -> RedisResult<()> {
@@ -1280,7 +1280,7 @@ pub fn apply_bind_config_set(value: &[u8]) -> RedisResult<()> {
         let listeners = hook(value, tcp_port_config()).map_err(|err| {
             let text = String::from_utf8_lossy(&err);
             if text.starts_with("ERR ") {
-                RedisError::runtime(text.as_bytes().to_vec())
+                RedisError::runtime(text.as_bytes())
             } else {
                 let mut msg = b"ERR ".to_vec();
                 msg.extend_from_slice(text.as_bytes());
@@ -1301,7 +1301,7 @@ pub fn apply_client_output_buffer_limit_config_set(value: &[u8]) -> RedisResult<
     let value_str = std::str::from_utf8(value)
         .map_err(|_| RedisError::runtime(b"ERR Wrong number of arguments"))?;
     let tokens: Vec<&str> = value_str.split_whitespace().collect();
-    if tokens.is_empty() || tokens.len() % 4 != 0 {
+    if tokens.is_empty() || !tokens.len().is_multiple_of(4) {
         return Err(RedisError::runtime(b"ERR Wrong number of arguments"));
     }
 

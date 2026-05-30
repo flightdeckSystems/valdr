@@ -8,17 +8,14 @@ use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub(crate) enum OverflowType {
+    #[default]
     Wrap,
     Sat,
     Fail,
 }
 
-impl Default for OverflowType {
-    fn default() -> Self {
-        OverflowType::Wrap
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BitOp {
@@ -571,7 +568,7 @@ pub fn bitcount_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// BITPOS key bit [start [end [BIT|BYTE]]]
 pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 3 || argc > 6 {
+    if !(3..=6).contains(&argc) {
         return Err(RedisError::syntax(b"syntax error"));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -677,7 +674,7 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
         if curbytes > 0 {
             let slice = &p[search_start as usize..(search_start + curbytes) as usize];
             let pos = server_bitpos(slice, curbytes as usize, bit);
-            if nbytes == curbytes || (pos != -1 && pos != (curbytes as i64) << 3) {
+            if nbytes == curbytes || (pos != -1 && pos != curbytes << 3) {
                 break 'find_pos pos;
             }
             search_start += curbytes;
@@ -693,7 +690,7 @@ pub fn bitpos_command(ctx: &mut CommandContext) -> RedisResult<()> {
         server_bitpos(&[tmpchar], 1, bit)
     };
 
-    if end_given && bit == 0 && pos != -1 && pos == (nbytes as i64) << 3 {
+    if end_given && bit == 0 && pos != -1 && pos == nbytes << 3 {
         return ctx.reply_integer(-1);
     }
 

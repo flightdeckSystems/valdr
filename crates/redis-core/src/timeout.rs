@@ -68,7 +68,7 @@ pub enum TimeUnit {
 /// the server implicitly via the global; Rust passes it explicitly.
 pub fn check_blocked_client_timeout(
     client: &mut Client,
-    server: &mut RedisServer,
+    _server: &mut RedisServer,
     now: i64,
 ) -> bool {
     // TODO(port): Client needs `is_blocked()` and `blocking_timeout() -> i64`

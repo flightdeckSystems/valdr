@@ -17,7 +17,6 @@ use crate::notify::{NOTIFY_KEYEVENT, NOTIFY_KEYSPACE};
 use crate::object::RedisObject;
 use crate::pubsub_registry::PubSubRegistry;
 use crate::server::RedisServer;
-use redis_protocol::frame::encode_resp2;
 use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 

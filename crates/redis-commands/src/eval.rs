@@ -468,10 +468,8 @@ fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: us
             }
             if let Ok(Some(map)) = t.get::<Option<LuaTable>>("map") {
                 let mut pairs: Vec<(LuaValue, LuaValue)> = Vec::new();
-                for entry in map.pairs::<LuaValue, LuaValue>() {
-                    if let Ok((k, v)) = entry {
-                        pairs.push((k, v));
-                    }
+                for (k, v) in map.pairs::<LuaValue, LuaValue>().flatten() {
+                    pairs.push((k, v));
                 }
                 if resp3 {
                     out.push(b'%');
@@ -489,10 +487,8 @@ fn lua_to_resp_inner(value: &LuaValue, out: &mut Vec<u8>, resp3: bool, depth: us
             }
             if let Ok(Some(set)) = t.get::<Option<LuaTable>>("set") {
                 let mut members: Vec<LuaValue> = Vec::new();
-                for entry in set.pairs::<LuaValue, LuaValue>() {
-                    if let Ok((k, _)) = entry {
-                        members.push(k);
-                    }
+                for (k, _) in set.pairs::<LuaValue, LuaValue>().flatten() {
+                    members.push(k);
                 }
                 out.push(if resp3 { b'~' } else { b'*' });
                 out.extend_from_slice(members.len().to_string().as_bytes());
@@ -2180,8 +2176,8 @@ fn run_inner_command(
 
     let raw_reply: Vec<u8> = {
         let buf = &mut ctx.client_mut().reply_buf;
-        let tail = buf.split_off(saved_reply_len);
-        tail
+        
+        buf.split_off(saved_reply_len)
     };
 
     ctx.client_mut().set_args(saved_argv);
@@ -2227,7 +2223,7 @@ fn script_wait_reply(ctx: &CommandContext<'_>, args: &[Vec<u8>]) -> Result<Reply
     parse_script_i64(&args[1])?;
     let timeout = parse_script_i64(&args[2])?;
     if timeout < 0 {
-        return Err(RedisError::runtime(b"ERR timeout is negative".to_vec()));
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
     }
     let target = ctx.client_ref().last_write_repl_offset;
     let repl = redis_core::replication::global_replication_state();
@@ -2251,7 +2247,7 @@ fn parse_script_i64(bytes: &[u8]) -> Result<i64, RedisError> {
     std::str::from_utf8(bytes)
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
-        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))
+        .ok_or_else(|| RedisError::runtime(b"ERR value is not an integer or out of range"))
 }
 
 fn record_script_rejected_command(args: &[Vec<u8>], payload: &[u8]) {
@@ -4500,12 +4496,12 @@ fn run_loaded_function_uncached(
                         ));
                     }
                     let mut borrow = cell.borrow_mut();
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         error_recorded.set(true);
                         return Err(noreplicas_lua_error());
                     }
-                    match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
+                    match run_inner_command(&mut borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => {
                             if let ReplyValue::Error(msg) = &reply {
                                 error_recorded.set(true);
@@ -4571,11 +4567,11 @@ fn run_loaded_function_uncached(
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         return noreplicas_lua_table(lua_inner);
                     }
-                    match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
+                    match run_inner_command(&mut borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
                             let payload = lua_script_command_error_payload(&e);
@@ -4616,7 +4612,7 @@ fn run_loaded_function_uncached(
                 move |_lua_inner, args: MultiValue| -> mlua::Result<bool> {
                     let arg_bytes = collect_call_args(args)?;
                     let borrow = cell.borrow();
-                    acl_check_cmd_allowed(&**borrow, &arg_bytes)
+                    acl_check_cmd_allowed(&borrow, &arg_bytes)
                 },
             )?
         };
@@ -5076,12 +5072,12 @@ fn run_script(
                     ));
                 }
                 let mut borrow = cell.borrow_mut();
-                if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                     record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                     error_recorded.set(true);
                     return Err(noreplicas_lua_error());
                 }
-                match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
+                match run_inner_command(&mut borrow, &arg_bytes, Some(dirty.as_ref())) {
                     Ok(reply) => {
                         if let ReplyValue::Error(msg) = &reply {
                             error_recorded.set(true);
@@ -5146,11 +5142,11 @@ fn run_script(
                         return Ok(LuaValue::Table(t));
                     }
                     let mut borrow = cell.borrow_mut();
-                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&**borrow) {
+                    if call_is_write_command(&arg_bytes) && !good_replicas_status(&borrow) {
                         record_script_rejected_command(&arg_bytes, NOREPLICAS_ERROR.as_bytes());
                         return noreplicas_lua_table(lua_inner);
                     }
-                    match run_inner_command(&mut **borrow, &arg_bytes, Some(dirty.as_ref())) {
+                    match run_inner_command(&mut borrow, &arg_bytes, Some(dirty.as_ref())) {
                         Ok(reply) => reply_to_lua(lua_inner, &reply, script_resp_view(lua_inner)),
                         Err(e) => {
                             let payload = lua_script_command_error_payload(&e);
@@ -5191,7 +5187,7 @@ fn run_script(
                 move |_lua_inner, args: MultiValue| -> mlua::Result<bool> {
                     let arg_bytes = collect_call_args(args)?;
                     let borrow = cell.borrow();
-                    acl_check_cmd_allowed(&**borrow, &arg_bytes)
+                    acl_check_cmd_allowed(&borrow, &arg_bytes)
                 },
             )?
         };
@@ -5364,7 +5360,7 @@ fn ascii_contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
         window
             .iter()
             .zip(needle)
-            .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
     })
 }
 

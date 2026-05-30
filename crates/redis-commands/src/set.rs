@@ -392,7 +392,7 @@ pub fn scard_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// the key when the last element is removed.
 pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 3 {
+    if !(2..=3).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(b"spop"));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -409,10 +409,7 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
     };
 
     let popped: Option<Vec<RedisString>> = {
-        let h = match as_set_mut(ctx.db_mut().lookup_key_write(&key))? {
-            None => None,
-            Some(h) => Some(h),
-        };
+        let h = as_set_mut(ctx.db_mut().lookup_key_write(&key))?;
         match h {
             None => None,
             Some(h) => {
@@ -482,7 +479,7 @@ pub fn spop_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// duplicates. The set is not modified.
 pub fn srandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 3 {
+    if !(2..=3).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(b"srandmember"));
     }
     let key = ctx.arg_owned(1usize)?;

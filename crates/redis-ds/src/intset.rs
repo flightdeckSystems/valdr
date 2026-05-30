@@ -306,10 +306,7 @@ impl IntSet {
     }
 
     fn len_u32(&self) -> u32 {
-        match read_u32_le(&self.buf, 4) {
-            Some(len) => len,
-            None => 0,
-        }
+        read_u32_le(&self.buf, 4).unwrap_or_default()
     }
 
     fn set_len(&mut self, len: u32) {

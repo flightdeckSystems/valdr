@@ -81,14 +81,14 @@ pub fn parse_inline_or_multibulk_into_retaining_partial(
     buf: &[u8],
     out: &mut Vec<RedisString>,
 ) -> Result<Option<usize>, RedisError> {
-    let parsed = if buf.is_empty() {
+    
+    if buf.is_empty() {
         Ok(None)
     } else if buf[0] == b'*' {
         parse_multibulk_into(buf, out)
     } else {
         parse_inline_into(buf, out)
-    };
-    parsed
+    }
 }
 
 /// Parse a multibulk request: `*N\r\n$L\r\n<bytes>\r\n…`.
@@ -131,7 +131,7 @@ fn parse_multibulk(buf: &[u8]) -> Result<Option<(Vec<RedisString>, usize)>, Redi
         };
         pos = after_len;
 
-        if bulklen < 0 || bulklen > PROTO_MAX_BULK_LEN {
+        if !(0..=PROTO_MAX_BULK_LEN).contains(&bulklen) {
             return Err(RedisError::runtime(b"Protocol error: invalid bulk length"));
         }
         let bulklen = bulklen as usize;
@@ -201,7 +201,7 @@ fn parse_multibulk_into(
         };
         pos = after_len;
 
-        if bulklen < 0 || bulklen > PROTO_MAX_BULK_LEN {
+        if !(0..=PROTO_MAX_BULK_LEN).contains(&bulklen) {
             return Err(RedisError::runtime(b"Protocol error: invalid bulk length"));
         }
         let bulklen = bulklen as usize;
@@ -503,7 +503,7 @@ fn is_inline_whitespace(b: u8) -> bool {
 }
 
 fn is_hex(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+    b.is_ascii_hexdigit()
 }
 
 fn hex_val(b: u8) -> u8 {

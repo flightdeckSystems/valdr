@@ -564,7 +564,7 @@ impl ListPack {
 
     fn has_valid_header(&self) -> bool {
         self.bytes_len() == self.data.len()
-            && self.data.len() >= LP_HDR_SIZE + 1
+            && self.data.len() > LP_HDR_SIZE
             && self.data.last().copied() == Some(LP_EOF)
     }
 

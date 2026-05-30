@@ -596,7 +596,7 @@ fn push_generic(ctx: &mut CommandContext, position: ListPosition, xx: bool) -> R
 /// the key when the last element is removed.
 fn pop_generic(ctx: &mut CommandContext, position: ListPosition) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 3 {
+    if !(2..=3).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(ctx.command_name()));
     }
     let key = ctx.arg_owned(1usize)?;

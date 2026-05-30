@@ -539,7 +539,9 @@ impl HashExpiryKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 enum HashSetExpiry {
+    #[default]
     None,
     KeepTtl,
     Set(i64),
@@ -562,11 +564,6 @@ struct HSetExOptions {
     expiry: HashSetExpiry,
 }
 
-impl Default for HashSetExpiry {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 fn expire_time_from(kind: HashExpiryKind, raw: i64) -> i64 {
     match kind {
@@ -871,7 +868,7 @@ fn reply_optional_values(
 /// wrong-arity error when the trailing field/value pairs are unbalanced.
 pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 4 || (argc - 2) % 2 != 0 {
+    if argc < 4 || !(argc - 2).is_multiple_of(2) {
         return Err(RedisError::wrong_number_of_args(b"hset"));
     }
     reset_hash_expiry_state_if_db_empty(ctx);
@@ -930,7 +927,7 @@ pub fn hset_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// new-field count.
 pub fn hmset_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 4 || (argc - 2) % 2 != 0 {
+    if argc < 4 || !(argc - 2).is_multiple_of(2) {
         return Err(RedisError::wrong_number_of_args(b"hmset"));
     }
     reset_hash_expiry_state_if_db_empty(ctx);
@@ -1531,13 +1528,13 @@ pub fn hincrby_command(ctx: &mut CommandContext) -> RedisResult<()> {
                 ))
             }
         };
-        map.insert(field, RedisString::from_bytes(&long_long_to_bytes(next)));
+        map.insert(field, RedisString::from_bytes(long_long_to_bytes(next)));
         next
     } else {
         let mut obj = RedisObject::new_hash();
         {
             let map = obj.hash_mut().expect("new_hash constructs an Inline hash");
-            map.insert(field, RedisString::from_bytes(&long_long_to_bytes(delta)));
+            map.insert(field, RedisString::from_bytes(long_long_to_bytes(delta)));
         }
         ctx.db_mut().set_key(key.clone(), obj, 0);
         delta
@@ -1671,7 +1668,7 @@ fn hrandfield_duplicate_emit_cap(
 /// field/value bulks in RESP2, and nest as 2-element arrays in RESP3.
 pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 4 {
+    if !(2..=4).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(b"hrandfield"));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -1694,7 +1691,7 @@ pub fn hrandfield_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     if let Some(count) = count_opt {
-        if with_values && (count < -(i64::MAX / 2) || count > i64::MAX / 2) {
+        if with_values && !(-(i64::MAX / 2)..=i64::MAX / 2).contains(&count) {
             return Err(RedisError::runtime(b"ERR value is out of range"));
         }
     }
@@ -1817,7 +1814,7 @@ fn hash_expire_command(ctx: &mut CommandContext, kind: HashExpiryKind) -> RedisR
                 results.push(0);
                 continue;
             }
-            if flags.gt && current.map_or(true, |old| when <= old) {
+            if flags.gt && current.is_none_or(|old| when <= old) {
                 results.push(0);
                 continue;
             }

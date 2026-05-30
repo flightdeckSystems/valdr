@@ -36,7 +36,6 @@
 // RedisString + RedisError; both crates are already listed in
 // crates/redis-server/Cargo.toml, so confirm import paths resolve at check time.
 
-use redis_types::RedisError;
 use redis_types::RedisString;
 use std::sync::Arc;
 

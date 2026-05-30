@@ -1279,7 +1279,7 @@ fn enforce_acl_gate(ctx: &CommandContext<'_>, name: &[u8], cmd_categories: u64) 
         Err(p) => p.into_inner(),
     };
 
-    let user = match guard.users.get(&user_name) {
+    let user = match guard.users.get(user_name) {
         Some(u) => u,
         None => {
             return Some(b"-NOAUTH Authentication required.\r\n".to_vec());

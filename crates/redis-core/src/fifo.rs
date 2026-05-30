@@ -170,7 +170,7 @@ impl<T> Fifo<T> {
     /// `VecDeque` backing store — no per-item work is done.
     pub fn pop_all(&mut self) -> Fifo<T> {
         Fifo {
-            items: std::mem::replace(&mut self.items, VecDeque::new()),
+            items: std::mem::take(&mut self.items),
         }
     }
 }

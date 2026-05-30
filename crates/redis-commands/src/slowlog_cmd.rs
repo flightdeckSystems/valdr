@@ -339,7 +339,7 @@ pub fn record_slowlog_entry(
         id,
         value: duration_micros as i64,
         time: timestamp_unix,
-        cname: client_name.unwrap_or_else(RedisString::new),
+        cname: client_name.unwrap_or_default(),
         peerid: RedisString::from_bytes(format!("id={}", client_id).as_bytes()),
     };
 
@@ -470,7 +470,7 @@ fn record_commandlog_entry_for_handle(
         id,
         value,
         time: timestamp_unix,
-        cname: client_name.unwrap_or_else(RedisString::new),
+        cname: client_name.unwrap_or_default(),
         peerid: RedisString::from_bytes(format!("id={}", client_id).as_bytes()),
     };
     log.entries.push_front(entry);

@@ -5,7 +5,7 @@
 //! internal mutex that POSIX `localtime` / `localtime_r` hold. The
 //! implementation is intentionally restricted: it only handles dates
 //! >= 1970-01-01 (Unix epoch), which is all that server-side logging
-//! needs.
+//! > needs.
 //!
 //! # Usage pattern (mirrors the C caller convention)
 //!

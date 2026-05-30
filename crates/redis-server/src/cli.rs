@@ -15,7 +15,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustls::StreamOwned;
 
 #[cfg(unix)]
-use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, blocked_replication_wait_any, current_time_ms};

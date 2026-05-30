@@ -317,9 +317,7 @@ pub fn runtime_remember_read_keys(
     }
 
     let mut rt = lock_runtime_tracking();
-    if !rt.clients.contains_key(&client_id) {
-        rt.clients.insert(client_id, state.clone());
-    }
+    rt.clients.entry(client_id).or_insert_with(|| state.clone());
     for key in keys {
         rt.table.entry(key.clone()).or_default().insert(client_id);
     }
@@ -978,7 +976,7 @@ pub fn tracking_remember_keys(
     for &idx in key_indices {
         if let Some(key_obj) = argv.get(idx) {
             let key_bytes = key_obj.as_bytes().to_vec();
-            let ids = tracking.table.entry(key_bytes).or_insert_with(HashSet::new);
+            let ids = tracking.table.entry(key_bytes).or_default();
             if ids.insert(tracking_client_id) {
                 tracking.total_items += 1;
             }
@@ -1003,7 +1001,7 @@ pub fn tracking_build_broadcast_reply(
 ) -> Option<Vec<u8>> {
     let count = match exclude_client {
         None => keys.len() as u64,
-        Some(exc) => keys.values().filter(|&&ref v| *v != Some(exc)).count() as u64,
+        Some(exc) => keys.values().filter(|&v| *v != Some(exc)).count() as u64,
     };
 
     if count == 0 {
@@ -1304,9 +1302,9 @@ pub fn tracking_handle_pending_key_invalidations<F>(
 pub fn tracking_invalidate_keys_on_flush<F>(
     tracking: &mut TrackingState,
     tracking_clients_count: u64,
-    current_client_id: Option<ClientId>,
+    _current_client_id: Option<ClientId>,
     async_free: bool,
-    mut each_tracking_client: F,
+    each_tracking_client: F,
 ) where
     F: FnMut(ClientId, bool /* is_current_client */),
 {

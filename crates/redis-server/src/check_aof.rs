@@ -201,7 +201,7 @@ fn load_manifest(path: &Path) -> Result<Manifest, ()> {
             continue;
         }
         let fields: Vec<&[u8]> = raw.split(|&b| b == b' ' || b == b'\r').filter(|f| !f.is_empty()).collect();
-        if fields.len() < 6 || fields.len() % 2 != 0 {
+        if fields.len() < 6 || !fields.len().is_multiple_of(2) {
             return Err(());
         }
         if fields[0] != b"file" || fields[2] != b"seq" || fields[4] != b"type" {

@@ -472,7 +472,7 @@ pub fn geoadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let remaining = ctx.argc().saturating_sub(long_idx);
-    if remaining % 3 != 0 || remaining == 0 || (xx && nx) {
+    if !remaining.is_multiple_of(3) || remaining == 0 || (xx && nx) {
         return Err(RedisError::syntax(b"syntax error"));
     }
 
@@ -882,16 +882,13 @@ pub fn geosearchstore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 pub fn geohash_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let key = RedisString::from_bytes(ctx.arg(1)?.as_bytes());
 
-    match as_zset(ctx.db().lookup_key_read(&key))? {
-        None => {
-            let n = ctx.argc() - 2;
-            ctx.reply_array_header(n)?;
-            for _ in 0..n {
-                ctx.reply_null()?;
-            }
-            return Ok(());
+    if as_zset(ctx.db().lookup_key_read(&key))?.is_none() {
+        let n = ctx.argc() - 2;
+        ctx.reply_array_header(n)?;
+        for _ in 0..n {
+            ctx.reply_null()?;
         }
-        Some(_) => {}
+        return Ok(());
     }
 
     let argc = ctx.argc();

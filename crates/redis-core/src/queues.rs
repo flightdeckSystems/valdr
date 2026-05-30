@@ -380,11 +380,7 @@ impl<T> SpmcQueue<T> {
     /// C: `queues.c:147-150`, `spmcSize`
     pub fn size(&self) -> usize {
         let head = self.head.load(Ordering::Relaxed);
-        if self.tail >= head {
-            self.tail - head
-        } else {
-            0
-        }
+        self.tail.saturating_sub(head)
     }
 
     /// Pushes `data` into the next slot. Returns `false` if the slot is

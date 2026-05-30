@@ -146,6 +146,12 @@ pub struct InlineSet {
     pub sticky: InlineSetEncoding,
 }
 
+impl Default for InlineSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InlineSet {
     pub fn new() -> Self {
         Self {
@@ -2442,9 +2448,7 @@ pub fn object_compute_size(
         }
         ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
             std::mem::size_of::<RedisObject>()
-                + z.by_member
-                    .iter()
-                    .map(|(m, _)| m.len() + std::mem::size_of::<f64>())
+                + z.by_member.keys().map(|m| m.len() + std::mem::size_of::<f64>())
                     .sum::<usize>()
         }
         ObjectKind::ZSet(ZSetEncoding::ListPack(lp)) => {
@@ -2616,7 +2620,7 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         let mut j = 3;
         while j < ctx.arg_count() {
             let opt = ctx.arg(j)?;
-            if opt.as_bytes().to_ascii_lowercase() == b"samples" && j + 1 < ctx.arg_count() {
+            if opt.as_bytes().eq_ignore_ascii_case(b"samples") && j + 1 < ctx.arg_count() {
                 let count_obj = ctx.arg(j + 1)?.clone();
                 samples = get_long_long_from_object(Some(&RedisObject::from_string(count_obj)))?;
                 if samples < 0 {
@@ -2632,6 +2636,8 @@ pub fn memory_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         }
         // TODO(port): look up key in db and call object_compute_size
         // Blocked on CommandContext having db access (Phase 3).
+        // PORT NOTE: samples parsed above but not yet consumed — will be passed to object_compute_size.
+        let _ = samples;
         ctx.reply_null_bulk()?;
         return Ok(());
     }

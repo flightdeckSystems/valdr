@@ -83,7 +83,7 @@ pub const HLL_HDR_SIZE: usize = 16;
 
 /// Total byte size of a dense-encoded HLL (header + packed registers).
 /// = 16 + (16384 * 6 + 7) / 8 = 16 + 12288 = 12304.
-pub const HLL_DENSE_SIZE: usize = HLL_HDR_SIZE + (HLL_REGISTERS * HLL_BITS as usize + 7) / 8;
+pub const HLL_DENSE_SIZE: usize = HLL_HDR_SIZE + (HLL_REGISTERS * HLL_BITS as usize).div_ceil(8);
 
 /// Dense encoding discriminant stored in header byte [4].
 pub const HLL_DENSE: u8 = 0;
@@ -192,7 +192,7 @@ fn hll_card_write(buf: &mut [u8], card: u64) {
 #[inline]
 pub fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
     let byte_idx = regnum * HLL_BITS as usize / 8;
-    let fb = regnum * HLL_BITS as usize & 7;
+    let fb = (regnum * HLL_BITS as usize) & 7;
     let fb8 = 8 - fb;
     let b0 = registers[byte_idx] as u32;
     // C reads the byte after the last packed register and relies on SDS's
@@ -204,7 +204,7 @@ pub fn hll_dense_get_register(registers: &[u8], regnum: usize) -> u8 {
 #[inline]
 pub fn hll_dense_set_register(registers: &mut [u8], regnum: usize, val: u8) {
     let byte_idx = regnum * HLL_BITS as usize / 8;
-    let fb = regnum * HLL_BITS as usize & 7;
+    let fb = (regnum * HLL_BITS as usize) & 7;
     let fb8 = 8 - fb;
     let v = val as u32;
     registers[byte_idx] &= !((HLL_REGISTER_MAX as u32) << fb) as u8;
@@ -1010,7 +1010,7 @@ pub fn hll_dense_compress(reg_dense: &mut [u8], reg_raw: &[u8]) {
 /// The initial state encodes all 16384 registers as zero using XZERO opcodes.
 // C: hyperloglog.c:1603-1631, createHLLObject
 pub fn create_hll_object() -> Vec<u8> {
-    let xzero_count = (HLL_REGISTERS + HLL_SPARSE_XZERO_MAX_LEN - 1) / HLL_SPARSE_XZERO_MAX_LEN;
+    let xzero_count = HLL_REGISTERS.div_ceil(HLL_SPARSE_XZERO_MAX_LEN);
     let sparselen = HLL_HDR_SIZE + xzero_count * 2;
     let mut buf = vec![0u8; sparselen];
 

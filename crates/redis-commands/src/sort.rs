@@ -608,7 +608,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     // C: sort.c:319-325.
     let (mut dontsort, mut alpha, mut sortby) = (dontsort, alpha, sortby);
     if dontsort
-        && sortval_opt.as_ref().map_or(false, |o| o.is_set())
+        && sortval_opt.as_ref().is_some_and(|o| o.is_set())
         && (storekey.is_some() || ctx.is_script_context())
     {
         dontsort = false;
@@ -640,7 +640,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
     let mut vectorlen = vlen;
     if sortval_opt
         .as_ref()
-        .map_or(false, |o| o.is_zset() || o.is_list())
+        .is_some_and(|o| o.is_zset() || o.is_list())
         && dontsort
         && (start != 0 || end != vlen - 1)
     {
@@ -897,10 +897,7 @@ pub fn sort_command_generic(ctx: &mut CommandContext, readonly: bool) -> Result<
             let obj = RedisObject::new_list_from_vec(result_list);
             ctx.db_mut().set_key(store_key.clone(), obj, 0);
             ctx.notify_keyspace_event(NOTIFY_LIST, b"sortstore", &store_key);
-        } else if {
-            // C: sort.c:594-598 — delete storekey if output is empty.
-            ctx.db_mut().delete(&store_key)
-        } {
+        } else if ctx.db_mut().delete(&store_key) {
             ctx.db_mut().signal_modified(&store_key);
             ctx.notify_keyspace_event(NOTIFY_GENERIC, b"del", &store_key);
         }

@@ -6,45 +6,27 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use redis_core::acl::{
-    acl_log_entries, acl_log_max_len, acl_log_now_millis, acl_pubsub_default_config_value,
-    apply_acl_pubsub_default_to_user, category as acl_category, category_name_to_bit,
-    clear_acl_log, global_acl_state, hex_to_hash, record_acl_log_entry, set_acl_log_max_len,
-    set_acl_pubsub_default, sha256_hash, AclKeyPattern, AclLogEntry, AclUser, ACL_KEY_READ,
-    ACL_KEY_READ_WRITE, ACL_KEY_WRITE, ALL_CATEGORY_NAMES,
+    ACL_KEY_READ,
+    ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
 };
-use redis_core::blocked_keys::{blocked_keys_index, BlockedAction};
+use redis_core::blocked_keys::BlockedAction;
 use redis_core::client_info::client_info_registry;
-use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
-use redis_core::live_config::{LiveConfig, MaxmemoryPolicyCode};
-use redis_core::metrics::{
-    record_acl_access_denied_auth, record_blocked_command_rejected, record_error_reply,
-    server_metrics,
-};
-use redis_core::networking::{
-    client_matches_ip_filter, validate_client_capa_filter, validate_client_flag_filter,
-};
-use redis_core::notify::{keyspace_events_string_to_flags, NOTIFY_EVICTED};
+use redis_core::live_config::LiveConfig;
+use redis_core::metrics::server_metrics;
 use redis_core::object::object_compute_size;
-use redis_core::{CommandContext, PersistenceStatus, RedisDb};
+use redis_core::CommandContext;
 use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
-use serde_json::Value;
 
-use crate::generated::{GeneratedCommandSpec, COMMANDS};
 use crate::live_config_handle;
 
-use crate::acl_cmd::*;
-use crate::client_cmd::*;
-use crate::command_meta::*;
-use crate::debug_cmd::*;
 
 pub use crate::acl_cmd::*;
 pub use crate::client_cmd::*;
@@ -270,7 +252,7 @@ pub fn config_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return ctx.reply_frame(&RespFrame::Map(pairs));
     }
     if ascii_eq_ignore_case(sub_bytes, b"SET") {
-        if ctx.arg_count() < 4 || ctx.arg_count() % 2 != 0 {
+        if ctx.arg_count() < 4 || !ctx.arg_count().is_multiple_of(2) {
             return Err(RedisError::wrong_number_of_args(b"config|set"));
         }
         let mut updates: Vec<(RedisString, RedisString)> = Vec::new();
@@ -552,15 +534,14 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return Err(RedisError::runtime(b"ERR No shutdown in progress."));
     }
-    if !nosave {
-        if shutdown_save_failed() || rdb_target_is_directory(ctx) {
+    if !nosave
+        && (shutdown_save_failed() || rdb_target_is_directory(ctx)) {
             mark_shutdown_save_failed();
             log_server_notice("Error trying to save the DB, can't exit");
             return Err(RedisError::runtime(
                 b"ERR Errors trying to SHUTDOWN. Check logs.",
             ));
         }
-    }
     log_server_notice("ready to exit, bye bye");
     cleanup_bgsave_child_for_shutdown(ctx);
     exit_process_now();
@@ -966,7 +947,7 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 /// On success sets `client.authenticated_user`. Returns `+OK` or `-WRONGPASS`.
 pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 3 {
+    if !(2..=3).contains(&argc) {
         return Err(RedisError::syntax(b"syntax error"));
     }
     let (username, password) = if argc == 2 {
@@ -997,12 +978,9 @@ pub fn auth_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         None => {
             if username.is_none() {
                 let fallback = try_password_any_user(password.as_bytes());
-                match fallback {
-                    Some(uname) => {
-                        ctx.client_mut().set_authenticated_user(Some(uname));
-                        return ctx.reply_simple_string(b"OK");
-                    }
-                    None => {}
+                if let Some(uname) = fallback {
+                    ctx.client_mut().set_authenticated_user(Some(uname));
+                    return ctx.reply_simple_string(b"OK");
                 }
             }
             record_auth_failure_acl_log(ctx, lookup_name, b"AUTH");

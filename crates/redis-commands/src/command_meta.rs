@@ -525,9 +525,7 @@ pub fn command_key_refs_from_specs(
 }
 
 pub fn command_allows_no_mandatory_keys(spec: &crate::generated::GeneratedCommandSpec) -> bool {
-    spec.flags
-        .iter()
-        .any(|flag| *flag == crate::generated::CommandFlag::NO_MANDATORY_KEYS)
+    spec.flags.contains(&crate::generated::CommandFlag::NO_MANDATORY_KEYS)
 }
 
 pub fn key_flags(flags: &[&[u8]]) -> Vec<RedisString> {

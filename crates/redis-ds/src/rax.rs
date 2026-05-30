@@ -159,9 +159,7 @@ impl<V> RadixTree<V> {
     pub fn alloc_size(&self) -> usize {
         std::mem::size_of::<Self>()
             + self
-                .entries
-                .iter()
-                .map(|(key, _)| key.capacity() + std::mem::size_of::<V>())
+                .entries.keys().map(|key| key.capacity() + std::mem::size_of::<V>())
                 .sum::<usize>()
     }
 }

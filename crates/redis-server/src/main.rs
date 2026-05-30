@@ -22,38 +22,20 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::mpsc::{self};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use rustls::StreamOwned;
 
-#[cfg(unix)]
-use libc;
-use redis_commands::connection::get_max_clients;
-use redis_commands::{dispatch, pubsub};
-use redis_core::blocked_keys::{blocked_keys_index, blocked_replication_wait_any, current_time_ms};
-use redis_core::client_info::client_info_registry;
-use redis_core::command_context::CommandContext;
-use redis_core::databases::global_databases;
 use redis_core::db::RedisDb;
 use redis_core::expire::active_expire_config;
-use redis_core::live_config::MaxmemoryPolicyCode;
 use redis_core::lru_clock::spawn_lru_clock_thread;
 use redis_core::metrics::server_metrics;
 use redis_core::pubsub_registry::PubSubRegistry;
-use redis_core::PersistenceStatus;
-use redis_core::{Client, Connection};
-use redis_protocol::frame::{encode_resp2, RespFrame};
-use redis_types::{RedisError, RedisString};
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use redis_types::RedisString;
 
 mod runtime_owner;
 

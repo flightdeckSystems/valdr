@@ -11,9 +11,6 @@
 //! Linux-only functionality is gated with `#[cfg(target_os = "linux")]`.
 //! The arm64 MADV_FREE bug check is additionally gated on `#[cfg(target_arch = "aarch64")]`.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// The result of a single system check.
@@ -317,7 +314,7 @@ fn run_check(name: &[u8], outcome: CheckOutcome, all_passed: &mut bool) {
 /// Behavior is identical.
 pub fn syscheck() -> bool {
     // C: syscheck.c:353-374
-    let mut all_passed = true;
+    let all_passed = true;
 
     #[cfg(target_os = "linux")]
     {

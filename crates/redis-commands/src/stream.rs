@@ -504,7 +504,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let id_arg = ctx.arg_owned(idx)?;
     idx += 1;
     let remaining = ctx.arg_count() - idx;
-    if remaining == 0 || remaining % 2 != 0 {
+    if remaining == 0 || !remaining.is_multiple_of(2) {
         return Err(RedisError::wrong_number_of_args(b"xadd"));
     }
     let mut fields: Vec<(RedisString, RedisString)> = Vec::with_capacity(remaining / 2);
@@ -524,7 +524,7 @@ pub fn xadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let fields_for_wake = fields.clone();
     let key_for_wake = key.clone();
 
-    let mut id_autogen = false;
+    let id_autogen;
     let new_id = {
         let mut obj_owned: Option<RedisObject> = None;
         let stream: &mut InlineStream = if already_exists {
@@ -1377,7 +1377,7 @@ pub fn xread_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
     };
     let remaining = argc - streams_start;
-    if remaining == 0 || remaining % 2 != 0 {
+    if remaining == 0 || !remaining.is_multiple_of(2) {
         return Err(RedisError::runtime(
             b"ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.",
         ));
@@ -2033,7 +2033,7 @@ pub fn xreadgroup_command(ctx: &mut CommandContext) -> RedisResult<()> {
         Some(s) => s,
     };
     let remaining = argc - streams_start;
-    if remaining == 0 || remaining % 2 != 0 {
+    if remaining == 0 || !remaining.is_multiple_of(2) {
         return Err(RedisError::runtime(
             b"ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be specified.",
         ));
@@ -2359,7 +2359,7 @@ pub fn xpending_command(ctx: &mut CommandContext) -> RedisResult<()> {
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(b"xpending"));
     }
-    if argc != 3 && (argc < 6 || argc > 9) {
+    if argc != 3 && !(6..=9).contains(&argc) {
         return Err(RedisError::syntax(b"syntax error"));
     }
     let key = ctx.arg_owned(1usize)?;

@@ -303,9 +303,8 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
         let Some(compare) = comparison.as_ref() else {
             return Err(RedisError::runtime(b"ERR syntax error"));
         };
-        if !prev_bytes
-            .as_ref()
-            .is_some_and(|bytes| bytes.as_slice() == compare.as_bytes())
+        if prev_bytes
+            .as_ref().is_none_or(|bytes| bytes.as_slice() != compare.as_bytes())
         {
             ctx.client_mut().set_prevent_propagation();
             if flags & SET_FLAG_GET != 0 {
@@ -551,7 +550,7 @@ pub fn get_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// C: `getexCommand` (t_string.c:340).
 pub fn getex_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 4 {
+    if !(2..=4).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(b"getex"));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -848,7 +847,7 @@ pub fn mget_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// C: `msetCommand` (t_string.c:592).
 pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
-    if argc < 3 || argc % 2 == 0 {
+    if argc < 3 || argc.is_multiple_of(2) {
         return Err(RedisError::wrong_number_of_args(b"mset"));
     }
     let notify = ctx.keyspace_notifications_enabled(NOTIFY_STRING);
@@ -876,7 +875,7 @@ pub fn mset_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
 /// C: `msetnxCommand` (t_string.c:597).
 pub fn msetnx_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
     let argc = ctx.arg_count();
-    if argc < 3 || argc % 2 == 0 {
+    if argc < 3 || argc.is_multiple_of(2) {
         return Err(RedisError::wrong_number_of_args(b"msetnx"));
     }
     let mut pairs: Vec<(RedisString, RedisString)> = Vec::with_capacity((argc - 1) / 2);

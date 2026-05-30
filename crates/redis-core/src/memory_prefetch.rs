@@ -505,7 +505,7 @@ pub fn free_prefetch_commands_batch() {
 /// value after the change.  Passed as a parameter here.
 pub fn on_max_batch_size_change(new_max: usize) -> bool {
     let has_clients =
-        BATCH.with(|cell| cell.borrow().as_ref().map_or(false, |b| b.client_count > 0));
+        BATCH.with(|cell| cell.borrow().as_ref().is_some_and(|b| b.client_count > 0));
 
     if has_clients {
         // Batch in progress — defer the resize.
@@ -537,7 +537,7 @@ pub fn on_max_batch_size_change(new_max: usize) -> bool {
 /// cannot implement the dispatch loop without that reference.
 pub fn process_clients_commands_batch() -> Result<(), RedisError> {
     let has_batch_with_clients =
-        BATCH.with(|cell| cell.borrow().as_ref().map_or(false, |b| b.client_count > 0));
+        BATCH.with(|cell| cell.borrow().as_ref().is_some_and(|b| b.client_count > 0));
 
     if !has_batch_with_clients {
         return Ok(());
@@ -547,7 +547,7 @@ pub fn process_clients_commands_batch() -> Result<(), RedisError> {
     let is_first_invocation = BATCH.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map_or(false, |b| b.executed_commands == 0)
+            .is_some_and(|b| b.executed_commands == 0)
     });
 
     if is_first_invocation {
@@ -637,7 +637,7 @@ pub fn add_command_to_batch_and_process_if_full(client: &mut Client) -> Result<(
     // C: memory_prefetch.c:285-288
     // Fire if batch is full by client count or by key count.
     let should_process = BATCH.with(|cell| {
-        cell.borrow().as_ref().map_or(false, |b| {
+        cell.borrow().as_ref().is_some_and(|b| {
             b.client_count == b.max_prefetch_size || b.key_count == b.max_prefetch_size
         })
     });

@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redis_types::{RedisError, RedisString};
+use redis_types::RedisError;
 
 use crate::command_context::CommandContext;
 

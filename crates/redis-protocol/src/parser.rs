@@ -471,7 +471,7 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, RedisError> {
         acc = acc
             .checked_mul(10)
             .and_then(|v| v.checked_add(d))
-            .ok_or_else(|| RedisError::not_integer())?;
+            .ok_or_else(RedisError::not_integer)?;
     }
     Ok(if negative { -acc } else { acc })
 }

@@ -175,11 +175,11 @@ impl<T> LinkedList<T> {
         self.search_by(|value| value == key)
     }
 
-    pub fn search_by<F>(&self, mut matcher: F) -> Option<usize>
+    pub fn search_by<F>(&self, matcher: F) -> Option<usize>
     where
         F: FnMut(&T) -> bool,
     {
-        self.entries.iter().position(|value| matcher(value))
+        self.entries.iter().position(matcher)
     }
 
     pub fn contains_key(&self, key: &T) -> bool

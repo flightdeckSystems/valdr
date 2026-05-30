@@ -15,7 +15,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustls::StreamOwned;
 
 #[cfg(unix)]
-use libc;
 use redis_commands::connection::get_max_clients;
 use redis_commands::{dispatch, pubsub};
 use redis_core::blocked_keys::{blocked_keys_index, blocked_replication_wait_any, current_time_ms};
@@ -603,7 +602,7 @@ pub(crate) fn spawn_blocked_timeout_thread(shutdown: Arc<AtomicBool>) {
 
 #[cfg(unix)]
 extern "C" fn handle_termination_signal(signal: libc::c_int) {
-    redis_commands::connection::note_shutdown_signal(signal as i32);
+    redis_commands::connection::note_shutdown_signal(signal);
 }
 
 /// Best-effort SIGINT/SIGTERM handler used by the upstream shutdown tests.
@@ -1291,7 +1290,7 @@ pub(crate) fn process_current_command_with_db(
         .total_commands_processed
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0)
+    let active_time_sample = command_number.is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
         .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx =
@@ -1341,7 +1340,7 @@ pub(crate) fn process_current_command_with_db_list(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let dispatch_db = client.db_index;
-    let active_time_sample = (command_number % ACTIVE_TIME_SAMPLE_INTERVAL == 0)
+    let active_time_sample = command_number.is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
         .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(

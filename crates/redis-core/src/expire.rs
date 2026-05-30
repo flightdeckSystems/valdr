@@ -395,7 +395,7 @@ pub fn active_expire_cycle_job(
         // C: expire.c:296, if (db && kvstoreSize(kvs)) dbs_performed++;
         dbs_performed += 1;
 
-        let mut db_done = false;
+        let db_done = false;
         let mut update_avg_ttl_times: i32 = 0;
 
         // C: expire.c:301-409, inner do-while over the current database.
@@ -407,7 +407,7 @@ pub fn active_expire_cycle_job(
             if num == 0 {
                 // C: db->expiry[jobType].avg_ttl = 0;
                 // TODO(port): db->expiry not yet on RedisDb stub.
-                db_done = true;
+                // PORT NOTE: db_done = true removed here — assignment was dead (break follows immediately).
                 break;
             }
 
@@ -417,7 +417,7 @@ pub fn active_expire_cycle_job(
 
             let num = num.min(keys_per_loop);
             let max_buckets: u64 = num * 10;
-            let mut checked_buckets: u64 = 0;
+            let checked_buckets: u64 = 0;
             let origin_ttl_samples = data.ttl_samples;
 
             // C: expire.c:339-349, scan buckets until enough keys sampled.
@@ -425,7 +425,7 @@ pub fn active_expire_cycle_job(
                 // TODO(port): kvstoreScan(kvs, cursor, -1, -1, scan_cb, skip_cb, &data)
                 // not yet ported. Cannot scan until kvstore lands in redis-ds.
                 // C: cursor = kvstoreScan(...); update db->expiry[jobType].cursor.
-                checked_buckets += 1;
+                // PORT NOTE: checked_buckets += 1 removed — dead assignment before break.
                 break; // placeholder: nothing to scan yet
             }
 
@@ -446,8 +446,8 @@ pub fn active_expire_cycle_job(
             };
 
             // C: expire.c:366-399, update avg_ttl every 16 iterations or on exit.
-            if (iteration & 0xf) == 0 || !repeat {
-                if data.ttl_samples > 0 && matches!(job_type, ActiveExpiryType::Keys) {
+            if ((iteration & 0xf) == 0 || !repeat)
+                && data.ttl_samples > 0 && matches!(job_type, ActiveExpiryType::Keys) {
                     let avg_ttl = data.ttl_sum / data.ttl_samples as i64;
                     // C: expire.c:379-395 — closed-form geometric series avg using AVG_TTL_FACTOR.
                     // TODO(port): db->expiry[jobType].avg_ttl not yet on RedisDb stub.
@@ -459,11 +459,10 @@ pub fn active_expire_cycle_job(
                     data.ttl_sum = 0;
                     data.ttl_samples = 0;
                 }
-            }
 
             // C: expire.c:401-408, enforce time limit.
-            if (iteration & time_check_mask) == 0 {
-                if elapsed_us(start) > timelimit_us as u64 {
+            if (iteration & time_check_mask) == 0
+                && elapsed_us(start) > timelimit_us as u64 {
                     let mut guard = ACTIVE_EXPIRE_STATE
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
@@ -471,7 +470,6 @@ pub fn active_expire_cycle_job(
                     // TODO(port): server.stat_expired_time_cap_reached_count not on stub.
                     break;
                 }
-            }
 
             if !repeat {
                 break;
@@ -837,7 +835,7 @@ pub fn expire_generic_command(
     let argc = ctx.arg_count();
     if argc < 3 {
         return Err(RedisError::wrong_number_of_args(
-            ctx.command_name().to_vec(),
+            ctx.command_name(),
         ));
     }
     parse_extended_expire_arguments(ctx, &mut flag, argc)?;
@@ -847,7 +845,7 @@ pub fn expire_generic_command(
     let mut when: MsTime = parse_i64_from_redis_string(&param)?;
 
     if unit == UNIT_SECONDS {
-        if when > i64::MAX / 1000 || when < i64::MIN / 1000 {
+        if !(i64::MIN / 1000..=i64::MAX / 1000).contains(&when) {
             return Err(expire_time_error(&cmd_name_lower));
         }
         when *= 1000;
@@ -1070,7 +1068,7 @@ fn parse_i64_from_redis_string(s: &RedisString) -> Result<i64, RedisError> {
     let mut result: i64 = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b < b'0' || b > b'9' {
+        if !(b'0'..=b'9').contains(&b) {
             return Err(RedisError::not_integer());
         }
         result = result
@@ -1255,11 +1253,10 @@ pub fn run_active_expire_tick_on_db(
         let sample = db.sample_expiring_keys(sample_size, seed);
         let mut deleted_keys: Vec<RedisString> = Vec::new();
         for (key, expire_at) in &sample {
-            if *expire_at <= now_ms {
-                if db.sync_delete(key) {
+            if *expire_at <= now_ms
+                && db.sync_delete(key) {
                     deleted_keys.push(key.clone());
                 }
-            }
         }
         let deleted = deleted_keys.len() as u64;
         let sampled = sample.len();

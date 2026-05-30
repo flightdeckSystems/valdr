@@ -18,7 +18,7 @@
 
 use super::geohash_geohash::{
     geohash_decode, geohash_encode, geohash_get_coord_range, geohash_neighbors, GeoHashArea,
-    GeoHashBits, GeoHashNeighbors, GeoHashRange, GeoShape, GeoShapeKind, GEO_LAT_MAX, GEO_LAT_MIN,
+    GeoHashBits, GeoHashNeighbors, GeoShape, GeoShapeKind, GEO_LAT_MAX, GEO_LAT_MIN,
     GEO_LONG_MAX, GEO_LONG_MIN,
 };
 
@@ -104,9 +104,9 @@ pub fn geohash_estimate_steps_by_radius(mut range_meters: f64, lat: f64) -> u8 {
     }
     step -= 2;
 
-    if lat > 66.0 || lat < -66.0 {
+    if !(-66.0..=66.0).contains(&lat) {
         step -= 1;
-        if lat > 80.0 || lat < -80.0 {
+        if !(-80.0..=80.0).contains(&lat) {
             step -= 1;
         }
     }

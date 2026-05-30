@@ -620,7 +620,7 @@ pub fn bgsave_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     if server.rdb_child_pid() != 0 {
         return Err(RedisError::runtime(
-            b"ERR Background save already in progress".to_vec(),
+            b"ERR Background save already in progress",
         ));
     }
 
@@ -868,7 +868,7 @@ pub fn bgrewriteaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
 
     if ctx.server().persistence.aof_rewrite_in_progress() {
         return Err(RedisError::runtime(
-            b"ERR Background append only file rewriting already in progress".to_vec(),
+            b"ERR Background append only file rewriting already in progress",
         ));
     }
 

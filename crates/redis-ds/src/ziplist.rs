@@ -19,7 +19,7 @@ const ZIP_STR_06B: u8 = 0 << 6;
 const ZIP_STR_14B: u8 = 1 << 6;
 const ZIP_STR_32B: u8 = 2 << 6;
 
-const ZIP_INT_16B: u8 = 0xc0 | (0 << 4);
+const ZIP_INT_16B: u8 = 0xc0;
 const ZIP_INT_32B: u8 = 0xc0 | (1 << 4);
 const ZIP_INT_64B: u8 = 0xc0 | (2 << 4);
 const ZIP_INT_24B: u8 = 0xc0 | (3 << 4);
@@ -122,7 +122,7 @@ impl Ziplist {
     pub fn safe_to_add(&self, add: usize) -> bool {
         self.blob_len()
             .checked_add(add)
-            .map_or(false, |len| len <= ZIPLIST_MAX_SAFETY_SIZE)
+            .is_some_and(|len| len <= ZIPLIST_MAX_SAFETY_SIZE)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -286,7 +286,7 @@ impl Ziplist {
         match self.get(offset) {
             Some(ZiplistValue::Bytes(bytes)) => bytes == value,
             Some(ZiplistValue::Integer(stored)) => {
-                Self::try_encode_integer(value).map_or(false, |(_, parsed)| parsed == stored)
+                Self::try_encode_integer(value).is_some_and(|(_, parsed)| parsed == stored)
             }
             None => false,
         }

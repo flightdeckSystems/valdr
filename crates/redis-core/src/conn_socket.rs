@@ -13,7 +13,7 @@
 //! `connect`/`blocking_connect`, `listen`/`close_listener` (the owner loop owns
 //! binding/accepting), and the `sync_*` blocking helpers (RDB/repl transfer).
 
-use std::io::{IoSlice, Read, Write};
+use std::io::IoSlice;
 
 use redis_types::RedisError;
 

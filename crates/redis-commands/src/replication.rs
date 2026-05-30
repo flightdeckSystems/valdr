@@ -57,7 +57,7 @@ pub fn replicaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         Some(p) => p,
         None => {
             return Err(RedisError::runtime(
-                b"ERR value is out of range, value must between 0 and 65535".to_vec(),
+                b"ERR value is out of range, value must between 0 and 65535",
             ));
         }
     };
@@ -389,7 +389,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             }
             let port_str = ctx.arg_owned(2usize)?;
             let port = parse_port(port_str.as_bytes())
-                .ok_or_else(|| RedisError::runtime(b"ERR invalid port number".to_vec()))?;
+                .ok_or_else(|| RedisError::runtime(b"ERR invalid port number"))?;
             let repl = global_replication_state();
             let client_id = ctx.client_ref().id();
             {
@@ -428,7 +428,7 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
             }
             let offset_str = ctx.arg_owned(2usize)?;
             let offset = parse_i64(offset_str.as_bytes()).map_err(|_| {
-                RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+                RedisError::runtime(b"ERR value is not an integer or out of range")
             })?;
             let client_id = ctx.client_ref().id();
             let now_ms = SystemTime::now()
@@ -484,16 +484,16 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let numreplicas = parse_i64(ctx.arg(1usize)?.as_bytes())
-        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))?
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?
         as usize;
     let timeout_ms = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+        RedisError::runtime(b"ERR value is not an integer or out of range")
     })?;
     if timeout_ms < 0 {
-        return Err(RedisError::runtime(b"ERR timeout is negative".to_vec()));
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
     }
     if timeout_ms > 0 && timeout_ms > i64::MAX - mstime() {
-        return Err(RedisError::runtime(b"ERR timeout is out of range".to_vec()));
+        return Err(RedisError::runtime(b"ERR timeout is out of range"));
     }
 
     let repl = global_replication_state();
@@ -578,7 +578,7 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let numlocal = parse_i64(ctx.arg(1usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+        RedisError::runtime(b"ERR value is not an integer or out of range")
     })?;
     if !(0..=1).contains(&numlocal) {
         return Err(RedisError::runtime(
@@ -587,22 +587,22 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     }
 
     let numreplicas = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+        RedisError::runtime(b"ERR value is not an integer or out of range")
     })?;
     let timeout_ms = parse_i64(ctx.arg(3usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+        RedisError::runtime(b"ERR value is not an integer or out of range")
     })?;
     if timeout_ms < 0 {
-        return Err(RedisError::runtime(b"ERR timeout is negative".to_vec()));
+        return Err(RedisError::runtime(b"ERR timeout is negative"));
     }
     if timeout_ms > 0 && timeout_ms > i64::MAX - mstime() {
-        return Err(RedisError::runtime(b"ERR timeout is out of range".to_vec()));
+        return Err(RedisError::runtime(b"ERR timeout is out of range"));
     }
 
     let repl = global_replication_state();
     if repl.is_replica() {
         return Err(RedisError::runtime(
-            b"ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_vec(),
+            b"ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.",
         ));
     }
 
@@ -1112,10 +1112,10 @@ fn register_replica(
 /// error to match real Redis behaviour.
 fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
     let s = std::str::from_utf8(bytes).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range".to_vec())
+        RedisError::runtime(b"ERR value is not an integer or out of range")
     })?;
     s.parse::<i64>()
-        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range".to_vec()))
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))
 }
 
 /// Parse a TCP port literal. Returns `None` on parse failure or out-of-range.

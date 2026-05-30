@@ -228,8 +228,7 @@ fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisEr
 fn query_path_owned(root: &Value, path: &str) -> Result<Vec<Value>, RedisError> {
     let tokens = lex_path(path)?;
     Ok(eval_tokens(root, &tokens, 0)
-        .into_iter()
-        .map(|v| v.clone())
+        .into_iter().cloned()
         .collect())
 }
 
@@ -495,21 +494,18 @@ fn num_op_recursive(
         },
         PathToken::Wildcard => {
             let mut results = vec![];
-            match v {
-                Value::Array(arr) => {
-                    for child in arr.iter_mut() {
-                        if is_last {
-                            if apply_num_op(child, operand, is_multiply).is_ok() {
-                                results.push(child.clone());
-                            }
-                        } else if let Ok(sub) =
-                            num_op_recursive(child, tokens, pos + 1, operand, is_multiply)
-                        {
-                            results.extend(sub);
+            if let Value::Array(arr) = v {
+                for child in arr.iter_mut() {
+                    if is_last {
+                        if apply_num_op(child, operand, is_multiply).is_ok() {
+                            results.push(child.clone());
                         }
+                    } else if let Ok(sub) =
+                        num_op_recursive(child, tokens, pos + 1, operand, is_multiply)
+                    {
+                        results.extend(sub);
                     }
                 }
-                _ => {}
             }
             Ok(results)
         }
@@ -693,23 +689,20 @@ fn strappend_recursive(
         },
         PathToken::Wildcard => {
             let mut results = vec![];
-            match v {
-                Value::Array(arr) => {
-                    for child in arr.iter_mut() {
-                        if is_last {
-                            match child {
-                                Value::String(s) => {
-                                    s.push_str(append);
-                                    results.push(Some(s.len()));
-                                }
-                                _ => results.push(None),
+            if let Value::Array(arr) = v {
+                for child in arr.iter_mut() {
+                    if is_last {
+                        match child {
+                            Value::String(s) => {
+                                s.push_str(append);
+                                results.push(Some(s.len()));
                             }
-                        } else {
-                            results.extend(strappend_recursive(child, tokens, pos + 1, append));
+                            _ => results.push(None),
                         }
+                    } else {
+                        results.extend(strappend_recursive(child, tokens, pos + 1, append));
                     }
                 }
-                _ => {}
             }
             results
         }
@@ -789,23 +782,20 @@ fn arrappend_recursive(
         },
         PathToken::Wildcard => {
             let mut results = vec![];
-            match v {
-                Value::Array(arr) => {
-                    for child in arr.iter_mut() {
-                        if is_last {
-                            match child {
-                                Value::Array(inner) => {
-                                    inner.extend(new_vals.iter().cloned());
-                                    results.push(Some(inner.len()));
-                                }
-                                _ => results.push(None),
+            if let Value::Array(arr) = v {
+                for child in arr.iter_mut() {
+                    if is_last {
+                        match child {
+                            Value::Array(inner) => {
+                                inner.extend(new_vals.iter().cloned());
+                                results.push(Some(inner.len()));
                             }
-                        } else {
-                            results.extend(arrappend_recursive(child, tokens, pos + 1, new_vals));
+                            _ => results.push(None),
                         }
+                    } else {
+                        results.extend(arrappend_recursive(child, tokens, pos + 1, new_vals));
                     }
                 }
-                _ => {}
             }
             results
         }
@@ -828,11 +818,7 @@ fn arrinsert_op(
                     (raw_idx as usize).min(len)
                 } else {
                     let abs = (-raw_idx) as usize;
-                    if abs > len {
-                        0
-                    } else {
-                        len - abs
-                    }
+                    len.saturating_sub(abs)
                 };
                 for (offset, val) in new_vals.iter().enumerate() {
                     arr.insert(insert_pos + offset, val.clone());
@@ -863,11 +849,7 @@ fn arrinsert_recursive(
             (raw_idx as usize).min(len)
         } else {
             let abs = (-raw_idx) as usize;
-            if abs > len {
-                0
-            } else {
-                len - abs
-            }
+            len.saturating_sub(abs)
         };
         for (offset, val) in new_vals.iter().enumerate() {
             arr.insert(insert_pos + offset, val.clone());
@@ -1091,19 +1073,16 @@ fn clear_recursive(v: &mut Value, tokens: &[PathToken], pos: usize) -> i64 {
         },
         PathToken::Wildcard => {
             let mut count = 0i64;
-            match v {
-                Value::Array(arr) => {
-                    for child in arr.iter_mut() {
-                        if is_last {
-                            if clear_value(child) {
-                                count += 1;
-                            }
-                        } else {
-                            count += clear_recursive(child, tokens, pos + 1);
+            if let Value::Array(arr) = v {
+                for child in arr.iter_mut() {
+                    if is_last {
+                        if clear_value(child) {
+                            count += 1;
                         }
+                    } else {
+                        count += clear_recursive(child, tokens, pos + 1);
                     }
                 }
-                _ => {}
             }
             count
         }

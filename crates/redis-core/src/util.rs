@@ -590,7 +590,7 @@ pub fn string2ll(s: &[u8]) -> Option<i64> {
 
     while idx < s.len() {
         let c = s[idx];
-        if c < b'0' || c > b'9' {
+        if !(b'0'..=b'9').contains(&c) {
             return None;
         }
         if v > u64::MAX / 10 {
@@ -638,7 +638,7 @@ pub fn string2ull(s: &[u8]) -> Option<u64> {
     }
     let mut v: u64 = 0;
     for &c in s {
-        if c < b'0' || c > b'9' {
+        if !(b'0'..=b'9').contains(&c) {
             return None;
         }
         v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
@@ -830,7 +830,7 @@ pub fn d2string(buf: &mut [u8], value: f64) -> usize {
 pub fn fixedpoint_d2string(dst: &mut [u8], dvalue: f64, fractional_digits: i32) -> usize {
     // C: util.c:867-965
     let fd = fractional_digits as usize;
-    if fractional_digits < 1 || fractional_digits > 17 {
+    if !(1..=17).contains(&fractional_digits) {
         if !dst.is_empty() {
             dst[0] = 0;
         }
@@ -1075,7 +1075,7 @@ pub fn version2num(version: &[u8]) -> Option<i32> {
 
     loop {
         let &c = iter.next()?; // returns None if we reach the end before the loop exits
-        if c >= b'0' && c <= b'9' {
+        if (b'0'..=b'9').contains(&c) {
             part = part * 10 + (c - b'0') as i32;
             if part > 255 {
                 return None;

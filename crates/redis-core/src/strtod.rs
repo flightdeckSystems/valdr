@@ -108,9 +108,9 @@ fn starts_with_inf_literal(input: &[u8]) -> bool {
         other => other,
     };
     body.len() >= 3
-        && body[0].to_ascii_lowercase() == b'i'
-        && body[1].to_ascii_lowercase() == b'n'
-        && body[2].to_ascii_lowercase() == b'f'
+        && body[0].eq_ignore_ascii_case(&b'i')
+        && body[1].eq_ignore_ascii_case(&b'n')
+        && body[2].eq_ignore_ascii_case(&b'f')
 }
 
 #[cfg(test)]

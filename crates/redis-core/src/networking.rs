@@ -528,7 +528,7 @@ pub struct IoLastWritten {
 // init_shared_query_buf() when it needs to hold the data past a read().
 thread_local! {
     static THREAD_SHARED_QB: std::cell::RefCell<Option<Vec<u8>>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Initialise (or re-initialise) the thread-local shared query buffer.
@@ -616,7 +616,7 @@ pub fn get_string_object_len(s: &RedisString) -> usize {
 /// placeholder for the connection handle.
 pub fn create_client(server: &mut RedisServer, conn: Option<()>) -> Client {
     let id = server.alloc_client_id();
-    let mut c = Client::new(id);
+    let c = Client::new(id);
     // TODO(port): initialise all client fields once Client is expanded to hold
     // the full state from server.h (querybuf, cmd_queue, flags, repl_data, …).
     // Currently Client is a minimal pilot struct.
@@ -642,7 +642,7 @@ pub fn link_client(_server: &mut RedisServer, _client_id: ClientId) {
 /// Set authentication state on a client.
 ///
 /// C: networking.c:232 `clientSetUser`
-pub fn client_set_user(c: &mut Client, _user_name: &[u8], authenticated: bool) {
+pub fn client_set_user(_c: &mut Client, _user_name: &[u8], authenticated: bool) {
     // TODO(port): store user reference on Client once ACL types are available.
     let _ = authenticated;
     // PORT NOTE: `ever_authenticated` flag set to avoid low-level output-buf limiting.
@@ -662,7 +662,7 @@ pub fn auth_required(_c: &Client) -> bool {
 /// `Err(RedisError::Closed)` if no data should be written to this client.
 ///
 /// C: networking.c:446 `prepareClientToWrite`
-pub fn prepare_client_to_write(c: &mut Client) -> Result<(), ()> {
+pub fn prepare_client_to_write(_c: &mut Client) -> Result<(), ()> {
     // TODO(port): check c->flag.script, c->flag.module, c->flag.close_asap,
     // c->flag.reply_off, c->flag.reply_skip, c->flag.primary, c->flag.fake.
     // For the pilot all clients are writable.
@@ -1402,7 +1402,7 @@ fn parse_i64(bytes: &[u8]) -> Option<i64> {
         return None;
     }
     for &b in &bytes[start..] {
-        if b < b'0' || b > b'9' {
+        if !(b'0'..=b'9').contains(&b) {
             return None;
         }
         result = result.checked_mul(10)?.checked_add((b - b'0') as i64)?;
@@ -1801,7 +1801,7 @@ pub fn client_get_redir_command(ctx: &mut CommandContext) -> RedisResult<()> {
 pub fn client_unblock_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let id_rs = ctx.arg(2)?;
     let id_str = id_rs.as_bytes();
-    let _id = parse_i64(id_str).ok_or_else(|| RedisError::not_integer())?;
+    let _id = parse_i64(id_str).ok_or_else(RedisError::not_integer)?;
     // TODO(port): lookupClientByID(id); if found and blocked, unblockClient.
     add_reply_long_long(ctx.client, 0); // TODO(port): return 1 if client was unblocked
     Ok(())
@@ -2078,7 +2078,7 @@ pub fn hello_command(ctx: &mut CommandContext) -> RedisResult<()> {
         ver = parse_i64(ver_rs.as_bytes()).ok_or_else(|| {
             RedisError::runtime(b"Protocol version is not an integer or out of range")
         })?;
-        if ver < 2 || ver > 3 {
+        if !(2..=3).contains(&ver) {
             add_reply_error(ctx.client, b"-NOPROTO unsupported protocol version");
             return Ok(());
         }
@@ -2135,7 +2135,7 @@ pub fn security_warning_command(ctx: &mut CommandContext) -> RedisResult<()> {
 ///
 /// C: networking.c:4520 `validateClientAttr`
 pub fn validate_client_attr(val: &[u8]) -> bool {
-    val.iter().all(|&b| b >= b'!' && b <= b'~')
+    val.iter().all(|&b| (b'!'..=b'~').contains(&b))
 }
 
 /// Validate the flag-filter string: each byte must be a known CLIENT LIST flag char.

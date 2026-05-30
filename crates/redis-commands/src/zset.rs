@@ -243,7 +243,7 @@ pub fn zadd_command(ctx: &mut CommandContext) -> RedisResult<()> {
     }
 
     let remaining = argc - idx;
-    if remaining == 0 || remaining % 2 != 0 {
+    if remaining == 0 || !remaining.is_multiple_of(2) {
         return Err(RedisError::syntax(b"syntax error"));
     }
     if incr && remaining != 2 {
@@ -851,7 +851,7 @@ pub fn zrevrangebyscore_command(ctx: &mut CommandContext) -> RedisResult<()> {
 /// Shared body for ZPOPMIN and ZPOPMAX.
 fn popminmax_inner(ctx: &mut CommandContext, reverse: bool, cmd: &[u8]) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 3 {
+    if !(2..=3).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(cmd));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -1869,7 +1869,7 @@ fn next_zrandmember_start(len: usize) -> usize {
 /// all members under repeated calls until PRNG state is exposed here.
 pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
     let argc = ctx.arg_count();
-    if argc < 2 || argc > 4 {
+    if !(2..=4).contains(&argc) {
         return Err(RedisError::wrong_number_of_args(b"zrandmember"));
     }
     let key = ctx.arg_owned(1usize)?;
@@ -1890,7 +1890,7 @@ pub fn zrandmember_command(ctx: &mut CommandContext) -> RedisResult<()> {
         return Err(RedisError::syntax(b"syntax error"));
     }
     if let Some(count) = count_opt {
-        if withscores && (count < -(i64::MAX / 2) || count > i64::MAX / 2) {
+        if withscores && !(-(i64::MAX / 2)..=i64::MAX / 2).contains(&count) {
             return Err(RedisError::runtime(b"ERR value is out of range"));
         }
     }

@@ -32,7 +32,7 @@ produces on the LE path (which covers every Redis-supported server arch).
 /// C: `siptlw(int c)` (siphash.c:49-55)
 #[inline]
 fn sip_to_lower(c: u8) -> u8 {
-    if c >= b'A' && c <= b'Z' {
+    if (b'A'..=b'Z').contains(&c) {
         c + (b'a' - b'A')
     } else {
         c

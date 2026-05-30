@@ -162,8 +162,8 @@ pub fn lazyfree_free_errors(errors: OpaqueRax) {
 pub fn lazyfree_free_eval_scripts(ctx: EvalScriptsCtx) {
     let len = ctx.script_count;
     drop(ctx);
-    LAZYFREE_OBJECTS.fetch_sub(len as usize, Ordering::Relaxed);
-    LAZYFREED_OBJECTS.fetch_add(len as usize, Ordering::Relaxed);
+    LAZYFREE_OBJECTS.fetch_sub(len, Ordering::Relaxed);
+    LAZYFREED_OBJECTS.fetch_add(len, Ordering::Relaxed);
 }
 
 /// Drop a `functionsLibCtx` and update counters.

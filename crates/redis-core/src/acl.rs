@@ -23,7 +23,7 @@ pub type PasswordHash = [u8; 32];
 
 /// Compute the SHA-256 hash of a cleartext password.
 pub fn sha256_hash(password: &[u8]) -> PasswordHash {
-    use std::num::Wrapping;
+    
 
     let mut hash = [0u8; 32];
     sha256_raw(password, &mut hash);
@@ -537,7 +537,7 @@ impl AclUser {
             return true;
         }
         let hash = sha256_hash(cleartext);
-        self.passwords.iter().any(|h| *h == hash)
+        self.passwords.contains(&hash)
     }
 
     /// Render this user as an `ACL LIST` / `ACL SETUSER` rule string.

@@ -151,7 +151,7 @@ impl ConnectionTypeTrait for UnixConnectionType {
         // PORT NOTE: currently one bind address is always supplied
         // (`bindaddr_count == 1`), but the loop mirrors the C source to
         // support potential future multi-socket configurations.
-        for j in 0..(listener.bindaddr_count as usize) {
+        if let Some(j) = (0..(listener.bindaddr_count as usize)).next() {
             let addr = listener.bindaddr[j].clone();
 
             // TODO(port): std::fs::remove_file(&addr).ok();  — mirrors unlink(addr)
@@ -471,11 +471,10 @@ pub fn unix_accept_handler(
     max_new_conns: i32,
     backend: &UnixConnectionType,
 ) -> Result<(), RedisError> {
-    let mut remaining = max_new_conns;
+    let remaining = max_new_conns;
 
     while remaining > 0 {
-        remaining -= 1;
-
+        // PORT NOTE: remaining -= 1 removed — dead assignment before break (placeholder loop).
         // TODO(port): cfd = anet::unix_accept(neterr_buf, listen_fd)?;
         //   On EAGAIN/EWOULDBLOCK → break (no more pending connections).
         //   On EINTR → continue (interrupted; retry).

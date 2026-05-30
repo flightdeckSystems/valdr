@@ -138,7 +138,7 @@ fn sample_allkeys_lru(db: &RedisDb, samples: usize) -> Option<RedisString> {
 fn lfu_effective_counter(obj: &RedisObject, log_factor: u32, decay_time: u32) -> u8 {
     let raw = obj.lru;
     let counter = (raw & 0xFF) as u8;
-    let last_decrement_minutes = ((raw >> 8) & 0xFFFF) as u32;
+    let last_decrement_minutes = (raw >> 8) & 0xFFFF;
 
     let now_minutes = now_minutes();
     let elapsed = now_minutes.wrapping_sub(last_decrement_minutes);
@@ -277,7 +277,7 @@ pub fn lfu_init(obj: &mut RedisObject) {
 pub fn lfu_update(obj: &mut RedisObject, log_factor: u32, decay_time: u32) {
     let raw = obj.lru;
     let counter = (raw & 0xFF) as u8;
-    let last_decrement_minutes = ((raw >> 8) & 0xFFFF) as u32;
+    let last_decrement_minutes = (raw >> 8) & 0xFFFF;
 
     let now = now_minutes();
     let elapsed = now.wrapping_sub(last_decrement_minutes);

@@ -194,7 +194,7 @@ thread_local! {
     /// (`bio_close_file`) also sets this to `0`, so `in_bio_thread()` returns
     /// false for both the main thread and worker #0.  This is faithfully
     /// reproduced here — see C: `static _Thread_local size_t bio_worker_num`.
-    static BIO_WORKER_NUM: Cell<usize> = Cell::new(0);
+    static BIO_WORKER_NUM: Cell<usize> = const { Cell::new(0) };
 }
 
 // ─── Initialisation ───────────────────────────────────────────────────────────

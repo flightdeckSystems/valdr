@@ -52,7 +52,7 @@ fn new_bloom_filter(
     nonscaling: bool,
 ) -> BloomFilter {
     let (bit_count, n_hashes) = bloom_params(capacity, error_rate);
-    let byte_count = ((bit_count + 7) / 8) as usize;
+    let byte_count = bit_count.div_ceil(8) as usize;
     BloomFilter {
         bits: vec![0u8; byte_count],
         n_hashes,
@@ -116,9 +116,9 @@ fn bloom_add(bf: &mut BloomFilter, item: &[u8]) -> bool {
 /// the key exists but is not a Bloom object.
 ///
 /// Returns `Ok(None)` when the key does not exist.
-fn get_bloom_mut<'a>(
-    obj: Option<&'a mut RedisObject>,
-) -> Result<Option<&'a mut BloomFilter>, RedisError> {
+fn get_bloom_mut(
+    obj: Option<&mut RedisObject>,
+) -> Result<Option<&mut BloomFilter>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => match o.bloom_mut() {
