@@ -227,9 +227,7 @@ fn query_path<'a>(root: &'a Value, path: &str) -> Result<Vec<&'a Value>, RedisEr
 /// Owned variant: clone all matched values.
 fn query_path_owned(root: &Value, path: &str) -> Result<Vec<Value>, RedisError> {
     let tokens = lex_path(path)?;
-    Ok(eval_tokens(root, &tokens, 0)
-        .into_iter().cloned()
-        .collect())
+    Ok(eval_tokens(root, &tokens, 0).into_iter().cloned().collect())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

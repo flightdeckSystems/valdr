@@ -121,7 +121,9 @@ impl ConnectionTypeTrait for SocketConnectionType {
         accept_handler: ConnectionCallbackFunc,
     ) -> Result<(), RedisError> {
         if conn.state != ConnectionState::Accepting {
-            return Err(RedisError::runtime(b"connSocketAccept: not in accepting state"));
+            return Err(RedisError::runtime(
+                b"connSocketAccept: not in accepting state",
+            ));
         }
         conn.state = ConnectionState::Connected;
         accept_handler(conn);

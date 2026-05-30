@@ -21,17 +21,15 @@ use redis_protocol::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 
 pub use crate::pubsub_registry::{
-    encode_pubsub_message_resp2, encode_pubsub_message_resp3,
-    encode_pubsub_pmessage_resp2, encode_pubsub_pmessage_resp3,
+    encode_pubsub_message_resp2, encode_pubsub_message_resp3, encode_pubsub_pmessage_resp2,
+    encode_pubsub_pmessage_resp3,
 };
 pub use crate::tracking::{
-    command_mutates_first_key, tracking_mutation_for_command,
-    tracking_read_keys_for_command, TrackingMutation,
+    command_mutates_first_key, tracking_mutation_for_command, tracking_read_keys_for_command,
+    TrackingMutation,
 };
 
-
 pub use crate::reply_traits::{ArgIndex, ReplyArrayLen, ReplyErrorArg};
-
 
 /// Storage for the database reachable from a `CommandContext`.
 ///
@@ -1090,8 +1088,6 @@ fn parse_i64_from_bytes(bytes: &[u8]) -> Option<i64> {
 pub(crate) fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
 }
-
-
 
 fn glob_match_ascii_ci(pattern: &[u8], text: &[u8]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);

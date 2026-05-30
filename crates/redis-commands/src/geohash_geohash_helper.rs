@@ -18,8 +18,8 @@
 
 use super::geohash_geohash::{
     geohash_decode, geohash_encode, geohash_get_coord_range, geohash_neighbors, GeoHashArea,
-    GeoHashBits, GeoHashNeighbors, GeoShape, GeoShapeKind, GEO_LAT_MAX, GEO_LAT_MIN,
-    GEO_LONG_MAX, GEO_LONG_MIN,
+    GeoHashBits, GeoHashNeighbors, GeoShape, GeoShapeKind, GEO_LAT_MAX, GEO_LAT_MIN, GEO_LONG_MAX,
+    GEO_LONG_MIN,
 };
 
 // ── Type aliases (from geohash_helper.h) ────────────────────────────────────

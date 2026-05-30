@@ -81,7 +81,6 @@ pub fn parse_inline_or_multibulk_into_retaining_partial(
     buf: &[u8],
     out: &mut Vec<RedisString>,
 ) -> Result<Option<usize>, RedisError> {
-    
     if buf.is_empty() {
         Ok(None)
     } else if buf[0] == b'*' {

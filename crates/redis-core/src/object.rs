@@ -2448,7 +2448,9 @@ pub fn object_compute_size(
         }
         ObjectKind::ZSet(ZSetEncoding::Inline(z)) => {
             std::mem::size_of::<RedisObject>()
-                + z.by_member.keys().map(|m| m.len() + std::mem::size_of::<f64>())
+                + z.by_member
+                    .keys()
+                    .map(|m| m.len() + std::mem::size_of::<f64>())
                     .sum::<usize>()
         }
         ObjectKind::ZSet(ZSetEncoding::ListPack(lp)) => {

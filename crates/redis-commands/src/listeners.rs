@@ -36,12 +36,12 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::client_limits::*;
 use crate::config_cmd::*;
-use crate::shutdown_signals::*;
+use crate::connection::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
 use crate::live_config_handle;
+use crate::shutdown_signals::*;
 
 pub type TcpPortSetHook = dyn Fn(u16) -> Result<Vec<TcpListener>, Vec<u8>> + Send + Sync + 'static;
 pub type TcpBindSetHook =

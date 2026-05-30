@@ -10,18 +10,16 @@
 //! Pilot commands: PING, ECHO, HELLO, COMMAND (Phase 2); SET, GET, DEL,
 //! EXISTS, INCR (Phase 3).
 
+pub mod acl_cmd;
 pub mod aof;
 pub mod bitops;
 pub mod bloom;
-pub mod client_limits;
-pub mod config_cmd;
-pub mod acl_cmd;
 pub mod client_cmd;
+pub mod client_limits;
 pub mod command_meta;
-pub mod debug_cmd;
+pub mod config_cmd;
 pub mod connection;
-pub mod listeners;
-pub mod shutdown_signals;
+pub mod debug_cmd;
 pub mod dispatch;
 pub mod eval;
 pub mod generated;
@@ -33,12 +31,14 @@ pub mod hyperloglog;
 pub mod info;
 pub mod json;
 pub mod list;
+pub mod listeners;
 pub mod multi;
 pub mod persist;
 pub mod pubsub;
 pub mod replica_dialer;
 pub mod replication;
 pub mod set;
+pub mod shutdown_signals;
 pub mod slowlog_cmd;
 pub mod sort;
 pub mod stream;

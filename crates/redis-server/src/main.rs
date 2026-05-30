@@ -29,7 +29,6 @@ use std::sync::mpsc::{self};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-
 use redis_core::db::RedisDb;
 use redis_core::expire::active_expire_config;
 use redis_core::lru_clock::spawn_lru_clock_thread;
@@ -48,8 +47,6 @@ mod startup;
 pub(crate) use cli::*;
 pub(crate) use startup::*;
 
-
-
 pub(crate) const DEFAULT_PORT: u16 = 6379;
 pub(crate) const DEFAULT_BIND: &str = "127.0.0.1";
 pub(crate) const ACTIVE_TIME_SAMPLE_INTERVAL: u64 = 1024;
@@ -58,7 +55,6 @@ pub(crate) const MAX_UNAUTHENTICATED_BULK_LEN: i64 = 16 * 1024;
 
 pub(crate) static RENAMED_READY_KEYS: OnceLock<Mutex<Vec<(u32, RedisString)>>> = OnceLock::new();
 pub(crate) static RENAMED_READY_KEYS_PENDING: AtomicBool = AtomicBool::new(false);
-
 
 fn main() {
     let _clock = redis_core::monotonic::monotonic_init();
@@ -395,4 +391,3 @@ fn main() {
         replica_apply_rx,
     );
 }
-

@@ -447,29 +447,30 @@ pub fn active_expire_cycle_job(
 
             // C: expire.c:366-399, update avg_ttl every 16 iterations or on exit.
             if ((iteration & 0xf) == 0 || !repeat)
-                && data.ttl_samples > 0 && matches!(job_type, ActiveExpiryType::Keys) {
-                    let avg_ttl = data.ttl_sum / data.ttl_samples as i64;
-                    // C: expire.c:379-395 — closed-form geometric series avg using AVG_TTL_FACTOR.
-                    // TODO(port): db->expiry[jobType].avg_ttl not yet on RedisDb stub.
-                    // The formula: new_avg = avg_ttl + (old_avg - avg_ttl) * pow(0.98, n)
-                    // where n = update_avg_ttl_times (clamped to 1..16).
-                    let factor_idx = (update_avg_ttl_times as usize).saturating_sub(1).min(15);
-                    let _ = (avg_ttl, AVG_TTL_FACTOR[factor_idx]);
-                    update_avg_ttl_times = 0;
-                    data.ttl_sum = 0;
-                    data.ttl_samples = 0;
-                }
+                && data.ttl_samples > 0
+                && matches!(job_type, ActiveExpiryType::Keys)
+            {
+                let avg_ttl = data.ttl_sum / data.ttl_samples as i64;
+                // C: expire.c:379-395 — closed-form geometric series avg using AVG_TTL_FACTOR.
+                // TODO(port): db->expiry[jobType].avg_ttl not yet on RedisDb stub.
+                // The formula: new_avg = avg_ttl + (old_avg - avg_ttl) * pow(0.98, n)
+                // where n = update_avg_ttl_times (clamped to 1..16).
+                let factor_idx = (update_avg_ttl_times as usize).saturating_sub(1).min(15);
+                let _ = (avg_ttl, AVG_TTL_FACTOR[factor_idx]);
+                update_avg_ttl_times = 0;
+                data.ttl_sum = 0;
+                data.ttl_samples = 0;
+            }
 
             // C: expire.c:401-408, enforce time limit.
-            if (iteration & time_check_mask) == 0
-                && elapsed_us(start) > timelimit_us as u64 {
-                    let mut guard = ACTIVE_EXPIRE_STATE
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    guard[job_idx].timelimit_exit = true;
-                    // TODO(port): server.stat_expired_time_cap_reached_count not on stub.
-                    break;
-                }
+            if (iteration & time_check_mask) == 0 && elapsed_us(start) > timelimit_us as u64 {
+                let mut guard = ACTIVE_EXPIRE_STATE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                guard[job_idx].timelimit_exit = true;
+                // TODO(port): server.stat_expired_time_cap_reached_count not on stub.
+                break;
+            }
 
             if !repeat {
                 break;
@@ -834,9 +835,7 @@ pub fn expire_generic_command(
     let mut flag: i32 = 0;
     let argc = ctx.arg_count();
     if argc < 3 {
-        return Err(RedisError::wrong_number_of_args(
-            ctx.command_name(),
-        ));
+        return Err(RedisError::wrong_number_of_args(ctx.command_name()));
     }
     parse_extended_expire_arguments(ctx, &mut flag, argc)?;
 
@@ -1253,10 +1252,9 @@ pub fn run_active_expire_tick_on_db(
         let sample = db.sample_expiring_keys(sample_size, seed);
         let mut deleted_keys: Vec<RedisString> = Vec::new();
         for (key, expire_at) in &sample {
-            if *expire_at <= now_ms
-                && db.sync_delete(key) {
-                    deleted_keys.push(key.clone());
-                }
+            if *expire_at <= now_ms && db.sync_delete(key) {
+                deleted_keys.push(key.clone());
+            }
         }
         let deleted = deleted_keys.len() as u64;
         let sampled = sample.len();

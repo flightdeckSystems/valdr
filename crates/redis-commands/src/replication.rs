@@ -427,9 +427,8 @@ pub fn replconf_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
                 return Err(RedisError::wrong_number_of_args(b"replconf"));
             }
             let offset_str = ctx.arg_owned(2usize)?;
-            let offset = parse_i64(offset_str.as_bytes()).map_err(|_| {
-                RedisError::runtime(b"ERR value is not an integer or out of range")
-            })?;
+            let offset = parse_i64(offset_str.as_bytes())
+                .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
             let client_id = ctx.client_ref().id();
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -486,9 +485,8 @@ pub fn wait_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
     let numreplicas = parse_i64(ctx.arg(1usize)?.as_bytes())
         .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?
         as usize;
-    let timeout_ms = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range")
-    })?;
+    let timeout_ms = parse_i64(ctx.arg(2usize)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
     if timeout_ms < 0 {
         return Err(RedisError::runtime(b"ERR timeout is negative"));
     }
@@ -577,21 +575,18 @@ pub fn waitaof_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         return Err(RedisError::wrong_number_of_args(b"waitaof"));
     }
 
-    let numlocal = parse_i64(ctx.arg(1usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range")
-    })?;
+    let numlocal = parse_i64(ctx.arg(1usize)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
     if !(0..=1).contains(&numlocal) {
         return Err(RedisError::runtime(
             b"ERR Value for numlocal is out of range [0,1]",
         ));
     }
 
-    let numreplicas = parse_i64(ctx.arg(2usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range")
-    })?;
-    let timeout_ms = parse_i64(ctx.arg(3usize)?.as_bytes()).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range")
-    })?;
+    let numreplicas = parse_i64(ctx.arg(2usize)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
+    let timeout_ms = parse_i64(ctx.arg(3usize)?.as_bytes())
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
     if timeout_ms < 0 {
         return Err(RedisError::runtime(b"ERR timeout is negative"));
     }
@@ -1111,9 +1106,8 @@ fn register_replica(
 /// sentinel and is accepted verbatim. Other negatives produce a protocol
 /// error to match real Redis behaviour.
 fn parse_offset(bytes: &[u8]) -> RedisResult<i64> {
-    let s = std::str::from_utf8(bytes).map_err(|_| {
-        RedisError::runtime(b"ERR value is not an integer or out of range")
-    })?;
+    let s = std::str::from_utf8(bytes)
+        .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))?;
     s.parse::<i64>()
         .map_err(|_| RedisError::runtime(b"ERR value is not an integer or out of range"))
 }

@@ -35,16 +35,16 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::acl_cmd::*;
 use crate::client_cmd::*;
 use crate::client_limits::*;
 use crate::config_cmd::*;
+use crate::connection::*;
 use crate::debug_cmd::*;
-use crate::listeners::*;
-use crate::shutdown_signals::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
+use crate::listeners::*;
 use crate::live_config_handle;
+use crate::shutdown_signals::*;
 
 /// `COMMAND` / `COMMAND COUNT` / `COMMAND GETKEYS` / `COMMAND GETKEYSANDFLAGS`.
 ///
@@ -299,7 +299,9 @@ pub fn command_full_name(spec: &crate::generated::GeneratedCommandSpec) -> Vec<u
     name
 }
 
-pub fn command_parent_for_spec(spec: &crate::generated::GeneratedCommandSpec) -> Option<&'static [u8]> {
+pub fn command_parent_for_spec(
+    spec: &crate::generated::GeneratedCommandSpec,
+) -> Option<&'static [u8]> {
     let function = spec.function.as_bytes();
     for (prefix, parent) in [
         (b"acl".as_slice(), b"acl".as_slice()),
@@ -525,7 +527,8 @@ pub fn command_key_refs_from_specs(
 }
 
 pub fn command_allows_no_mandatory_keys(spec: &crate::generated::GeneratedCommandSpec) -> bool {
-    spec.flags.contains(&crate::generated::CommandFlag::NO_MANDATORY_KEYS)
+    spec.flags
+        .contains(&crate::generated::CommandFlag::NO_MANDATORY_KEYS)
 }
 
 pub fn key_flags(flags: &[&[u8]]) -> Vec<RedisString> {

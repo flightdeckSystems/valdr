@@ -35,16 +35,16 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::client_cmd::*;
 use crate::client_limits::*;
 use crate::command_meta::*;
 use crate::config_cmd::*;
+use crate::connection::*;
 use crate::debug_cmd::*;
-use crate::listeners::*;
-use crate::shutdown_signals::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
+use crate::listeners::*;
 use crate::live_config_handle;
+use crate::shutdown_signals::*;
 
 pub fn acl_user_exists(name: &[u8]) -> bool {
     let key = RedisString::from_bytes(name);
@@ -55,7 +55,6 @@ pub fn acl_user_exists(name: &[u8]) -> bool {
     };
     guard.users.contains_key(&key)
 }
-
 
 pub fn apply_requirepass_to_acl(secret: Option<&[u8]>) {
     let acl = global_acl_state();

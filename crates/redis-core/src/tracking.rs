@@ -1517,8 +1517,6 @@ mod tests {
     }
 }
 
-
-
 #[derive(Default)]
 pub struct TrackingMutation {
     pub keys: Vec<RedisString>,

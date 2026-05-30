@@ -129,8 +129,7 @@ fn dispatch_as_primary(client_id: u64, db: &mut RedisDb, cmd: &[&[u8]]) -> Vec<u
     let server = Arc::new(RedisServer::default());
     let pubsub = Arc::new(Mutex::new(PubSubRegistry::new()));
     {
-        let mut ctx =
-            redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
+        let mut ctx = redis_core::CommandContext::with_server(&mut c, db, server, pubsub);
         let _ = dispatch(&mut ctx);
     }
     c.drain_reply()
@@ -157,7 +156,9 @@ fn anchor_plain_set_propagates_verbatim() {
     // The fan-out prepends SELECT when the replica's last-seen DB differs; the
     // SET frame must appear verbatim as a suffix of the captured stream.
     assert!(
-        stream.windows(set_frame.len()).any(|w| w == set_frame.as_slice()),
+        stream
+            .windows(set_frame.len())
+            .any(|w| w == set_frame.as_slice()),
         "captured replication stream must contain the verbatim SET frame.\n\
          captured: {:?}\n  expected frame: {:?}",
         String::from_utf8_lossy(&stream),
@@ -194,15 +195,21 @@ fn finding1_noop_del_in_multi_must_not_propagate() {
         &[b"EXEC".as_slice()][..],
     ] {
         c.set_args(cmd.iter().map(|p| RedisString::from_bytes(p)).collect());
-        let mut ctx =
-            redis_core::CommandContext::with_server(&mut c, &mut db, server.clone(), pubsub.clone());
+        let mut ctx = redis_core::CommandContext::with_server(
+            &mut c,
+            &mut db,
+            server.clone(),
+            pubsub.clone(),
+        );
         let _ = dispatch(&mut ctx);
     }
 
     let stream = cap.drain();
     let del_frame = resp(&[b"DEL", b"missing-key"]);
     assert!(
-        !stream.windows(del_frame.len()).any(|w| w == del_frame.as_slice()),
+        !stream
+            .windows(del_frame.len())
+            .any(|w| w == del_frame.as_slice()),
         "no-op DEL of a missing key inside MULTI/EXEC must NOT be propagated, \
          but it appears in the replication stream.\n  captured: {:?}",
         String::from_utf8_lossy(&stream),
@@ -229,7 +236,9 @@ fn finding1b_noop_del_top_level_must_not_propagate() {
     let stream = cap.drain();
     let del_frame = resp(&[b"DEL", b"missing-key"]);
     assert!(
-        !stream.windows(del_frame.len()).any(|w| w == del_frame.as_slice()),
+        !stream
+            .windows(del_frame.len())
+            .any(|w| w == del_frame.as_slice()),
         "top-level no-op DEL must NOT be propagated, but it appears in the \
          replication stream.\n  captured: {:?}",
         String::from_utf8_lossy(&stream),
@@ -356,7 +365,10 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     let catchup = resp(&[b"SET", b"late", b"x"]);
     repl.append_to_backlog(&catchup);
     let master_offset = repl.master_offset();
-    assert!(master_offset > provided_offset, "backlog must have advanced");
+    assert!(
+        master_offset > provided_offset,
+        "backlog must have advanced"
+    );
 
     // The replica connection: register a pubsub sender so `psync_command` can
     // steal it, and capture the receiver.
@@ -375,12 +387,8 @@ fn finding4_partial_resync_continue_must_replay_backlog_window() {
     let mut db = RedisDb::new(0);
     let server = Arc::new(RedisServer::default());
     {
-        let mut ctx = redis_core::CommandContext::with_server(
-            &mut c,
-            &mut db,
-            server,
-            pubsub.clone(),
-        );
+        let mut ctx =
+            redis_core::CommandContext::with_server(&mut c, &mut db, server, pubsub.clone());
         redis_commands::replication::psync_command(&mut ctx).expect("psync");
     }
     let reply = c.drain_reply();
@@ -425,8 +433,12 @@ fn aof_append_replay_roundtrip_reconstructs_keyspace() {
 
     {
         let writer = AofWriter::open_truncate(&aof_path, 0).expect("open aof");
-        writer.append_selected(0, &argv(&[b"SET", b"x", b"1"])).unwrap();
-        writer.append_selected(0, &argv(&[b"SET", b"y", b"2"])).unwrap();
+        writer
+            .append_selected(0, &argv(&[b"SET", b"x", b"1"]))
+            .unwrap();
+        writer
+            .append_selected(0, &argv(&[b"SET", b"y", b"2"]))
+            .unwrap();
         writer.flush().unwrap();
     }
 

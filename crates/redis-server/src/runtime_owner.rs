@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use mio::net::{TcpListener as MioTcpListener, TcpStream as MioTcpStream};
 use mio::{Events, Interest, Poll, Registry as MioRegistry, Token};
 use redis_core::client_info::client_info_registry;
+use redis_core::conn_tls::{session_read_pump, session_write_pump};
 use redis_core::db::RedisDb;
 use redis_core::eviction::{try_evict_to_fit, EvictionOutcome};
 use redis_core::expire::run_active_expire_tick_on_db;
@@ -32,7 +33,6 @@ use redis_core::networking::{
     note_pause_resumed_client, pause_postponed_client_count, PAUSE_ACTION_CLIENT_ALL,
     PAUSE_ACTION_CLIENT_WRITE, PAUSE_ACTION_EVICT, PAUSE_ACTION_EXPIRE,
 };
-use redis_core::conn_tls::{session_read_pump, session_write_pump};
 use redis_core::pubsub_registry::PubSubRegistry;
 use redis_core::{Client, Connection};
 use redis_protocol::parse_inline_or_multibulk_into;
@@ -1620,8 +1620,10 @@ impl RuntimeOwner {
                 slot.mark_closed();
                 return progressed;
             }
-            slot.client.net_input_bytes =
-                slot.client.net_input_bytes.saturating_add(plaintext.len() as u64);
+            slot.client.net_input_bytes = slot
+                .client
+                .net_input_bytes
+                .saturating_add(plaintext.len() as u64);
             slot.ingest(&plaintext);
             slot.refresh_client_memory_snapshot();
             let query_limit = redis_commands::connection::client_query_buffer_limit();
@@ -1693,8 +1695,8 @@ impl RuntimeOwner {
 
         // 3. Recompute interest: WRITABLE iff there is unflushed ciphertext or
         //    still-queued plaintext.
-        let want_write = !slot.write_buffer.is_empty()
-            || slot.tls.as_ref().is_some_and(|s| s.wants_write());
+        let want_write =
+            !slot.write_buffer.is_empty() || slot.tls.as_ref().is_some_and(|s| s.wants_write());
         if want_write != slot.writable_interest {
             let token = token_for_slot(slot.id());
             if let Some(stream) = slot.stream.as_mut() {

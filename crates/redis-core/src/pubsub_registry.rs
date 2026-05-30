@@ -14,8 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 
-use redis_types::RedisString;
 use redis_protocol::frame::{encode_resp2, RespFrame};
+use redis_types::RedisString;
 
 use crate::client::ClientId;
 
@@ -267,8 +267,6 @@ impl PubSubRegistry {
     }
 }
 
-
-
 // ── Pub/Sub message-encoding helpers (moved from command_context.rs 2026-05-28) ──
 // These were tail-call helpers used by PUBLISH/SPUBLISH dispatch; they live
 // next to the PubSubRegistry now, not the dispatch context.
@@ -341,7 +339,6 @@ pub fn encode_pubsub_pmessage_resp3(
     );
     buf
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────
 // PORT STATUS

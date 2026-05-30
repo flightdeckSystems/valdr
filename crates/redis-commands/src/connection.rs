@@ -12,10 +12,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redis_core::acl::{
-    ACL_KEY_READ,
-    ACL_KEY_READ_WRITE, ACL_KEY_WRITE,
-};
+use redis_core::acl::{ACL_KEY_READ, ACL_KEY_READ_WRITE, ACL_KEY_WRITE};
 use redis_core::blocked_keys::BlockedAction;
 use redis_core::client_info::client_info_registry;
 use redis_core::live_config::LiveConfig;
@@ -27,12 +24,10 @@ use redis_types::{RedisError, RedisResult, RedisString};
 
 use crate::live_config_handle;
 
-
 pub use crate::acl_cmd::*;
 pub use crate::client_cmd::*;
 pub use crate::command_meta::*;
 pub use crate::debug_cmd::*;
-
 
 // ── Wildcard re-exports from extracted modules (refactor/file-structure-splits) ──
 // Internal callers (within redis-commands) reach moved symbols via
@@ -41,7 +36,6 @@ pub use crate::client_limits::*;
 pub use crate::config_cmd::*;
 pub use crate::listeners::*;
 pub use crate::shutdown_signals::*;
-
 
 /// Default Valkey `maxclients` value. Re-exported from `LiveConfig`.
 pub const DEFAULT_MAX_CLIENTS: u64 = redis_core::live_config::DEFAULT_MAX_CLIENTS;
@@ -84,7 +78,6 @@ pub fn get_max_clients() -> u64 {
 pub fn set_max_clients(n: u64) {
     live_config_handle().set_maxclients(n);
 }
-
 
 /// `PING [message]`.
 ///
@@ -534,14 +527,13 @@ pub fn shutdown_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         }
         return Err(RedisError::runtime(b"ERR No shutdown in progress."));
     }
-    if !nosave
-        && (shutdown_save_failed() || rdb_target_is_directory(ctx)) {
-            mark_shutdown_save_failed();
-            log_server_notice("Error trying to save the DB, can't exit");
-            return Err(RedisError::runtime(
-                b"ERR Errors trying to SHUTDOWN. Check logs.",
-            ));
-        }
+    if !nosave && (shutdown_save_failed() || rdb_target_is_directory(ctx)) {
+        mark_shutdown_save_failed();
+        log_server_notice("Error trying to save the DB, can't exit");
+        return Err(RedisError::runtime(
+            b"ERR Errors trying to SHUTDOWN. Check logs.",
+        ));
+    }
     log_server_notice("ready to exit, bye bye");
     cleanup_bgsave_child_for_shutdown(ctx);
     exit_process_now();
@@ -937,7 +929,6 @@ pub fn module_command(ctx: &mut CommandContext<'_>) -> RedisResult<()> {
         b"unknown subcommand or wrong number of arguments",
     ))
 }
-
 
 /// `AUTH [username] password`.
 ///

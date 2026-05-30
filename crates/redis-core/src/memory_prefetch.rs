@@ -504,8 +504,7 @@ pub fn free_prefetch_commands_batch() {
 /// TODO(architect): `server.prefetch_batch_max_size` needed to re-read the new
 /// value after the change.  Passed as a parameter here.
 pub fn on_max_batch_size_change(new_max: usize) -> bool {
-    let has_clients =
-        BATCH.with(|cell| cell.borrow().as_ref().is_some_and(|b| b.client_count > 0));
+    let has_clients = BATCH.with(|cell| cell.borrow().as_ref().is_some_and(|b| b.client_count > 0));
 
     if has_clients {
         // Batch in progress — defer the resize.

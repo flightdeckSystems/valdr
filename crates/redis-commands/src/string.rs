@@ -304,7 +304,8 @@ pub fn set_command(ctx: &mut CommandContext) -> Result<(), RedisError> {
             return Err(RedisError::runtime(b"ERR syntax error"));
         };
         if prev_bytes
-            .as_ref().is_none_or(|bytes| bytes.as_slice() != compare.as_bytes())
+            .as_ref()
+            .is_none_or(|bytes| bytes.as_slice() != compare.as_bytes())
         {
             ctx.client_mut().set_prevent_propagation();
             if flags & SET_FLAG_GET != 0 {

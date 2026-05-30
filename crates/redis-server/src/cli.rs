@@ -34,10 +34,12 @@ use redis_types::{RedisError, RedisResult, RedisString};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use crate::runtime_owner;
-use super::{DEFAULT_PORT, DEFAULT_BIND, ACTIVE_TIME_SAMPLE_INTERVAL,
-            MAX_UNAUTHENTICATED_MULTIBULK_LEN, MAX_UNAUTHENTICATED_BULK_LEN};
 use super::startup::*;
+use super::{
+    ACTIVE_TIME_SAMPLE_INTERVAL, DEFAULT_BIND, DEFAULT_PORT, MAX_UNAUTHENTICATED_BULK_LEN,
+    MAX_UNAUTHENTICATED_MULTIBULK_LEN,
+};
+use crate::runtime_owner;
 
 /// Parsed command-line arguments.
 pub(crate) struct CliArgs {

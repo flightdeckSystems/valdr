@@ -51,8 +51,10 @@ impl TlsConnectionType {
     /// C: `createTLSConnectionAccepted` / `connCreateAcceptedTLS`. The owner loop
     /// (or a test) supplies the freshly-accepted ciphertext transport.
     pub fn accept_connection(&self, io: Box<dyn ConnIo>) -> Result<Connection, RedisError> {
-        let mut session = rustls::ServerConnection::new(Arc::clone(&self.server_config))
-            .map_err(|e| RedisError::runtime(format!("tls ServerConnection::new: {e}").into_bytes()))?;
+        let mut session =
+            rustls::ServerConnection::new(Arc::clone(&self.server_config)).map_err(|e| {
+                RedisError::runtime(format!("tls ServerConnection::new: {e}").into_bytes())
+            })?;
         // Unlimit rustls' internal plaintext buffer — the application layer
         // already bounds incoming data via `client-query-buffer-limit` (1 GB by
         // default). With rustls' default ~64 KB ceiling, `read_tls` errors with
@@ -141,7 +143,9 @@ impl ConnectionTypeTrait for TlsConnectionType {
         accept_handler: ConnectionCallbackFunc,
     ) -> Result<(), RedisError> {
         if conn.state != ConnectionState::Accepting {
-            return Err(RedisError::runtime(b"connTLSAccept: not in accepting state"));
+            return Err(RedisError::runtime(
+                b"connTLSAccept: not in accepting state",
+            ));
         }
         let tls = conn
             .io
@@ -290,7 +294,9 @@ impl ConnectionTypeTrait for TlsConnectionType {
     }
 
     fn addr(&self, _conn: &Connection, _remote: bool) -> Result<(Vec<u8>, u16), RedisError> {
-        Err(RedisError::runtime(b"connTLSAddr: tracked by the owner loop"))
+        Err(RedisError::runtime(
+            b"connTLSAddr: tracked by the owner loop",
+        ))
     }
 
     fn is_local(&self, _conn: &Connection) -> Option<bool> {
@@ -298,7 +304,9 @@ impl ConnectionTypeTrait for TlsConnectionType {
     }
 
     fn listen(&self, _listener: &mut ConnListener) -> Result<(), RedisError> {
-        Err(RedisError::runtime(b"connTLSListen: owned by the runtime owner loop (Phase 2)"))
+        Err(RedisError::runtime(
+            b"connTLSListen: owned by the runtime owner loop (Phase 2)",
+        ))
     }
 
     fn close_listener(&self, _listener: &mut ConnListener) {}
@@ -312,7 +320,9 @@ impl ConnectionTypeTrait for TlsConnectionType {
         _multipath: bool,
         _connect_handler: ConnectionCallbackFunc,
     ) -> Result<(), RedisError> {
-        Err(RedisError::runtime(b"connTLSConnect: outbound TLS deferred"))
+        Err(RedisError::runtime(
+            b"connTLSConnect: outbound TLS deferred",
+        ))
     }
 
     fn blocking_connect(

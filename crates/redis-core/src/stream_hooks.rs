@@ -12,8 +12,8 @@
 //! Each hook is a single `OnceLock<Box<dyn Fn>>` installed once at startup
 //! from `redis-commands::stream` and fired by db-side mutation code.
 
-use std::sync::OnceLock;
 use redis_types::RedisString;
+use std::sync::OnceLock;
 
 type StreamKeyDeletedFn = dyn Fn(&RedisString) + Send + Sync;
 static STREAM_KEY_DELETED_HOOK: OnceLock<Box<StreamKeyDeletedFn>> = OnceLock::new();

@@ -2176,7 +2176,7 @@ fn run_inner_command(
 
     let raw_reply: Vec<u8> = {
         let buf = &mut ctx.client_mut().reply_buf;
-        
+
         buf.split_off(saved_reply_len)
     };
 

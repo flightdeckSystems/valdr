@@ -116,9 +116,7 @@ fn bloom_add(bf: &mut BloomFilter, item: &[u8]) -> bool {
 /// the key exists but is not a Bloom object.
 ///
 /// Returns `Ok(None)` when the key does not exist.
-fn get_bloom_mut(
-    obj: Option<&mut RedisObject>,
-) -> Result<Option<&mut BloomFilter>, RedisError> {
+fn get_bloom_mut(obj: Option<&mut RedisObject>) -> Result<Option<&mut BloomFilter>, RedisError> {
     match obj {
         None => Ok(None),
         Some(o) => match o.bloom_mut() {

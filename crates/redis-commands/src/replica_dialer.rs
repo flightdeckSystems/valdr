@@ -758,8 +758,7 @@ fn read_exact_from_stream(stream: &TcpStream, buf: &mut [u8]) -> io::Result<()> 
 }
 
 fn lock_db(db: &Arc<Mutex<RedisDb>>) -> io::Result<std::sync::MutexGuard<'_, RedisDb>> {
-    db.lock()
-        .map_err(|_| io::Error::other("DB mutex poisoned"))
+    db.lock().map_err(|_| io::Error::other("DB mutex poisoned"))
 }
 
 fn stream_write(stream: &TcpStream, data: &[u8]) -> io::Result<()> {

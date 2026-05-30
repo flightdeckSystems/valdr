@@ -22,9 +22,7 @@ use rustls::{ClientConnection, ServerConnection};
 
 use redis_core::conn_socket::{socket_event_handler, SocketConnectionType};
 use redis_core::conn_tls::TlsConnectionType;
-use redis_core::connection::{
-    Connection, ConnectionState, ConnectionTypeId, ConnectionTypeTrait,
-};
+use redis_core::connection::{Connection, ConnectionState, ConnectionTypeId, ConnectionTypeTrait};
 use redis_types::RedisError;
 
 // ─── TestPipe ────────────────────────────────────────────────────────────────
@@ -392,13 +390,15 @@ fn socket_event_handler_orders_handlers_and_inverts_on_barrier() {
     let mut conn = Connection::new(ConnectionTypeId::Socket, 7).with_stream(Box::new(server_end));
     conn.state = ConnectionState::Connected;
     ct.set_read_handler(&mut conn, Some(rec_read)).unwrap();
-    ct.set_write_handler(&mut conn, Some(rec_write), false).unwrap();
+    ct.set_write_handler(&mut conn, Some(rec_write), false)
+        .unwrap();
 
     EVENT_LOG.lock().unwrap().clear();
     socket_event_handler(&mut conn, true, true);
     assert_eq!(*EVENT_LOG.lock().unwrap(), vec!["read", "write"]);
 
-    ct.set_write_handler(&mut conn, Some(rec_write), true).unwrap();
+    ct.set_write_handler(&mut conn, Some(rec_write), true)
+        .unwrap();
     EVENT_LOG.lock().unwrap().clear();
     socket_event_handler(&mut conn, true, true);
     assert_eq!(*EVENT_LOG.lock().unwrap(), vec!["write", "read"]);
@@ -437,11 +437,19 @@ fn rustls_handshake_and_echo_clean() {
     let msg = b"*1\r\n$4\r\nPING\r\n";
     client.writer().write_all(msg).unwrap();
     drive(&mut server, &mut s_end, &mut client, &mut c_end).unwrap();
-    assert_eq!(drain_plaintext(server.reader()), msg, "server did not see request");
+    assert_eq!(
+        drain_plaintext(server.reader()),
+        msg,
+        "server did not see request"
+    );
 
     server.writer().write_all(msg).unwrap();
     drive(&mut server, &mut s_end, &mut client, &mut c_end).unwrap();
-    assert_eq!(drain_plaintext(client.reader()), msg, "client did not see reply");
+    assert_eq!(
+        drain_plaintext(client.reader()),
+        msg,
+        "client did not see reply"
+    );
 }
 
 /// The killer case: the entire handshake is delivered one byte per event with

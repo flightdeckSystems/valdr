@@ -36,11 +36,11 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::client_limits::*;
 use crate::config_cmd::*;
-use crate::listeners::*;
+use crate::connection::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
+use crate::listeners::*;
 use crate::live_config_handle;
 
 pub static SHUTDOWN_SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);

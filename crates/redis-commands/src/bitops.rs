@@ -7,15 +7,13 @@ use redis_core::command_context::CommandContext;
 use redis_core::object::RedisObject;
 use redis_types::{RedisError, RedisResult, RedisString};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum OverflowType {
     #[default]
     Wrap,
     Sat,
     Fail,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BitOp {

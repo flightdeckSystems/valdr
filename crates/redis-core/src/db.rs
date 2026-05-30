@@ -74,10 +74,9 @@ pub fn install_swapdb_wake_hook(f: Box<SwapDbWakeFn>) {
 }
 
 pub use crate::stream_hooks::{
-    install_stream_db_flushed_hook, install_stream_key_deleted_hook,
+    fire_stream_db_flushed_hook, fire_stream_key_deleted_hook, fire_stream_key_overwritten_hook,
+    fire_stream_rename_hook, install_stream_db_flushed_hook, install_stream_key_deleted_hook,
     install_stream_key_overwritten_hook, install_stream_rename_hook,
-    fire_stream_db_flushed_hook, fire_stream_key_deleted_hook,
-    fire_stream_key_overwritten_hook, fire_stream_rename_hook,
 };
 
 /// Carry-all for the components needed to fire keyspace notifications from
@@ -786,7 +785,8 @@ impl RedisDb {
 
     fn set_key_prepared(&mut self, key: RedisString, value: RedisObject, flags: u32) {
         let may_have_blocked_stream_waiters =
-            crate::stream_hooks::has_stream_key_overwritten_hook() && crate::blocked_keys::blocked_keys_any();
+            crate::stream_hooks::has_stream_key_overwritten_hook()
+                && crate::blocked_keys::blocked_keys_any();
         let old_was_stream =
             may_have_blocked_stream_waiters && self.dict.get(&key).is_some_and(|o| o.is_stream());
         let needs_watch_signal = flags & SETKEY_NO_SIGNAL == 0 && watched_keys_any();

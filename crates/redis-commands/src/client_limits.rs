@@ -36,12 +36,12 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::config_cmd::*;
-use crate::listeners::*;
-use crate::shutdown_signals::*;
+use crate::connection::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
+use crate::listeners::*;
 use crate::live_config_handle;
+use crate::shutdown_signals::*;
 
 pub static RDB_KEY_SAVE_DELAY_US: AtomicU64 = AtomicU64::new(0);
 
@@ -57,7 +57,6 @@ pub static CLIENT_OBUF_PUBSUB_HARD: AtomicUsize = AtomicUsize::new(32 * 1024 * 1
 pub static CLIENT_OBUF_PUBSUB_SOFT: AtomicUsize = AtomicUsize::new(8 * 1024 * 1024);
 pub static CLIENT_OBUF_PUBSUB_SOFT_SECONDS: AtomicU64 = AtomicU64::new(60);
 pub static CLIENT_QUERY_BUFFER_LIMIT: AtomicUsize = AtomicUsize::new(1024 * 1024 * 1024);
-
 
 #[derive(Clone, Copy)]
 pub struct ClientOutputBufferLimit {
@@ -147,7 +146,6 @@ pub fn load_client_obuf_limit_snapshot(is_pubsub: bool) -> ClientOutputBufferLim
     }
 }
 
-
 pub fn client_output_buffer_hard_limit(is_pubsub: bool) -> usize {
     client_output_buffer_limit(is_pubsub).hard
 }
@@ -159,8 +157,6 @@ pub fn client_query_buffer_limit() -> usize {
 pub fn rdb_key_save_delay_us() -> u64 {
     RDB_KEY_SAVE_DELAY_US.load(Ordering::Relaxed)
 }
-
-
 
 pub fn set_client_query_buffer_limit(limit: usize) {
     CLIENT_QUERY_BUFFER_LIMIT.store(limit, Ordering::Relaxed);

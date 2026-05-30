@@ -538,8 +538,7 @@ impl HashExpiryKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum HashSetExpiry {
     #[default]
     None,
@@ -563,7 +562,6 @@ struct HSetExOptions {
     field_xx: bool,
     expiry: HashSetExpiry,
 }
-
 
 fn expire_time_from(kind: HashExpiryKind, raw: i64) -> i64 {
     match kind {

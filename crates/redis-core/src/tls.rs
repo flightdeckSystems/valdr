@@ -166,10 +166,7 @@ impl TlsConfig {
                     .with_client_cert_verifier(verifier)
                     .with_single_cert(cert_chain, private_key)
                     .map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("TLS config error: {e}"),
-                        )
+                        io::Error::new(io::ErrorKind::InvalidData, format!("TLS config error: {e}"))
                     })?
             }
             other => {

@@ -100,7 +100,9 @@ fn snapshot(db: &RedisDb) -> DbSnapshot {
 /// objects holding the same logical content compare equal regardless of
 /// encoding or internal ordering.
 fn render_value(obj: &RedisObject) -> String {
-    use redis_core::object::{HashEncoding, ListEncoding, SetEncoding, StringEncoding, ZSetEncoding};
+    use redis_core::object::{
+        HashEncoding, ListEncoding, SetEncoding, StringEncoding, ZSetEncoding,
+    };
     match &obj.kind {
         ObjectKind::String(enc) => {
             let bytes = match enc {
@@ -120,9 +122,10 @@ fn render_value(obj: &RedisObject) -> String {
         }
         ObjectKind::Hash(enc) => {
             let mut pairs: Vec<String> = match enc {
-                HashEncoding::Inline(m) | HashEncoding::HashTable(m) => {
-                    m.iter().map(|(f, v)| format!("{}={}", lossy(f), lossy(v))).collect()
-                }
+                HashEncoding::Inline(m) | HashEncoding::HashTable(m) => m
+                    .iter()
+                    .map(|(f, v)| format!("{}={}", lossy(f), lossy(v)))
+                    .collect(),
                 HashEncoding::ListPack(_) => Vec::new(),
             };
             pairs.sort();
@@ -144,9 +147,10 @@ fn render_value(obj: &RedisObject) -> String {
                     .iter_ascending()
                     .map(|(s, m)| format!("{}:{}", lossy(m), s))
                     .collect(),
-                ZSetEncoding::SkipList(v) => {
-                    v.iter().map(|(m, s)| format!("{}:{}", lossy(m), s)).collect()
-                }
+                ZSetEncoding::SkipList(v) => v
+                    .iter()
+                    .map(|(m, s)| format!("{}:{}", lossy(m), s))
+                    .collect(),
                 ZSetEncoding::ListPack(_) => Vec::new(),
             };
             pairs.sort();
@@ -187,24 +191,50 @@ fn anchor_six_types_roundtrip_under_always() {
     let writer = AofWriter::open(&aof_path, FSYNC_ALWAYS).expect("open aof");
 
     // string
-    writer.append(&[rs(b"SET"), rs(b"k:str"), rs(b"hello world")]).unwrap();
+    writer
+        .append(&[rs(b"SET"), rs(b"k:str"), rs(b"hello world")])
+        .unwrap();
     // list
-    writer.append(&[rs(b"RPUSH"), rs(b"k:list"), rs(b"a"), rs(b"b"), rs(b"c")]).unwrap();
+    writer
+        .append(&[rs(b"RPUSH"), rs(b"k:list"), rs(b"a"), rs(b"b"), rs(b"c")])
+        .unwrap();
     // hash
     writer
-        .append(&[rs(b"HMSET"), rs(b"k:hash"), rs(b"f1"), rs(b"v1"), rs(b"f2"), rs(b"v2")])
+        .append(&[
+            rs(b"HMSET"),
+            rs(b"k:hash"),
+            rs(b"f1"),
+            rs(b"v1"),
+            rs(b"f2"),
+            rs(b"v2"),
+        ])
         .unwrap();
     // set
-    writer.append(&[rs(b"SADD"), rs(b"k:set"), rs(b"x"), rs(b"y"), rs(b"z")]).unwrap();
+    writer
+        .append(&[rs(b"SADD"), rs(b"k:set"), rs(b"x"), rs(b"y"), rs(b"z")])
+        .unwrap();
     // zset
     writer
-        .append(&[rs(b"ZADD"), rs(b"k:zset"), rs(b"1"), rs(b"one"), rs(b"2"), rs(b"two")])
+        .append(&[
+            rs(b"ZADD"),
+            rs(b"k:zset"),
+            rs(b"1"),
+            rs(b"one"),
+            rs(b"2"),
+            rs(b"two"),
+        ])
         .unwrap();
     // volatile string (TTL ~1000s in the future)
     let expire_at = current_ms() + 1_000_000;
-    writer.append(&[rs(b"SET"), rs(b"k:vol"), rs(b"ephemeral")]).unwrap();
     writer
-        .append(&[rs(b"PEXPIREAT"), rs(b"k:vol"), rs(expire_at.to_string().as_bytes())])
+        .append(&[rs(b"SET"), rs(b"k:vol"), rs(b"ephemeral")])
+        .unwrap();
+    writer
+        .append(&[
+            rs(b"PEXPIREAT"),
+            rs(b"k:vol"),
+            rs(expire_at.to_string().as_bytes()),
+        ])
         .unwrap();
     writer.flush().unwrap();
 
@@ -257,10 +287,16 @@ struct FailingSink;
 
 impl Write for FailingSink {
     fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(io::ErrorKind::Other, "ENOSPC: No space left on device"))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "ENOSPC: No space left on device",
+        ))
     }
     fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Other, "ENOSPC: No space left on device"))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "ENOSPC: No space left on device",
+        ))
     }
 }
 
@@ -304,7 +340,10 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
     let mut sink = FailingSink;
     let encoded = encode_resp_command(&[rs(b"SET"), rs(b"k"), rs(b"v")]);
     let append_result = sink.write_all(&encoded);
-    assert!(append_result.is_err(), "FailingSink must produce the ENOSPC error");
+    assert!(
+        append_result.is_err(),
+        "FailingSink must produce the ENOSPC error"
+    );
 
     // Run the production swallow logic over that failure.
     production_append_swallow(&persistence, append_result);
@@ -330,14 +369,15 @@ fn disk_full_append_failure_is_swallowed_status_stays_ok() {
 /// content.
 #[test]
 fn fsync_policies_all_replay_identically() {
-    let payload: Vec<(RedisString, &[u8])> = vec![
-        (rs(b"a"), b"1"),
-        (rs(b"b"), b"2"),
-        (rs(b"c"), b"3"),
-    ];
+    let payload: Vec<(RedisString, &[u8])> =
+        vec![(rs(b"a"), b"1"), (rs(b"b"), b"2"), (rs(b"c"), b"3")];
 
     let mut snapshots = Vec::new();
-    for (label, policy) in [("no", FSYNC_NO), ("everysec", FSYNC_EVERYSEC), ("always", FSYNC_ALWAYS)] {
+    for (label, policy) in [
+        ("no", FSYNC_NO),
+        ("everysec", FSYNC_EVERYSEC),
+        ("always", FSYNC_ALWAYS),
+    ] {
         let scratch = Scratch::new(&format!("fsync_{label}"));
         let aof_path = scratch.path("appendonly.aof");
         let writer = AofWriter::open(&aof_path, policy).expect("open aof");
@@ -355,7 +395,10 @@ fn fsync_policies_all_replay_identically() {
 
     let (_, ref reference) = snapshots[0];
     for (label, snap) in &snapshots[1..] {
-        assert_eq!(snap, reference, "policy {label} produced a divergent replay");
+        assert_eq!(
+            snap, reference,
+            "policy {label} produced a divergent replay"
+        );
     }
     // Sanity: the reference actually has the three keys.
     assert_eq!(reference.entries.len(), 3);
@@ -384,9 +427,15 @@ fn multi_exec_envelope_replays_keyspace_exactly() {
 
     // Faithful copy of append_transaction_commands_to_aof's multi-command arm.
     writer.append_raw(&[rs(b"MULTI")]).unwrap();
-    writer.append_selected(0, &[rs(b"SET"), rs(b"tx:a"), rs(b"1")]).unwrap();
-    writer.append_selected(0, &[rs(b"RPUSH"), rs(b"tx:l"), rs(b"x"), rs(b"y")]).unwrap();
-    writer.append_selected(0, &[rs(b"SADD"), rs(b"tx:s"), rs(b"m")]).unwrap();
+    writer
+        .append_selected(0, &[rs(b"SET"), rs(b"tx:a"), rs(b"1")])
+        .unwrap();
+    writer
+        .append_selected(0, &[rs(b"RPUSH"), rs(b"tx:l"), rs(b"x"), rs(b"y")])
+        .unwrap();
+    writer
+        .append_selected(0, &[rs(b"SADD"), rs(b"tx:s"), rs(b"m")])
+        .unwrap();
     writer.append_raw(&[rs(b"EXEC")]).unwrap();
     writer.flush().unwrap();
 
@@ -510,7 +559,10 @@ fn manifest_well_formed_round_trips_and_loads() {
         AofLoadOptions::default(),
     )
     .expect("well-formed manifest must load");
-    assert!(result.is_some(), "manifest with BASE+INCR must report a load");
+    assert!(
+        result.is_some(),
+        "manifest with BASE+INCR must report a load"
+    );
     let snap = snapshot(&dbs[0]);
     assert_eq!(snap.entries.len(), 2, "BASE+INCR keys must both be present");
 }

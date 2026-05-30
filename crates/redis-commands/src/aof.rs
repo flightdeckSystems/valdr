@@ -50,8 +50,7 @@ pub fn fsync_policy_str(code: u8) -> &'static str {
 }
 
 /// Options controlling AOF replay strictness.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct AofLoadOptions {
     /// Accept an incomplete final command and replay the valid prefix.
     pub load_truncated: bool,
@@ -60,7 +59,6 @@ pub struct AofLoadOptions {
     /// preambles even when this is true.
     pub allow_rdb_preamble: bool,
 }
-
 
 const AOF_MANIFEST_SUFFIX: &str = ".manifest";
 const BASE_AOF_SUFFIX: &str = ".base.aof";

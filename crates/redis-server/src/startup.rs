@@ -34,11 +34,13 @@ use redis_types::{RedisError, RedisResult, RedisString};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use crate::runtime_owner;
-use super::{DEFAULT_PORT, DEFAULT_BIND, ACTIVE_TIME_SAMPLE_INTERVAL,
-            MAX_UNAUTHENTICATED_MULTIBULK_LEN, MAX_UNAUTHENTICATED_BULK_LEN};
 use super::cli::*;
+use super::{
+    ACTIVE_TIME_SAMPLE_INTERVAL, DEFAULT_BIND, DEFAULT_PORT, MAX_UNAUTHENTICATED_BULK_LEN,
+    MAX_UNAUTHENTICATED_MULTIBULK_LEN,
+};
 use super::{RENAMED_READY_KEYS, RENAMED_READY_KEYS_PENDING};
+use crate::runtime_owner;
 
 pub(crate) fn renamed_ready_keys() -> &'static Mutex<Vec<(u32, RedisString)>> {
     RENAMED_READY_KEYS.get_or_init(|| Mutex::new(Vec::new()))
@@ -110,7 +112,10 @@ pub(crate) fn wake_ready_after_command(db: &mut RedisDb) {
 pub(crate) fn build_tls_startup(
     args: &CliArgs,
     live_config: &redis_core::live_config::LiveConfig,
-) -> (Vec<TcpListener>, Option<std::sync::Arc<rustls::ServerConfig>>) {
+) -> (
+    Vec<TcpListener>,
+    Option<std::sync::Arc<rustls::ServerConfig>>,
+) {
     let mut tls_port: u16 = 0;
     let mut cert: Option<std::path::PathBuf> = None;
     let mut key: Option<std::path::PathBuf> = None;
@@ -147,7 +152,9 @@ pub(crate) fn build_tls_startup(
     let (cert, key) = match (cert, key) {
         (Some(c), Some(k)) => (c, k),
         _ => {
-            eprintln!("redis-server: tls-port set but tls-cert-file/tls-key-file missing; TLS disabled");
+            eprintln!(
+                "redis-server: tls-port set but tls-cert-file/tls-key-file missing; TLS disabled"
+            );
             return (Vec::new(), None);
         }
     };
@@ -1290,7 +1297,8 @@ pub(crate) fn process_current_command_with_db(
         .total_commands_processed
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    let active_time_sample = command_number.is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
+    let active_time_sample = command_number
+        .is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
         .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx =
@@ -1340,7 +1348,8 @@ pub(crate) fn process_current_command_with_db_list(
         .fetch_add(1, Ordering::Relaxed)
         + 1;
     let dispatch_db = client.db_index;
-    let active_time_sample = command_number.is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
+    let active_time_sample = command_number
+        .is_multiple_of(ACTIVE_TIME_SAMPLE_INTERVAL)
         .then(redis_core::monotonic::elapsed_start);
     let result = {
         let mut ctx = CommandContext::with_server_and_db_list(
@@ -1479,7 +1488,10 @@ pub(crate) fn queue_error_reply(client: &mut Client, err: &RedisError) {
     encode_resp2(&RespFrame::Error(payload), &mut client.reply_buf);
 }
 
-pub(crate) fn unauthenticated_protocol_limit_error(client: &Client, bytes: &[u8]) -> Option<RedisError> {
+pub(crate) fn unauthenticated_protocol_limit_error(
+    client: &Client,
+    bytes: &[u8],
+) -> Option<RedisError> {
     if client.authenticated_user.is_some() || !bytes.starts_with(b"*") {
         return None;
     }

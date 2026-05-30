@@ -200,7 +200,10 @@ fn load_manifest(path: &Path) -> Result<Manifest, ()> {
         if raw.first() == Some(&b'#') {
             continue;
         }
-        let fields: Vec<&[u8]> = raw.split(|&b| b == b' ' || b == b'\r').filter(|f| !f.is_empty()).collect();
+        let fields: Vec<&[u8]> = raw
+            .split(|&b| b == b' ' || b == b'\r')
+            .filter(|f| !f.is_empty())
+            .collect();
         if fields.len() < 6 || !fields.len().is_multiple_of(2) {
             return Err(());
         }
@@ -264,7 +267,11 @@ fn check_single_aof(
     let mut multi = 0i64;
     let mut error: Option<String> = None;
     loop {
-        let line_start_pos = if multi == 0 { cur.pos } else { cur.committed_pos };
+        let line_start_pos = if multi == 0 {
+            cur.pos
+        } else {
+            cur.committed_pos
+        };
         if multi == 0 {
             cur.committed_pos = line_start_pos;
         }
@@ -310,7 +317,10 @@ fn check_single_aof(
     if diff > 0 {
         if fix {
             if !last_file {
-                println!("Failed to truncate AOF {} because it is not the last file", name);
+                println!(
+                    "Failed to truncate AOF {} because it is not the last file",
+                    name
+                );
                 std::process::exit(1);
             }
             println!(
@@ -341,7 +351,10 @@ fn check_single_aof(
             }
             return Ok(AofCheck::Truncated);
         }
-        println!("AOF {} is not valid. Use the --fix option to try fixing it.", name);
+        println!(
+            "AOF {} is not valid. Use the --fix option to try fixing it.",
+            name
+        );
         return Err(());
     }
     Ok(AofCheck::Ok)
@@ -359,11 +372,17 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Cursor { bytes, pos: 0, committed_pos: 0, line: 1 }
+        Cursor {
+            bytes,
+            pos: 0,
+            committed_pos: 0,
+            line: 1,
+        }
     }
 
     fn consume_newline(&mut self) -> bool {
-        if self.bytes.get(self.pos) == Some(&b'\r') && self.bytes.get(self.pos + 1) == Some(&b'\n') {
+        if self.bytes.get(self.pos) == Some(&b'\r') && self.bytes.get(self.pos + 1) == Some(&b'\n')
+        {
             self.pos += 2;
             self.line += 1;
             true
@@ -382,7 +401,10 @@ impl<'a> Cursor<'a> {
         while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\r' {
             self.pos += 1;
         }
-        let num: i64 = std::str::from_utf8(&self.bytes[start..self.pos]).ok()?.parse().ok()?;
+        let num: i64 = std::str::from_utf8(&self.bytes[start..self.pos])
+            .ok()?
+            .parse()
+            .ok()?;
         if !self.consume_newline() {
             return None;
         }

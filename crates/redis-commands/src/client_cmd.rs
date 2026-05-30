@@ -35,17 +35,16 @@ use redis_protocol::frame::RespFrame;
 use redis_types::{RedisError, RedisResult, RedisString};
 use serde_json::Value;
 
-use crate::connection::*;
 use crate::acl_cmd::*;
 use crate::client_limits::*;
 use crate::command_meta::*;
 use crate::config_cmd::*;
+use crate::connection::*;
 use crate::debug_cmd::*;
-use crate::listeners::*;
-use crate::shutdown_signals::*;
 use crate::generated::{GeneratedCommandSpec, COMMANDS};
+use crate::listeners::*;
 use crate::live_config_handle;
-
+use crate::shutdown_signals::*;
 
 #[derive(Default)]
 pub struct ClientListFilters {
@@ -397,7 +396,6 @@ pub fn format_snapshot_client_info_line(
     );
     line
 }
-
 
 pub fn unknown_client_type_error(value: &[u8]) -> RedisError {
     let mut msg = b"ERR Unknown client type '".to_vec();
