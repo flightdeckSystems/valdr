@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valdr — Roadmap</title>
+<meta name="description" content="Valdr roadmap — where the safe-Rust Valkey port is headed.">
+<link rel="stylesheet" href="style.css">
+<style>
+  /* Roadmap-specific: task-item markers + comfortable list spacing. */
+  #roadmap-content li { margin: 0.3rem 0; }
+  #roadmap-content li.done { color: var(--muted); }
+  #roadmap-content li.done::marker { content: "✓ "; }
+  #roadmap-content li.todo::marker { content: "☐ "; }
+  #roadmap-content h2 { margin-top: 2rem; }
+</style>
+</head>
+<body>
+
+<!-- TOP NAV — links point back to the home page sections. -->
+<nav class="topnav">
+  <a class="brand" href="/">Valdr</a>
+  <div class="navlinks">
+    <a href="/#coverage">Coverage</a>
+    <a href="/#scope">Scope</a>
+    <a href="/#performance">Performance</a>
+    <a href="/roadmap.html">Roadmap</a>
+    <a href="/#try">Try it</a>
+  </div>
+  <a class="nav-gh" href="https://github.com/ianm199/valdr">GitHub ↗</a>
+</nav>
+
+<main>
+<section id="roadmap">
+  <div id="roadmap-content">loading roadmap…</div>
+</section>
+</main>
+
+<footer>
+  <p>
+    Valdr · alpha · BSD 3-Clause ·
+    <a href="https://github.com/ianm199/valdr">github.com/ianm199/valdr</a>
+  </p>
+</footer>
+
+<!-- ─────────────────────────────────────────────────────────────────────────
+     Minimal, self-contained Markdown renderer (no CDN / no framework).
+     Supports: # headings, nested "- " bullets (2-space indent = one level),
+     "- [ ]"/"- [x]" tasks, **bold**, `code`, and [links](url).
+     The content lives in roadmap.md — edit that, not this file.
+     ───────────────────────────────────────────────────────────────────────── -->
+<script>
+  (function () {
+    function esc(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function inline(s) {
+      s = esc(s);
+      s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
+      return s;
+    }
+    function render(md) {
+      var lines = md.replace(/\r/g, '').split('\n');
+      var out = [], depth = 0;
+      function setDepth(d) {
+        while (depth < d) { out.push('<ul>'); depth++; }
+        while (depth > d) { out.push('</ul>'); depth--; }
+      }
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var h = line.match(/^(#{1,6})\s+(.*)$/);
+        var li = line.match(/^(\s*)[-*]\s+(.*)$/);
+        if (h) { setDepth(0); out.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); continue; }
+        if (li) {
+          var level = Math.floor(li[1].replace(/\t/g, '  ').length / 2) + 1;
+          setDepth(level);
+          var txt = li[2], task = txt.match(/^\[([ xX])\]\s+(.*)$/);
+          if (task) out.push('<li class="' + (task[1].toLowerCase() === 'x' ? 'done' : 'todo') + '">' + inline(task[2]) + '</li>');
+          else out.push('<li>' + inline(txt) + '</li>');
+          continue;
+        }
+        if (line.trim() === '') { setDepth(0); continue; }
+        setDepth(0); out.push('<p>' + inline(line) + '</p>');
+      }
+      setDepth(0);
+      return out.join('\n');
+    }
+    fetch('roadmap.md', { cache: 'no-store' })
+      .then(function (r) { return r.text(); })
+      .then(function (md) { document.getElementById('roadmap-content').innerHTML = render(md); })
+      .catch(function () { document.getElementById('roadmap-content').textContent = 'roadmap.md unavailable'; });
+  })();
+</script>
+</body>
+</html>
