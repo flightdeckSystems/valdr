@@ -111,15 +111,11 @@
 <section id="performance">
   <h2>Performance</h2>
 
-<pre><code>  GET    p=1     ░░░░░             0.95× / 0.92×
-  GET    p=16    ▒▒▒▒▒▒▒           1.06× / 1.12×
-  GET    p=100   █████████         1.32× / 1.53×
-
-  Default-suite median across 23 commands             1.13× / 1.15×</code></pre>
+<pre><code id="perf-summary">loading benchmark data…</code></pre>
 
   <p class="note">
-    Throughput ratios vs Valkey 8.1.7 / 9.1.0, same host (Apple M3 Max),
-    warmed.
+    Auto-generated from the latest benchmark run. Ratio = Valdr rps ÷ Valkey
+    rps; &gt;1.00× means Valdr is faster.
   </p>
 
   <details>
@@ -133,6 +129,27 @@
         fetch('perf-data.json', { cache: 'no-store' })
           .then(function (r) { return r.json(); })
           .then(function (d) {
+            // headline summary (sparklines) from the same data
+            function bar(r) {
+              var ch = r < 1.0 ? '\u2591' : (r < 1.20 ? '\u2592' : '\u2588');
+              var n = Math.max(3, Math.min(11, Math.round(r * 6)));
+              return new Array(n + 1).join(ch);
+            }
+            function pad(x, n) { x = String(x); while (x.length < n) x += ' '; return x; }
+            var sum = document.getElementById('perf-summary');
+            if (sum) {
+              var g = {};
+              d.pipeline_depth.forEach(function (r) { g[r.workload] = r.ratio; });
+              var rs = d.default_suite.map(function (r) { return r.ratio; }).sort(function (a, b) { return a - b; });
+              var med = rs.length % 2 ? rs[(rs.length - 1) / 2] : (rs[rs.length / 2 - 1] + rs[rs.length / 2]) / 2;
+              function ln(lbl, r) { return '  ' + pad(lbl, 14) + pad(bar(r), 13) + ' ' + r.toFixed(2) + '\u00d7'; }
+              sum.textContent =
+                '  vs ' + d.reference + ' \u00b7 ' + d.hardware + ' \u00b7 warmed\n\n' +
+                ln('GET    p=1', g['GET p=1']) + '\n' +
+                ln('GET    p=16', g['GET p=16']) + '\n' +
+                ln('GET    p=100', g['GET p=100']) + '\n\n' +
+                '  ' + pad('Default-suite median (' + d.default_suite.length + ' cmds)', 27) + med.toFixed(2) + '\u00d7';
+            }
             function cls(x) { return x < 1.0 ? 'ratio behind' : (x >= 1.10 ? 'ratio win' : 'ratio'); }
             function fmt(n) { return n.toLocaleString('en-US'); }
             function rows(arr) {
